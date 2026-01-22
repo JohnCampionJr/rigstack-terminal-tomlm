@@ -37,14 +37,16 @@ namespace Porta.Pty.Linux
         }
 
         [Flags]
-        public enum TermOuptutFlag : uint
+        public enum TermOutputFlag : uint
         {
+            NONE = 0,
+            
             OPOST = 1,
             ONLCR = 4,
         }
 
         [Flags]
-        public enum TermConrolFlag : uint
+        public enum TermControlFlag : uint
         {
             CS8 = 0x30,
             CREAD = 0x80,
@@ -114,8 +116,8 @@ namespace Porta.Pty.Linux
 
             public PtyTermios(
                 TermInputFlag inputFlag,
-                TermOuptutFlag outputFlag,
-                TermConrolFlag controlFlag,
+                TermOutputFlag outputFlag,
+                TermControlFlag controlFlag,
                 TermLocalFlag localFlag,
                 TermSpeed speed,
                 System.Collections.Generic.IDictionary<TermSpecialControlCharacter, sbyte> controlCharacters)

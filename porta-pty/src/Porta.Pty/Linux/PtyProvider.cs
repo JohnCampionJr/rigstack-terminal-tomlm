@@ -56,12 +56,12 @@ namespace Porta.Pty.Linux
 
             var term = new PtyTermios(
                 inputFlag: TermInputFlag.ICRNL | TermInputFlag.IXON | TermInputFlag.IXANY | TermInputFlag.IMAXBEL | TermInputFlag.BRKINT | TermInputFlag.IUTF8,
-                outputFlag: TermOuptutFlag.OPOST | TermOuptutFlag.ONLCR,
-                controlFlag: TermConrolFlag.CREAD | TermConrolFlag.CS8 | TermConrolFlag.HUPCL,
+                outputFlag: TermOutputFlag.NONE,  // Disable all output processing for raw terminal emulation
+                controlFlag: TermControlFlag.CREAD | TermControlFlag.CS8 | TermControlFlag.HUPCL,
                 localFlag: TermLocalFlag.ICANON | TermLocalFlag.ISIG | TermLocalFlag.IEXTEN | TermLocalFlag.ECHO | TermLocalFlag.ECHOE | TermLocalFlag.ECHOK | TermLocalFlag.ECHOKE | TermLocalFlag.ECHOCTL,
                 speed: TermSpeed.B38400,
                 controlCharacters: controlCharacters);
-
+    
             // Use native shim to spawn process - this avoids W^X issues
             // by performing fork+exec entirely in native code
             var result = pty_spawn(
@@ -77,7 +77,7 @@ namespace Porta.Pty.Linux
                 throw new InvalidOperationException(
                     $"pty_spawn failed with error {result.Error}: {GetErrorMessage(result.Error)}");
             }
-
+            
             return Task.FromResult<IPtyConnection>(new PtyConnection(result.MasterFd, result.Pid));
         }
 
