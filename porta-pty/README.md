@@ -14,6 +14,7 @@ A cross-platform pseudoterminal (PTY) library for .NET that enables spawning and
 - **Simple API**: Easy-to-use async API for spawning terminal processes
 - **Full PTY Control**: Read/write streams, resize terminal, handle process exit events
 - **Unicode Support**: Full UTF-8 support including complex characters
+- **Native PTY Shim**: Includes a native C library to avoid .NET runtime permissioning issues with `fork()` on Linux/macOS
 - **.NET Standard 2.0**: Compatible with .NET Core 2.0+, .NET 5+, and .NET Framework 4.6.1+
 
 ## Installation
@@ -145,9 +146,17 @@ flowchart TB
 - Implements proper cleanup order per Microsoft documentation
 
 #### Linux & macOS
-- Uses **POSIX PTY** functions (`forkpty`, `openpty`)
+- Uses **POSIX PTY** functions (`forkpty`, `openpty`) via a native C shim library
 - Sets appropriate terminal environment variables (`TERM=xterm-256color`)
 - Clears conflicting environment variables (TMUX, screen sessions)
+
+### Native PTY Shim
+
+On Linux and macOS, Porta.Pty includes a native C shim library (`libporta_pty`) that performs the `forkpty()` + `execvp()` sequence entirely in native code.
+
+This is necessary because starting with .NET 7, the runtime enables **W^X (Write XOR Execute)** memory protection by default. W^X prevents memory pages from being both writable and executable simultaneously — a security hardening measure. This conflicts with `fork()` when running managed code in the forked child process, since the .NET runtime's JIT-compiled code and memory layout can violate the W^X invariant in the child.
+
+By delegating the fork+exec to native C code, Porta.Pty avoids running any managed .NET code in the forked child process, completely eliminating the W^X conflict. The native shim libraries are bundled in the NuGet package for each supported platform (linux-x64, linux-arm64, osx-x64, osx-arm64) and are loaded automatically at runtime.
 
 ### Key Components
 
