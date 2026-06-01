@@ -43,11 +43,6 @@ public class EscapeSequenceParser
     /// </summary>
     public event EventHandler<OscEventArgs>? Osc;
 
-    /// <summary>
-    /// Fired when DCS sequences are parsed.
-    /// </summary>
-    public event EventHandler<DcsEventArgs>? Dcs;
-
     public EscapeSequenceParser()
     {
         _state = ParserState.Ground;

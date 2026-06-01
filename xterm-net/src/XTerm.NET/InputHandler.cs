@@ -704,6 +704,7 @@ public class InputHandler
                 // End hyperlink
                 _terminal.CurrentHyperlink = null;
                 _terminal.HyperlinkId = null;
+                _terminal.RaiseHyperlinkChanged(null);
             }
             else
             {
@@ -722,6 +723,8 @@ public class InputHandler
                         }
                     }
                 }
+
+                _terminal.RaiseHyperlinkChanged(uri);
             }
         }
     }

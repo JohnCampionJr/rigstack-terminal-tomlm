@@ -476,6 +476,9 @@ public class Terminal
     
     internal void RaiseDirectoryChanged(string directory) => 
         DirectoryChanged?.Invoke(this, new TerminalEvents.DirectoryChangeEventArgs(directory));
+
+    internal void RaiseHyperlinkChanged(string? url) =>
+        HyperlinkChanged?.Invoke(this, new TerminalEvents.HyperlinkEventArgs(url));
     
     internal void RaiseWindowMoved(int x, int y) => 
         WindowMoved?.Invoke(this, new TerminalEvents.WindowMovedEventArgs(x, y));

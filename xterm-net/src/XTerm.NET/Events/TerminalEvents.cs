@@ -137,9 +137,9 @@ public static class TerminalEvents
     /// </summary>
     public class HyperlinkEventArgs : EventArgs
     {
-        public string Url { get; }
+        public string? Url { get; }
         
-        public HyperlinkEventArgs(string url)
+        public HyperlinkEventArgs(string? url)
         {
             Url = url;
         }
@@ -267,4 +267,3 @@ public static class TerminalEvents
         }
     }
 }
-

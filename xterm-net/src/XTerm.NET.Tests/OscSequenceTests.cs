@@ -127,12 +127,15 @@ public class OscSequenceTests
     {
         // Arrange
         var terminal = CreateTerminal();
+        string? changedUrl = null;
+        terminal.HyperlinkChanged += (sender, e) => changedUrl = e.Url;
 
         // Act
         terminal.Write("\x1B]8;;http://example.com\x07");
 
         // Assert
         Assert.Equal("http://example.com", terminal.CurrentHyperlink);
+        Assert.Equal("http://example.com", changedUrl);
     }
 
     [Fact]
@@ -141,12 +144,21 @@ public class OscSequenceTests
         // Arrange
         var terminal = CreateTerminal();
         terminal.Write("\x1B]8;;http://example.com\x07");
+        var eventCount = 0;
+        string? changedUrl = "not cleared";
+        terminal.HyperlinkChanged += (sender, e) =>
+        {
+            eventCount++;
+            changedUrl = e.Url;
+        };
 
         // Act
         terminal.Write("\x1B]8;;\x07");
 
         // Assert
         Assert.Null(terminal.CurrentHyperlink);
+        Assert.Equal(1, eventCount);
+        Assert.Null(changedUrl);
     }
 
     [Fact]
