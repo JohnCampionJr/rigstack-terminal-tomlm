@@ -145,8 +145,11 @@ public class SelectionManager
             if (line == null)
                 continue;
 
-            int startX = (y == start.y) ? start.x : 0;
-            int endX = (y == end.y) ? end.x : _terminal.Cols - 1;
+            int startX = Math.Clamp((y == start.y) ? start.x : 0, 0, _terminal.Cols - 1);
+            int endX = Math.Clamp((y == end.y) ? end.x : _terminal.Cols - 1, 0, _terminal.Cols - 1);
+
+            if (startX > endX)
+                continue;
 
             var lineText = line.TranslateToString(false, startX, endX + 1);
             text.Append(lineText);

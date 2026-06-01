@@ -69,6 +69,32 @@ public class SelectionTests
     }
 
     [Fact]
+    public void SelectionText_ClampsNegativeColumns()
+    {
+        var terminal = new Terminal(new TerminalOptions { Rows = 3, Cols = 10, Scrollback = 20 });
+        terminal.Write("alpha");
+
+        terminal.Selection.StartSelection(-3, 0);
+        terminal.Selection.UpdateSelection(4, 0);
+        terminal.Selection.EndSelection();
+
+        Assert.Equal("alpha", terminal.Selection.GetSelectionText());
+    }
+
+    [Fact]
+    public void SelectionText_ClampsColumnsPastRightEdge()
+    {
+        var terminal = new Terminal(new TerminalOptions { Rows = 3, Cols = 10, Scrollback = 20 });
+        terminal.Write("alpha");
+
+        terminal.Selection.StartSelection(0, 0);
+        terminal.Selection.UpdateSelection(30, 0);
+        terminal.Selection.EndSelection();
+
+        Assert.StartsWith("alpha", terminal.Selection.GetSelectionText());
+    }
+
+    [Fact]
     public void Selection_IsCleared_WhenTrimRemovesSelectedLines()
     {
         var terminal = new Terminal(new TerminalOptions { Rows = 3, Cols = 80, Scrollback = 2 });
