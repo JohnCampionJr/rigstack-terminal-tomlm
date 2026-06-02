@@ -990,6 +990,28 @@ public class BufferTests
     }
 
     [Fact]
+    public void ScrollUp_TopAnchoredPartialRegion_PreservesRowsBelowRegion()
+    {
+        var buffer = new TerminalBuffer(10, 5, 100);
+
+        SetCell(buffer, 0, "A");
+        SetCell(buffer, 1, "B");
+        SetCell(buffer, 2, "C");
+        SetCell(buffer, 3, "D");
+        SetCell(buffer, 4, ">");
+
+        buffer.SetScrollRegion(0, 3);
+        buffer.ScrollUp(1);
+
+        Assert.Equal(0, buffer.YBase);
+        Assert.Equal("B", buffer.GetLine(0)?[0].Content);
+        Assert.Equal("C", buffer.GetLine(1)?[0].Content);
+        Assert.Equal("D", buffer.GetLine(2)?[0].Content);
+        Assert.True(buffer.GetLine(3)?[0].IsSpace());
+        Assert.Equal(">", buffer.GetLine(4)?[0].Content);
+    }
+
+    [Fact]
     public void AlternateBuffer_NoScrollback_MultipleScrollOperations_YBaseRemainsZero()
     {
         // Arrange
@@ -1090,6 +1112,13 @@ public class BufferTests
         // Assert - YBase SHOULD increment because we have scrollback
         Assert.Equal(5, buffer.YBase);
         Assert.Equal(5, buffer.YDisp);
+    }
+
+    private static void SetCell(TerminalBuffer buffer, int row, string content)
+    {
+        var line = buffer.GetLine(row);
+        var cell = new BufferCell { Content = content, Width = 1 };
+        line?.SetCell(0, ref cell);
     }
 
     #endregion
