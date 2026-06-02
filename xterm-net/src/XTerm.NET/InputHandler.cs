@@ -924,6 +924,9 @@ public class InputHandler
     private void DeleteLines(Params parameters)
     {
         var count = Math.Max(parameters.GetParam(0, 1), 1);
+        // Only works in scroll region
+        if (_buffer.Y < _buffer.ScrollTop || _buffer.Y > _buffer.ScrollBottom)
+            return;
 
         for (int i = 0; i < count; i++)
         {
