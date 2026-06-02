@@ -1,5 +1,6 @@
 using XTerm.Buffer;
 using XTerm.Common;
+using XTerm.Options;
 
 namespace XTerm.Tests.Buffer;
 
@@ -1009,6 +1010,54 @@ public class BufferTests
         Assert.Equal("D", buffer.GetLine(2)?[0].Content);
         Assert.True(buffer.GetLine(3)?[0].IsSpace());
         Assert.Equal(">", buffer.GetLine(4)?[0].Content);
+    }
+
+    [Fact]
+    public void InsertLines_WithScrollback_UsesActiveBufferCoordinates()
+    {
+        var terminal = new Terminal(new TerminalOptions { Cols = 10, Rows = 5, Scrollback = 100 });
+
+        terminal.Write("s1\r\ns2\r\ns3\r\ns4\r\ns5\r\n");
+        var yBase = terminal.Buffer.YBase;
+
+        SetCell(terminal.Buffer, yBase + 0, "A");
+        SetCell(terminal.Buffer, yBase + 1, "B");
+        SetCell(terminal.Buffer, yBase + 2, "C");
+        SetCell(terminal.Buffer, yBase + 3, "D");
+        SetCell(terminal.Buffer, yBase + 4, ">");
+
+        terminal.Write("\x1b[1;4r\x1b[1;1H\x1b[1L");
+
+        Assert.Equal(yBase, terminal.Buffer.YBase);
+        Assert.True(terminal.Buffer.GetLine(yBase + 0)?[0].IsSpace());
+        Assert.Equal("A", terminal.Buffer.GetLine(yBase + 1)?[0].Content);
+        Assert.Equal("B", terminal.Buffer.GetLine(yBase + 2)?[0].Content);
+        Assert.Equal("C", terminal.Buffer.GetLine(yBase + 3)?[0].Content);
+        Assert.Equal(">", terminal.Buffer.GetLine(yBase + 4)?[0].Content);
+    }
+
+    [Fact]
+    public void DeleteLines_WithScrollback_UsesActiveBufferCoordinates()
+    {
+        var terminal = new Terminal(new TerminalOptions { Cols = 10, Rows = 5, Scrollback = 100 });
+
+        terminal.Write("s1\r\ns2\r\ns3\r\ns4\r\ns5\r\n");
+        var yBase = terminal.Buffer.YBase;
+
+        SetCell(terminal.Buffer, yBase + 0, "A");
+        SetCell(terminal.Buffer, yBase + 1, "B");
+        SetCell(terminal.Buffer, yBase + 2, "C");
+        SetCell(terminal.Buffer, yBase + 3, "D");
+        SetCell(terminal.Buffer, yBase + 4, ">");
+
+        terminal.Write("\x1b[1;4r\x1b[1;1H\x1b[1M");
+
+        Assert.Equal(yBase, terminal.Buffer.YBase);
+        Assert.Equal("B", terminal.Buffer.GetLine(yBase + 0)?[0].Content);
+        Assert.Equal("C", terminal.Buffer.GetLine(yBase + 1)?[0].Content);
+        Assert.Equal("D", terminal.Buffer.GetLine(yBase + 2)?[0].Content);
+        Assert.True(terminal.Buffer.GetLine(yBase + 3)?[0].IsSpace());
+        Assert.Equal(">", terminal.Buffer.GetLine(yBase + 4)?[0].Content);
     }
 
     [Fact]
