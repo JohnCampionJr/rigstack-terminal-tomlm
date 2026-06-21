@@ -95,6 +95,18 @@ public class SelectionTests
     }
 
     [Fact]
+    public void SelectionText_ReturnsEmpty_WhenTerminalHasNoColumns()
+    {
+        var terminal = new Terminal(new TerminalOptions { Rows = 3, Cols = 0, Scrollback = 20 });
+
+        terminal.Selection.StartSelection(0, 0);
+        terminal.Selection.UpdateSelection(0, 0);
+        terminal.Selection.EndSelection();
+
+        Assert.Equal(string.Empty, terminal.Selection.GetSelectionText());
+    }
+
+    [Fact]
     public void Selection_IsCleared_WhenTrimRemovesSelectedLines()
     {
         var terminal = new Terminal(new TerminalOptions { Rows = 3, Cols = 80, Scrollback = 2 });

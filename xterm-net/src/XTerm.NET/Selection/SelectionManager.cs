@@ -145,8 +145,12 @@ public class SelectionManager
             if (line == null)
                 continue;
 
-            int startX = Math.Clamp((y == start.y) ? start.x : 0, 0, _terminal.Cols - 1);
-            int endX = Math.Clamp((y == end.y) ? end.x : _terminal.Cols - 1, 0, _terminal.Cols - 1);
+            int lastColumn = _terminal.Cols - 1;
+            if (lastColumn < 0)
+                continue;
+
+            int startX = Math.Clamp((y == start.y) ? start.x : 0, 0, lastColumn);
+            int endX = Math.Clamp((y == end.y) ? end.x : lastColumn, 0, lastColumn);
 
             if (startX > endX)
                 continue;
