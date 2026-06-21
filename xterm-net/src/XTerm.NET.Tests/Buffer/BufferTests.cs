@@ -1008,7 +1008,7 @@ public class BufferTests
         Assert.Equal("B", buffer.GetLine(0)?[0].Content);
         Assert.Equal("C", buffer.GetLine(1)?[0].Content);
         Assert.Equal("D", buffer.GetLine(2)?[0].Content);
-        Assert.True(buffer.GetLine(3)?[0].IsSpace());
+        Assert.True(buffer.GetLine(3)?[0].IsSpace() ?? false);
         Assert.Equal(">", buffer.GetLine(4)?[0].Content);
     }
 
@@ -1029,7 +1029,7 @@ public class BufferTests
         terminal.Write("\x1b[1;4r\x1b[1;1H\x1b[1L");
 
         Assert.Equal(yBase, terminal.Buffer.YBase);
-        Assert.True(terminal.Buffer.GetLine(yBase + 0)?[0].IsSpace());
+        Assert.True(terminal.Buffer.GetLine(yBase + 0)?[0].IsSpace() ?? false);
         Assert.Equal("A", terminal.Buffer.GetLine(yBase + 1)?[0].Content);
         Assert.Equal("B", terminal.Buffer.GetLine(yBase + 2)?[0].Content);
         Assert.Equal("C", terminal.Buffer.GetLine(yBase + 3)?[0].Content);
@@ -1056,7 +1056,7 @@ public class BufferTests
         Assert.Equal("B", terminal.Buffer.GetLine(yBase + 0)?[0].Content);
         Assert.Equal("C", terminal.Buffer.GetLine(yBase + 1)?[0].Content);
         Assert.Equal("D", terminal.Buffer.GetLine(yBase + 2)?[0].Content);
-        Assert.True(terminal.Buffer.GetLine(yBase + 3)?[0].IsSpace());
+        Assert.True(terminal.Buffer.GetLine(yBase + 3)?[0].IsSpace() ?? false);
         Assert.Equal(">", terminal.Buffer.GetLine(yBase + 4)?[0].Content);
     }
 
