@@ -2,7 +2,7 @@
 
 ## Summary
 
-This branch fixes DEC origin-mode cursor positioning with scroll regions. These changes are core terminal emulator behavior and are not specific to Termrig, Avalonia, ConPTY, or any host renderer.
+This change fixes DEC origin-mode cursor positioning with scroll regions. These changes are core terminal emulator behavior and are not specific to Termrig, Avalonia, ConPTY, or any host renderer.
 
 The fixed behavior is:
 
@@ -38,7 +38,7 @@ If the emulator treats those row coordinates as absolute screen rows, applicatio
 ```csharp
 var terminal = new Terminal(new TerminalOptions { Cols = 20, Rows = 5 });
 var handler = new InputHandler(terminal);
-terminal.Buffer.SetCursor(10, 10);
+terminal.Buffer.SetCursor(10, 4);
 
 var parameters = new Params();
 parameters.AddParam(2);
@@ -85,7 +85,7 @@ Assert.Equal(3, terminal.Buffer.Y);
 
 ## Not included
 
-This branch intentionally does not include:
+This change intentionally does not include:
 
 - host-rendering changes
 - PTY or ConPTY line-ending policy
@@ -93,7 +93,7 @@ This branch intentionally does not include:
 - Termrig-specific output normalization
 - Docker Compose cell-width fixes from the earlier Docker progress branch
 
-Those are separate concerns. This branch is limited to standard VT scroll-region and origin-mode semantics in XTerm.NET.
+Those are separate concerns. This change is limited to standard VT scroll-region and origin-mode semantics in XTerm.NET.
 
 ## Validation
 
@@ -103,10 +103,4 @@ Run from this repository root:
 dotnet test src/XTerm.NET.slnx --no-restore
 ```
 
-Result on this branch:
-
-```text
-Passed: 589
-Failed: 0
-Skipped: 0
-```
+Expected result: all tests pass.

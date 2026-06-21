@@ -171,6 +171,26 @@ public class InputHandlerTests
     }
 
     [Fact]
+    public void HandleCsi_CursorPosition_ClampsLargeOriginModeRowToScrollBottom()
+    {
+        // Arrange
+        var terminal = CreateTerminal();
+        var handler = new InputHandler(terminal);
+        terminal.Buffer.SetScrollRegion(4, 19);
+        terminal.OriginMode = true;
+        var params_ = new Params();
+        params_.AddParam(int.MaxValue);
+        params_.AddParam(20);
+
+        // Act
+        handler.HandleCsi("H", params_);
+
+        // Assert
+        Assert.Equal(19, terminal.Buffer.X);
+        Assert.Equal(19, terminal.Buffer.Y);
+    }
+
+    [Fact]
     public void HandleCsi_EraseInDisplay_ClearBelow()
     {
         // Arrange
