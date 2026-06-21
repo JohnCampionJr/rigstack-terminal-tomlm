@@ -850,6 +850,7 @@ public class InputHandler
     {
         var row = Math.Max(parameters.GetParam(0, 1), 1) - 1;
         var col = Math.Max(parameters.GetParam(1, 1), 1) - 1;
+        row = GetAbsoluteCursorRow(row);
         _buffer.SetCursor(col, row);
     }
 
@@ -1015,17 +1016,7 @@ public class InputHandler
     {
         // VPA - Line Position Absolute (CSI d)
         var row = Math.Max(parameters.GetParam(0, 1), 1) - 1;
-
-        // Respect origin mode
-        if (_terminal.OriginMode)
-        {
-            row = Math.Clamp(row, _buffer.ScrollTop, _buffer.ScrollBottom);
-        }
-        else
-        {
-            row = Math.Clamp(row, 0, _terminal.Rows - 1);
-        }
-
+        row = GetAbsoluteCursorRow(row);
         _buffer.SetCursor(_buffer.X, row);
     }
 
@@ -1289,6 +1280,24 @@ public class InputHandler
         var top = Math.Max(parameters.GetParam(0, 1), 1) - 1;
         var bottom = Math.Max(parameters.GetParam(1, _terminal.Rows), 1) - 1;
         _buffer.SetScrollRegion(top, bottom);
+        MoveCursorToHome();
+    }
+
+    private int GetAbsoluteCursorRow(int row)
+    {
+        if (_terminal.OriginMode)
+        {
+            long absoluteRow = (long)_buffer.ScrollTop + row;
+            return (int)Math.Clamp(absoluteRow, _buffer.ScrollTop, _buffer.ScrollBottom);
+        }
+
+        return Math.Clamp(row, 0, _terminal.Rows - 1);
+    }
+
+    private void MoveCursorToHome()
+    {
+        var row = _terminal.OriginMode ? _buffer.ScrollTop : 0;
+        _buffer.SetCursor(0, row);
     }
 
     private void WindowManipulation(Params parameters)
@@ -1546,7 +1555,7 @@ public class InputHandler
 
                 case TerminalMode.Origin:
                     _terminal.OriginMode = true;
-                    _buffer.SetCursor(0, 0);
+                    MoveCursorToHome();
                     break;
 
                 case TerminalMode.Wraparound:
@@ -1735,7 +1744,7 @@ public class InputHandler
 
                 case TerminalMode.Origin:
                     _terminal.OriginMode = false;
-                    _buffer.SetCursor(0, 0);
+                    MoveCursorToHome();
                     break;
 
                 case TerminalMode.Wraparound:
