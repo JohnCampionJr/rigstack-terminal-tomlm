@@ -104,6 +104,8 @@ public class SelectionTests
         terminal.Selection.EndSelection();
 
         Assert.Equal(string.Empty, terminal.Selection.GetSelectionText());
+    }
+    
     public void SelectionText_UsesLineFeedLineEndings()
     {
         var terminal = new Terminal(new TerminalOptions { Rows = 3, Cols = 80, Scrollback = 20 });
