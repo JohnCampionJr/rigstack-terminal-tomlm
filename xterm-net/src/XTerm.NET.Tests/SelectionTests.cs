@@ -104,6 +104,22 @@ public class SelectionTests
         terminal.Selection.EndSelection();
 
         Assert.Equal(string.Empty, terminal.Selection.GetSelectionText());
+    public void SelectionText_UsesLineFeedLineEndings()
+    {
+        var terminal = new Terminal(new TerminalOptions { Rows = 3, Cols = 80, Scrollback = 20 });
+        terminal.Write("alpha\r\nbeta\r\ngamma");
+
+        terminal.Selection.StartSelection(0, 0);
+        terminal.Selection.UpdateSelection(4, 2);
+        terminal.Selection.EndSelection();
+
+        var selectedText = terminal.Selection.GetSelectionText();
+
+        Assert.DoesNotContain("\r", selectedText);
+        Assert.Equal(2, selectedText.Count(ch => ch == '\n'));
+        Assert.StartsWith("alpha", selectedText);
+        Assert.Contains("\nbeta", selectedText);
+        Assert.EndsWith("gamma", selectedText);
     }
 
     [Fact]

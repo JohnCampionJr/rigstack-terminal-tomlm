@@ -133,15 +133,29 @@ public static class TerminalEvents
     }
 
     /// <summary>
-    /// Hyperlink event - fired when a hyperlink is encountered.
+    /// Hyperlink event - fired when a hyperlink is encountered or cleared.
     /// </summary>
     public class HyperlinkEventArgs : EventArgs
     {
+        /// <summary>
+        /// Hyperlink URL. Empty when <see cref="IsCleared"/> is true.
+        /// </summary>
         public string Url { get; }
+
+        /// <summary>
+        /// True when the active hyperlink was cleared.
+        /// </summary>
+        public bool IsCleared { get; }
         
         public HyperlinkEventArgs(string url)
+            : this(url, false)
+        {
+        }
+
+        internal HyperlinkEventArgs(string url, bool isCleared)
         {
             Url = url;
+            IsCleared = isCleared;
         }
     }
 
@@ -267,4 +281,3 @@ public static class TerminalEvents
         }
     }
 }
-

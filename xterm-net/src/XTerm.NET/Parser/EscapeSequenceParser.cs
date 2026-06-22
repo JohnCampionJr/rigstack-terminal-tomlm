@@ -44,9 +44,12 @@ public class EscapeSequenceParser
     public event EventHandler<OscEventArgs>? Osc;
 
     /// <summary>
-    /// Fired when DCS sequences are parsed.
+    /// DCS parsing is not implemented yet. This event is retained for source compatibility.
     /// </summary>
+#pragma warning disable CS0067
+    [Obsolete("DCS parsing is not implemented yet; this event is retained for source compatibility.")]
     public event EventHandler<DcsEventArgs>? Dcs;
+#pragma warning restore CS0067
 
     public EscapeSequenceParser()
     {
