@@ -1970,7 +1970,7 @@ public class InputHandler
         int regionalRuneCount = 0;
         foreach (Rune rune in text.EnumerateRunes())
         {
-            int runeWidth = Emoji.IsEmoji(rune.ToString()) ? 2 : UnicodeCalculator.GetWidth(rune);
+            int runeWidth = UnicodeCalculator.GetWidth(rune);
             if (runeWidth >= 0)
             {
                 if (rune.Value == Emoji.ZeroWidthJoiner || rune.Value == Emoji.ObjectReplacementCharacter)

@@ -131,6 +131,93 @@ public class InputHandlerTests
     }
 
     [Fact]
+    public void HandleCsi_CursorForward_ClampsAtRightMarginWithoutWrapping()
+    {
+        // Arrange
+        var terminal = CreateTerminal(cols: 10, rows: 3);
+        var handler = new InputHandler(terminal);
+        terminal.Buffer.SetCursor(7, 0);
+        var params_ = new Params();
+        params_.AddParam(20);
+
+        // Act
+        handler.HandleCsi("C", params_);
+
+        // Assert
+        Assert.Equal(9, terminal.Buffer.X);
+        Assert.Equal(0, terminal.Buffer.Y);
+    }
+
+    [Fact]
+    public void HandleCsi_EraseChars_DoesNotMoveCursor()
+    {
+        // Arrange
+        var terminal = CreateTerminal(cols: 20, rows: 3);
+        terminal.Write("abcdef");
+        terminal.Buffer.SetCursor(2, 0);
+
+        // Act
+        terminal.Write("\x1B[3X");
+
+        // Assert
+        Assert.Equal(2, terminal.Buffer.X);
+        Assert.Equal(0, terminal.Buffer.Y);
+        Assert.Equal("ab   f", terminal.Buffer.Lines[0]?.TranslateToString(true));
+    }
+
+    [Fact]
+    public void Print_CheckMarkWithoutEmojiPresentation_IsSingleWidth()
+    {
+        // Arrange
+        var terminal = CreateTerminal(cols: 20, rows: 3);
+
+        // Act
+        terminal.Write("\u2714X");
+
+        // Assert
+        Assert.Equal(2, terminal.Buffer.X);
+        Assert.Equal("\u2714X", terminal.Buffer.Lines[0]?.TranslateToString(true));
+        Assert.Equal(1, terminal.Buffer.Lines[0]?[0].Width);
+        Assert.Equal(1, terminal.Buffer.Lines[0]?[1].Width);
+    }
+
+    [Fact]
+    public void Print_CheckMarkWithEmojiPresentation_IsDoubleWidth()
+    {
+        // Arrange
+        var terminal = CreateTerminal(cols: 20, rows: 3);
+
+        // Act
+        terminal.Write("\u2714\uFE0FX");
+
+        // Assert
+        Assert.Equal(3, terminal.Buffer.X);
+        Assert.Equal("\u2714\uFE0FX", terminal.Buffer.Lines[0]?.TranslateToString(true));
+        Assert.Equal(2, terminal.Buffer.Lines[0]?[0].Width);
+        Assert.Equal(0, terminal.Buffer.Lines[0]?[1].Width);
+        Assert.Equal(1, terminal.Buffer.Lines[0]?[2].Width);
+    }
+
+    [Fact]
+    public void Write_DockerComposeNetworkLine_KeepsStatusColumnAfterCheckMark()
+    {
+        // Arrange
+        var terminal = CreateTerminal(cols: 80, rows: 3);
+        const string prefix = " \u2714 Network docker_default";
+
+        // Act
+        terminal.Write(prefix);
+        terminal.Write("\x1B[28C");
+        terminal.Write("Created");
+
+        // Assert
+        var line = terminal.Buffer.Lines[0];
+        Assert.NotNull(line);
+        int statusColumn = prefix.Length + 28;
+        Assert.Equal("Created", line.TranslateToString(false, statusColumn, statusColumn + 7));
+    }
+
+    [Fact]
     public void HandleCsi_CursorBackward_MovesCursor()
     {
         // Arrange
