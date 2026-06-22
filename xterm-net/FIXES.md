@@ -55,7 +55,7 @@ If the emulator treats those row coordinates as absolute screen rows, applicatio
 Run Docker Compose in a narrow-ish terminal where Compose emits progress rows:
 
 ```cmd
-cd C:\Code\Pneuma\docker
+cd <path-to-your-compose-project>
 docker compose up -d
 docker compose down
 ```
