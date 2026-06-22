@@ -145,8 +145,15 @@ public class SelectionManager
             if (line == null)
                 continue;
 
-            int startX = (y == start.y) ? start.x : 0;
-            int endX = (y == end.y) ? end.x : _terminal.Cols - 1;
+            int lastColumn = _terminal.Cols - 1;
+            if (lastColumn < 0)
+                continue;
+
+            int startX = Math.Clamp((y == start.y) ? start.x : 0, 0, lastColumn);
+            int endX = Math.Clamp((y == end.y) ? end.x : lastColumn, 0, lastColumn);
+
+            if (startX > endX)
+                continue;
 
             var lineText = line.TranslateToString(false, startX, endX + 1);
             text.Append(lineText);
@@ -154,7 +161,7 @@ public class SelectionManager
             // Add line break if not last line and line doesn't wrap
             if (y < end.y && !line.IsWrapped)
             {
-                text.AppendLine();
+                text.Append('\n');
             }
         }
 
