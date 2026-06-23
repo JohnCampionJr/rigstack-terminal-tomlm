@@ -535,9 +535,9 @@ namespace Iciclecreek.Terminal
 
         public XTerm.Terminal Terminal => _terminal;
 
-        public void WaitForExit(int ms) => _ptyConnection!.WaitForExit(ms);
+        public void WaitForExit(int ms) => _ptyConnection?.WaitForExit(ms);
 
-        public void Kill() => _ptyConnection!.Kill();
+        public void Kill() => _ptyConnection?.Kill();
 
         /// <summary>
         /// Pastes text from the clipboard into the terminal.
@@ -597,7 +597,7 @@ namespace Iciclecreek.Terminal
         /// <summary>
         /// Gets the exit code of the launched PTY process after it has terminated.
         /// </summary>
-        public int ExitCode => _ptyConnection!.ExitCode;
+        public int ExitCode => _ptyConnection?.ExitCode ?? -1;
 
         /// <summary>
         /// Gets the operating system process identifier of the launched PTY process.
