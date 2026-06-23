@@ -1920,6 +1920,11 @@ namespace Iciclecreek.Terminal
                             }
 
                             this.RequestInvalidate();
+                            
+                            await Dispatcher.UIThread.InvokeAsync(() =>
+                            {
+                                ProcessExited?.Invoke(this, new ProcessExitedEventArgs(exitCode));
+                            });
                         }
                         break;
                     }
