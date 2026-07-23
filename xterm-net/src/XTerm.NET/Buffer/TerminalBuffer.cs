@@ -9,6 +9,7 @@ namespace XTerm.Buffer;
 public class TerminalBuffer
 {
     private readonly CircularList<BufferLine> _lines;
+    private readonly bool _hasScrollback;
     private int _yDisp;
     private int _yBase;
     private int _y;
@@ -91,8 +92,9 @@ public class TerminalBuffer
 
     public SavedCursor SavedCursorState { get; set; }
 
-    public TerminalBuffer(int cols, int rows, int scrollback)
+    public TerminalBuffer(int cols, int rows, int scrollback, bool hasScrollback = true)
     {
+        _hasScrollback = hasScrollback;
         _cols = cols;
         _rows = rows;
         _lines = new CircularList<BufferLine>(rows + scrollback);
@@ -110,6 +112,8 @@ public class TerminalBuffer
             _lines.Push(new BufferLine(cols, BufferCell.Space));
         }
     }
+
+    private bool IsReflowEnabled => _hasScrollback && _lines.MaxLength > _rows;
 
     /// <summary>
     /// Gets a line from the buffer.
@@ -290,30 +294,53 @@ public class TerminalBuffer
     /// </summary>
     public void Resize(int newCols, int newRows)
     {
-        // Calculate new max length keeping the same scrollback capacity
+        var nullCell = BufferCell.Space;
         var newMaxLength = newRows + (_lines.MaxLength - _rows);
 
-        // Resize max length of circular list (may drop oldest lines if shrinking)
-        _lines.Resize(newMaxLength);
-
-        // Resize existing lines to the new column count
-        var fillCell = BufferCell.Space;
-        for (int i = 0; i < _lines.Length; i++)
+        if (newMaxLength > _lines.MaxLength)
         {
-            _lines[i]?.Resize(newCols, fillCell);
+            _lines.Resize(newMaxLength);
         }
 
-        // Ensure we have at least viewport rows available
-        while (_lines.Length < newRows)
+        if (_lines.Length > 0)
         {
-            _lines.Push(new BufferLine(newCols, fillCell));
+            if (_cols < newCols)
+            {
+                for (int i = 0; i < _lines.Length; i++)
+                {
+                    _lines[i]?.Resize(newCols, nullCell);
+                }
+            }
+
+            while (_lines.Length < newRows)
+            {
+                _lines.Push(new BufferLine(newCols, nullCell));
+            }
+
+            _yBase = Math.Min(_yBase, Math.Max(0, _lines.Length - newRows));
+            _yDisp = Math.Clamp(_yDisp, 0, _yBase);
+
+            if (IsReflowEnabled && newCols != _cols)
+            {
+                if (newCols > _cols)
+                {
+                    ReflowLarger(newCols, newRows);
+                }
+                else
+                {
+                    ReflowSmaller(newCols, newRows);
+                }
+            }
+
+            if (_cols > newCols)
+            {
+                for (int i = 0; i < _lines.Length; i++)
+                {
+                    _lines[i]?.Resize(newCols, nullCell);
+                }
+            }
         }
 
-        // If we have fewer rows, ensure ybase/ydisp stay in range
-        _yBase = Math.Min(_yBase, Math.Max(0, _lines.Length - newRows));
-        _yDisp = Math.Clamp(_yDisp, 0, _yBase);
-
-        // Update scroll region and dimensions
         var oldRows = _rows;
         _cols = newCols;
         _rows = newRows;
@@ -328,9 +355,260 @@ public class TerminalBuffer
         }
         _scrollTop = Math.Min(_scrollTop, newRows - 1);
 
-        // Clamp cursor within new bounds
-        _x = Math.Clamp(_x, 0, _cols - 1);
-        _y = Math.Clamp(_y, 0, _rows - 1);
+        _x = Math.Min(_x, newCols - 1);
+        _y = Math.Min(_y, newRows - 1);
+        SavedCursorState.X = Math.Min(SavedCursorState.X, newCols - 1);
+
+        if (newMaxLength < _lines.MaxLength)
+        {
+            var amountToTrim = _lines.Length - newMaxLength;
+            if (amountToTrim > 0)
+            {
+                _lines.TrimStart(amountToTrim);
+                Trimmed?.Invoke(amountToTrim);
+                _yBase = Math.Max(_yBase - amountToTrim, 0);
+                _yDisp = Math.Max(_yDisp - amountToTrim, 0);
+                SavedCursorState.Y = Math.Max(SavedCursorState.Y - amountToTrim, 0);
+            }
+            _lines.Resize(newMaxLength);
+        }
+    }
+
+    private void ReflowLarger(int newCols, int newRows)
+    {
+        var nullCell = BufferCell.Space;
+        var toRemove = BufferReflow.ReflowLargerGetLinesToRemove(
+            _lines, _cols, newCols, _yBase + _y, nullCell);
+        if (toRemove.Length > 0)
+        {
+            var newLayoutResult = BufferReflow.ReflowLargerCreateNewLayout(_lines, toRemove);
+            BufferReflow.ReflowLargerApplyNewLayout(_lines, newLayoutResult.Layout);
+            ReflowLargerAdjustViewport(newCols, newRows, newLayoutResult.CountRemoved);
+        }
+    }
+
+    private void ReflowLargerAdjustViewport(int newCols, int newRows, int countRemoved)
+    {
+        var nullCell = BufferCell.Space;
+        var viewportAdjustments = countRemoved;
+        while (viewportAdjustments-- > 0)
+        {
+            if (_yBase == 0)
+            {
+                if (_y > 0)
+                {
+                    _y--;
+                }
+                if (_lines.Length < newRows)
+                {
+                    _lines.Push(new BufferLine(newCols, nullCell));
+                }
+            }
+            else
+            {
+                if (_yDisp == _yBase)
+                {
+                    _yDisp--;
+                }
+                _yBase--;
+            }
+        }
+        SavedCursorState.Y = Math.Max(SavedCursorState.Y - countRemoved, 0);
+    }
+
+    private void ReflowSmaller(int newCols, int newRows)
+    {
+        var nullCell = BufferCell.Space;
+        var toInsert = new List<(int Start, List<BufferLine> NewLines)>();
+        var countToInsert = 0;
+
+        for (var y = _lines.Length - 1; y >= 0; y--)
+        {
+            var nextLine = _lines[y];
+            if (nextLine == null || (!nextLine.IsWrapped && nextLine.GetTrimmedLength() <= newCols))
+            {
+                continue;
+            }
+
+            var wrappedLines = new List<BufferLine> { nextLine };
+            while (nextLine.IsWrapped && y > 0)
+            {
+                nextLine = _lines[--y]!;
+                wrappedLines.Insert(0, nextLine);
+            }
+
+            if (BufferReflow.HasNonNormalLineAttribute(wrappedLines))
+            {
+                continue;
+            }
+
+            var absoluteY = _yBase + _y;
+            if (absoluteY >= y && absoluteY < y + wrappedLines.Count)
+            {
+                continue;
+            }
+
+            var lastLineLength = wrappedLines[^1].GetTrimmedLength();
+            var destLineLengths = BufferReflow.ReflowSmallerGetNewLineLengths(wrappedLines, _cols, newCols);
+            var linesToAdd = destLineLengths.Length - wrappedLines.Count;
+            int trimmedLines;
+            if (_yBase == 0 && _y != _lines.Length - 1)
+            {
+                trimmedLines = Math.Max(0, _y - _lines.MaxLength + linesToAdd);
+            }
+            else
+            {
+                trimmedLines = Math.Max(0, _lines.Length - _lines.MaxLength + linesToAdd);
+            }
+
+            var newLines = new List<BufferLine>();
+            for (var i = 0; i < linesToAdd; i++)
+            {
+                newLines.Add(GetBlankLine(AttributeData.Default, isWrapped: true));
+            }
+
+            if (newLines.Count > 0)
+            {
+                toInsert.Add((y + wrappedLines.Count + countToInsert, newLines));
+                countToInsert += newLines.Count;
+            }
+
+            wrappedLines.AddRange(newLines);
+
+            var destLineIndex = destLineLengths.Length - 1;
+            var destCol = destLineLengths[destLineIndex];
+            if (destCol == 0)
+            {
+                destLineIndex--;
+                destCol = destLineLengths[destLineIndex];
+            }
+
+            var srcLineIndex = wrappedLines.Count - linesToAdd - 1;
+            var srcCol = lastLineLength;
+            while (srcLineIndex >= 0)
+            {
+                var cellsToCopy = Math.Min(srcCol, destCol);
+                if (wrappedLines[destLineIndex] == null)
+                {
+                    break;
+                }
+
+                wrappedLines[destLineIndex].CopyCellsFrom(
+                    wrappedLines[srcLineIndex], srcCol - cellsToCopy, destCol - cellsToCopy, cellsToCopy, true);
+                destCol -= cellsToCopy;
+                if (destCol == 0)
+                {
+                    destLineIndex--;
+                    if (destLineIndex < 0)
+                    {
+                        break;
+                    }
+                    destCol = destLineLengths[destLineIndex];
+                }
+                srcCol -= cellsToCopy;
+                if (srcCol == 0)
+                {
+                    srcLineIndex--;
+                    var wrappedLinesIndex = Math.Max(srcLineIndex, 0);
+                    srcCol = BufferReflow.GetWrappedLineTrimmedLength(wrappedLines, wrappedLinesIndex, _cols);
+                }
+            }
+
+            for (var i = 0; i < wrappedLines.Count && i < destLineLengths.Length; i++)
+            {
+                if (destLineLengths[i] < newCols)
+                {
+                    wrappedLines[i].ReplaceCells(destLineLengths[i], newCols, nullCell);
+                }
+            }
+
+            var viewportAdjustments = linesToAdd - trimmedLines;
+            while (viewportAdjustments-- > 0)
+            {
+                if (_yBase == 0)
+                {
+                    if (_y < newRows - 1)
+                    {
+                        _y++;
+                        _lines.Pop();
+                    }
+                    else
+                    {
+                        _yBase++;
+                        _yDisp++;
+                    }
+                }
+                else
+                {
+                    if (_yBase < Math.Min(_lines.MaxLength, _lines.Length + countToInsert) - newRows)
+                    {
+                        if (_yBase == _yDisp)
+                        {
+                            _yDisp++;
+                        }
+                        _yBase++;
+                    }
+                }
+            }
+
+            SavedCursorState.Y = Math.Min(SavedCursorState.Y + linesToAdd, _yBase + newRows - 1);
+        }
+
+        if (toInsert.Count > 0)
+        {
+            var originalLines = new List<BufferLine>(_lines.Length);
+            for (var i = 0; i < _lines.Length; i++)
+            {
+                originalLines.Add(_lines[i]!);
+            }
+
+            var originalLinesLength = originalLines.Count;
+            RebuildWithInsertions(originalLines, toInsert, countToInsert);
+
+            var amountToTrim = Math.Max(0, originalLinesLength + countToInsert - _lines.MaxLength);
+            if (amountToTrim > 0)
+            {
+                _yBase = Math.Max(_yBase - amountToTrim, 0);
+                _yDisp = Math.Max(_yDisp - amountToTrim, 0);
+                SavedCursorState.Y = Math.Max(SavedCursorState.Y - amountToTrim, 0);
+                Trimmed?.Invoke(amountToTrim);
+            }
+        }
+    }
+
+    private void RebuildWithInsertions(
+        IReadOnlyList<BufferLine> originalLines,
+        IReadOnlyList<(int Start, List<BufferLine> NewLines)> toInsert,
+        int countInserted)
+    {
+        var originalLinesLength = originalLines.Count;
+        _lines.SetLength(Math.Min(_lines.MaxLength, originalLinesLength + countInserted));
+
+        var originalLineIndex = originalLinesLength - 1;
+        var nextToInsertIndex = 0;
+        var nextToInsert = nextToInsertIndex < toInsert.Count ? toInsert[nextToInsertIndex] : ((int Start, List<BufferLine> NewLines)?)null;
+        var countInsertedSoFar = 0;
+
+        for (var i = Math.Min(_lines.MaxLength - 1, originalLinesLength + countInserted - 1); i >= 0; i--)
+        {
+            if (nextToInsert.HasValue && nextToInsert.Value.Start > originalLineIndex + countInsertedSoFar)
+            {
+                var insert = nextToInsert.Value;
+                for (var nextI = insert.NewLines.Count - 1; nextI >= 0; nextI--)
+                {
+                    _lines[i--] = insert.NewLines[nextI];
+                }
+                i++;
+
+                countInsertedSoFar += insert.NewLines.Count;
+                nextToInsertIndex++;
+                nextToInsert = nextToInsertIndex < toInsert.Count ? toInsert[nextToInsertIndex] : null;
+            }
+            else
+            {
+                _lines[i] = originalLines[originalLineIndex--];
+            }
+        }
     }
 
     /// <summary>

@@ -200,6 +200,47 @@ public class BufferLine : IEnumerable<BufferCell>
     }
 
     /// <summary>
+    /// Gets the width of the cell at the given column.
+    /// </summary>
+    public int GetWidth(int index)
+    {
+        if (index < 0 || index >= _length)
+            return 1;
+        return _cells[index].Width;
+    }
+
+    /// <summary>
+    /// Returns whether the cell at the given column has content.
+    /// </summary>
+    public bool HasContent(int index)
+    {
+        if (index < 0 || index >= _length)
+            return false;
+        var cell = _cells[index];
+        return !cell.IsSpace() && !cell.IsEmpty();
+    }
+
+    /// <summary>
+    /// Replaces cells in the range [startCol, endCol) with the fill cell.
+    /// </summary>
+    public void ReplaceCells(int startCol, int endCol, BufferCell fillCell)
+    {
+        if (startCol > 0 && GetWidth(startCol - 1) == 2)
+        {
+            _cells[startCol - 1] = fillCell;
+        }
+        if (endCol < _length && GetWidth(endCol - 1) == 2)
+        {
+            _cells[endCol] = fillCell;
+        }
+        while (startCol < endCol && startCol < _length)
+        {
+            _cells[startCol++] = fillCell;
+        }
+        Cache = null;
+    }
+
+    /// <summary>
     /// Gets the last non-whitespace cell index.
     /// </summary>
     public int GetTrimmedLength()
@@ -207,7 +248,7 @@ public class BufferLine : IEnumerable<BufferCell>
         for (int i = _length - 1; i >= 0; i--)
         {
             if (!_cells[i].IsSpace() && !_cells[i].IsEmpty())
-                return i + 1;
+                return i + Math.Max(_cells[i].Width, 1);
         }
         return 0;
     }

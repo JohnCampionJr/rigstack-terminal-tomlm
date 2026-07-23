@@ -178,7 +178,7 @@ public class Terminal
 
         // Initialize buffers
         _normalBuffer = new Buffer.TerminalBuffer(Cols, Rows, Options.Scrollback);
-        _altBuffer = new Buffer.TerminalBuffer(Cols, Rows, 0); // Alt buffer has no scrollback
+        _altBuffer = new Buffer.TerminalBuffer(Cols, Rows, 0, hasScrollback: false);
         _buffer = _normalBuffer;
         _usingAltBuffer = false;
 

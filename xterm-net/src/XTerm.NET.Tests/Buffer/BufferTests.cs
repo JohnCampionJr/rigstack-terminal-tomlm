@@ -1187,11 +1187,381 @@ public class BufferTests
         Assert.Equal(5, buffer.YDisp);
     }
 
+    #endregion
+
+    #region Reflow Tests
+
+    [Fact]
+    public void Reflow_DoesNotWrapEmptyLines()
+    {
+        var buffer = new TerminalBuffer(80, 24, 1000);
+        var initialLength = buffer.Lines.Length;
+
+        buffer.Resize(75, 24);
+
+        Assert.Equal(initialLength, buffer.Lines.Length);
+    }
+
+    [Fact]
+    public void Reflow_ShrinksRowLength()
+    {
+        var buffer = new TerminalBuffer(80, 24, 1000);
+        buffer.Resize(5, 10);
+
+        for (var i = 0; i < 10; i++)
+        {
+            Assert.Equal(5, buffer.Lines[i]!.Length);
+        }
+    }
+
+    [Fact]
+    public void Reflow_WrapsAndUnwrapsLines()
+    {
+        var buffer = new TerminalBuffer(80, 24, 1000);
+        buffer.Resize(5, 10);
+
+        var firstLine = buffer.Lines[0]!;
+        for (var i = 0; i < 5; i++)
+        {
+            SetCell(firstLine, i, ((char)('a' + i)).ToString());
+        }
+
+        buffer.SetCursorRaw(0, 1);
+        Assert.Equal("abcde", buffer.Lines[0]!.TranslateToString());
+
+        buffer.Resize(1, 10);
+        Assert.Equal("a", buffer.Lines[0]!.TranslateToString());
+        Assert.Equal("b", buffer.Lines[1]!.TranslateToString());
+        Assert.Equal("c", buffer.Lines[2]!.TranslateToString());
+        Assert.Equal("d", buffer.Lines[3]!.TranslateToString());
+        Assert.Equal("e", buffer.Lines[4]!.TranslateToString());
+
+        buffer.Resize(5, 10);
+        Assert.Equal("abcde", buffer.Lines[0]!.TranslateToString());
+    }
+
+    [Fact]
+    public void Reflow_RemovesCorrectRowsWhenGrowingLarger()
+    {
+        var buffer = new TerminalBuffer(80, 24, 1000);
+        buffer.Resize(10, 10);
+        buffer.SetCursorRaw(0, 2);
+
+        for (var i = 0; i < 10; i++)
+        {
+            SetCell(buffer.Lines[0]!, i, ((char)('a' + i)).ToString());
+            SetCell(buffer.Lines[1]!, i, ((char)('0' + i)).ToString());
+        }
+
+        buffer.Resize(2, 10);
+        Assert.Equal("ab", buffer.Lines[0]!.TranslateToString());
+        Assert.Equal("cd", buffer.Lines[1]!.TranslateToString());
+        Assert.Equal("ef", buffer.Lines[2]!.TranslateToString());
+        Assert.Equal("gh", buffer.Lines[3]!.TranslateToString());
+        Assert.Equal("ij", buffer.Lines[4]!.TranslateToString());
+        Assert.Equal("01", buffer.Lines[5]!.TranslateToString());
+        Assert.Equal("23", buffer.Lines[6]!.TranslateToString());
+        Assert.Equal("45", buffer.Lines[7]!.TranslateToString());
+        Assert.Equal("67", buffer.Lines[8]!.TranslateToString());
+        Assert.Equal("89", buffer.Lines[9]!.TranslateToString());
+
+        buffer.Resize(10, 10);
+        Assert.Equal("abcdefghij", buffer.Lines[0]!.TranslateToString());
+        Assert.Equal("0123456789", buffer.Lines[1]!.TranslateToString());
+    }
+
+    [Fact]
+    public void Reflow_TransfersCombinedCharData()
+    {
+        var buffer = new TerminalBuffer(80, 24, 1000);
+        buffer.Resize(4, 3);
+        buffer.SetCursorRaw(0, 2);
+
+        SetCell(buffer.Lines[0]!, 0, "a");
+        SetCell(buffer.Lines[0]!, 1, "b");
+        SetCell(buffer.Lines[0]!, 2, "c");
+        SetCell(buffer.Lines[0]!, 3, "😁");
+
+        buffer.Resize(2, 3);
+        Assert.Equal("ab", buffer.Lines[0]!.TranslateToString());
+        Assert.Equal("c😁", buffer.Lines[1]!.TranslateToString());
+    }
+
+    [Fact]
+    public void Reflow_WideCharactersWhenShrinking()
+    {
+        var buffer = new TerminalBuffer(80, 24, 1000);
+        buffer.Resize(12, 10);
+        buffer.SetCursorRaw(0, 2);
+
+        for (var i = 0; i < 12; i += 4)
+        {
+            SetWideCell(buffer.Lines[0]!, i, "汉");
+            SetWideCell(buffer.Lines[1]!, i, "汉");
+        }
+        for (var i = 2; i < 12; i += 4)
+        {
+            SetWideCell(buffer.Lines[0]!, i, "语");
+            SetWideCell(buffer.Lines[1]!, i, "语");
+        }
+        buffer.Lines[1]!.IsWrapped = true;
+
+        buffer.Resize(11, 10);
+        Assert.Equal("汉语汉语汉", buffer.Lines[0]!.TranslateToString(trimRight: true));
+        Assert.Equal("语汉语汉语", buffer.Lines[1]!.TranslateToString(trimRight: true));
+        Assert.Equal("汉语", buffer.Lines[2]!.TranslateToString(trimRight: true));
+
+        buffer.Resize(7, 10);
+        Assert.Equal("汉语汉", buffer.Lines[0]!.TranslateToString(trimRight: true));
+        Assert.Equal("语汉语", buffer.Lines[1]!.TranslateToString(trimRight: true));
+        Assert.Equal("汉语汉", buffer.Lines[2]!.TranslateToString(trimRight: true));
+        Assert.Equal("语汉语", buffer.Lines[3]!.TranslateToString(trimRight: true));
+    }
+
+    [Fact]
+    public void Reflow_SkipsGroupsWithNonNormalLineAttribute()
+    {
+        var buffer = new TerminalBuffer(10, 5, 100);
+        buffer.Resize(4, 5);
+
+        SetCell(buffer.Lines[0]!, 0, "a");
+        SetCell(buffer.Lines[0]!, 1, "b");
+        SetCell(buffer.Lines[0]!, 2, "c");
+        SetCell(buffer.Lines[0]!, 3, "d");
+        buffer.Lines[1]!.IsWrapped = true;
+        buffer.Lines[1]!.LineAttribute = LineAttribute.DoubleWidth;
+        SetCell(buffer.Lines[1]!, 0, "e");
+        SetCell(buffer.Lines[1]!, 1, "f");
+        SetCell(buffer.Lines[1]!, 2, "g");
+        SetCell(buffer.Lines[1]!, 3, "h");
+
+        buffer.Resize(2, 5);
+
+        Assert.Equal("ab", buffer.Lines[0]!.TranslateToString());
+        Assert.Equal("ef", buffer.Lines[1]!.TranslateToString(trimRight: false));
+        Assert.Equal(LineAttribute.DoubleWidth, buffer.Lines[1]!.LineAttribute);
+    }
+
+    [Fact]
+    public void Reflow_RaisesTrimmedWhenLinesRemovedFromTop()
+    {
+        var buffer = new TerminalBuffer(80, 5, 1);
+        buffer.Resize(10, 5);
+
+        for (var i = 0; i < 10; i++)
+        {
+            SetCell(buffer.Lines[3]!, i, ((char)('a' + i)).ToString());
+        }
+
+        buffer.SetCursorRaw(0, 4);
+        var trimmedTotal = 0;
+        buffer.Trimmed += amount => trimmedTotal += amount;
+
+        buffer.Resize(2, 5);
+
+        Assert.True(trimmedTotal > 0);
+    }
+
+    [Fact]
+    public void Reflow_CursorStaysOnSameCharacterThroughShrinkGrow()
+    {
+        var buffer = new TerminalBuffer(20, 5, 100);
+        buffer.Resize(20, 5);
+
+        for (var i = 0; i < 20; i++)
+        {
+            SetCell(buffer.Lines[0]!, i, ((char)('a' + i)).ToString());
+        }
+
+        buffer.SetCursorRaw(9, 2);
+        buffer.Resize(10, 5);
+        buffer.Resize(20, 5);
+
+        Assert.Equal(9, buffer.X);
+        Assert.Equal(2, buffer.Y);
+        Assert.Equal("abcdefghijklmnopqrst", buffer.Lines[0]!.TranslateToString(trimRight: true));
+    }
+
+    [Fact]
+    public void Reflow_PendingWrapXEqualsColsDoesNotCrash()
+    {
+        var buffer = new TerminalBuffer(10, 5, 100);
+        buffer.Resize(10, 5);
+        buffer.SetCursorRaw(10, 0);
+
+        buffer.Resize(5, 5);
+        buffer.Resize(10, 5);
+
+        Assert.True(buffer.X >= 0);
+    }
+
+    [Fact]
+    public void Reflow_AtCapacityShrinkingRows_KeepsNewestLines()
+    {
+        var buffer = new TerminalBuffer(10, 5, 5);
+        buffer.ScrollUp(5);
+        Assert.Equal(10, buffer.Lines.Length);
+
+        SetCell(buffer.Lines[buffer.YBase + 4]!, 0, ">");
+        buffer.SetCursorRaw(0, 4);
+
+        buffer.Resize(10, 3);
+
+        Assert.Equal(">", buffer.Lines[7]![0].Content);
+    }
+
+    [Fact]
+    public void Reflow_AltBufferTruncatesWithoutReflow()
+    {
+        var buffer = new TerminalBuffer(10, 5, 0, hasScrollback: false);
+        for (var i = 0; i < 10; i++)
+        {
+            SetCell(buffer.Lines[0]!, i, ((char)('a' + i)).ToString());
+        }
+
+        buffer.Resize(5, 5);
+
+        Assert.Equal("abcde", buffer.Lines[0]!.TranslateToString(trimRight: true));
+        Assert.Equal(5, buffer.Lines.Length);
+    }
+
+    [Fact]
+    public void Reflow_GrowWhenLastBufferRowIsWrappedContinuation()
+    {
+        var buffer = new TerminalBuffer(5, 4, 100);
+        buffer.Resize(5, 4);
+        for (var i = 0; i < 5; i++)
+        {
+            SetCell(buffer.Lines[2]!, i, ((char)('a' + i)).ToString());
+            SetCell(buffer.Lines[3]!, i, ((char)('A' + i)).ToString());
+        }
+        buffer.Lines[3]!.IsWrapped = true;   // last buffer row is a continuation
+        buffer.SetCursorRaw(0, 0);           // cursor parked away so the group is not skipped
+
+        buffer.Resize(10, 4);
+
+        Assert.Equal("abcdeABCDE", buffer.Lines[2]!.TranslateToString(trimRight: true));
+    }
+
+    [Fact]
+    public void Reflow_WideCharactersWhenGrowing()
+    {
+        var buffer = new TerminalBuffer(80, 24, 1000);
+        buffer.Resize(6, 12);
+
+        var glyphs = new[] { "汉", "语", "測", "試" };
+        for (var row = 0; row < 4; row++)
+        {
+            for (var col = 0; col < 6; col += 2)
+            {
+                var glyphIndex = (row * 3 + col / 2) % glyphs.Length;
+                SetWideCell(buffer.Lines[row]!, col, glyphs[glyphIndex]);
+            }
+        }
+        buffer.Lines[1]!.IsWrapped = true;
+        buffer.Lines[2]!.IsWrapped = true;
+        buffer.Lines[3]!.IsWrapped = true;
+
+        Assert.Equal("汉语測", buffer.Lines[0]!.TranslateToString(trimRight: true));
+        Assert.Equal("試汉语", buffer.Lines[1]!.TranslateToString(trimRight: true));
+        Assert.Equal("測試汉", buffer.Lines[2]!.TranslateToString(trimRight: true));
+        Assert.Equal("语測試", buffer.Lines[3]!.TranslateToString(trimRight: true));
+
+        buffer.SetCursorRaw(0, 5);
+
+        buffer.Resize(7, 12);
+
+        var combined = buffer.Lines[0]!.TranslateToString(trimRight: true)
+            + buffer.Lines[1]!.TranslateToString(trimRight: true)
+            + buffer.Lines[2]!.TranslateToString(trimRight: true)
+            + buffer.Lines[3]!.TranslateToString(trimRight: true);
+        Assert.Equal("汉语測試汉语測試汉语測試", combined);
+    }
+
+    [Fact]
+    public void ReflowSmaller_MovesCursorDownWhenViewportNotFilled()
+    {
+        var buffer = new TerminalBuffer(80, 24, 1000);
+        buffer.Resize(4, 10);
+
+        SetCell(buffer.Lines[0]!, 0, "a");
+        SetCell(buffer.Lines[0]!, 1, "b");
+        SetCell(buffer.Lines[0]!, 2, "c");
+        SetCell(buffer.Lines[0]!, 3, "d");
+        SetCell(buffer.Lines[1]!, 0, "e");
+        SetCell(buffer.Lines[1]!, 1, "f");
+        SetCell(buffer.Lines[1]!, 2, "g");
+        SetCell(buffer.Lines[1]!, 3, "h");
+        buffer.Lines[1]!.IsWrapped = true;
+        SetCell(buffer.Lines[2]!, 0, "i");
+        SetCell(buffer.Lines[2]!, 1, "j");
+        SetCell(buffer.Lines[2]!, 2, "k");
+        SetCell(buffer.Lines[2]!, 3, "l");
+
+        buffer.SetCursorRaw(0, 3);
+        buffer.Resize(2, 10);
+
+        Assert.Equal(6, buffer.Y);
+        Assert.Equal(0, buffer.YDisp);
+        Assert.Equal(0, buffer.YBase);
+        Assert.Equal("ab", buffer.Lines[0]!.TranslateToString());
+        Assert.Equal("cd", buffer.Lines[1]!.TranslateToString());
+        Assert.Equal("ef", buffer.Lines[2]!.TranslateToString());
+        Assert.Equal("gh", buffer.Lines[3]!.TranslateToString());
+        Assert.True(buffer.Lines[1]!.IsWrapped);
+        Assert.True(buffer.Lines[3]!.IsWrapped);
+    }
+
+    [Fact]
+    public void ReflowLarger_MovesCursorUpWhenViewportNotFilled()
+    {
+        var buffer = new TerminalBuffer(80, 24, 1000);
+        buffer.Resize(2, 10);
+
+        SetCell(buffer.Lines[0]!, 0, "a");
+        SetCell(buffer.Lines[0]!, 1, "b");
+        SetCell(buffer.Lines[1]!, 0, "c");
+        SetCell(buffer.Lines[1]!, 1, "d");
+        buffer.Lines[1]!.IsWrapped = true;
+        SetCell(buffer.Lines[2]!, 0, "e");
+        SetCell(buffer.Lines[2]!, 1, "f");
+        SetCell(buffer.Lines[3]!, 0, "g");
+        SetCell(buffer.Lines[3]!, 1, "h");
+        buffer.Lines[3]!.IsWrapped = true;
+        SetCell(buffer.Lines[4]!, 0, "i");
+        SetCell(buffer.Lines[4]!, 1, "j");
+        SetCell(buffer.Lines[5]!, 0, "k");
+        SetCell(buffer.Lines[5]!, 1, "l");
+        buffer.Lines[5]!.IsWrapped = true;
+
+        buffer.SetCursorRaw(0, 6);
+        buffer.Resize(4, 10);
+
+        Assert.Equal(3, buffer.Y);
+        Assert.Equal(0, buffer.YDisp);
+        Assert.Equal(0, buffer.YBase);
+        Assert.Equal("abcd", buffer.Lines[0]!.TranslateToString());
+        Assert.Equal("efgh", buffer.Lines[1]!.TranslateToString());
+        Assert.Equal("ijkl", buffer.Lines[2]!.TranslateToString());
+    }
+
     private static void SetCell(TerminalBuffer buffer, int row, string content)
     {
         var line = buffer.GetLine(row);
         var cell = new BufferCell { Content = content, Width = 1 };
         line?.SetCell(0, ref cell);
+    }
+
+    private static void SetCell(BufferLine line, int col, string content, int width = 1)
+    {
+        var cell = new BufferCell(content, width, AttributeData.Default);
+        line.SetCell(col, ref cell);
+    }
+
+    private static void SetWideCell(BufferLine line, int col, string content)
+    {
+        SetCell(line, col, content, 2);
+        SetCell(line, col + 1, "", 0);
     }
 
     #endregion

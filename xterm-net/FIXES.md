@@ -1,3 +1,39 @@
+# Resize reflow for the normal buffer
+
+## Summary
+
+This change ports xterm.js 5.5.0 resize reflow into XTerm.NET. Shrinking column width re-wraps long logical lines onto additional `IsWrapped` rows instead of truncating them; growing width merges wrapped groups back. The alternate buffer is excluded via an explicit `hasScrollback: false` constructor flag.
+
+A related latent bug is fixed: when the buffer was at capacity and row count shrank, `CircularList.Resize` ran before trimming and kept the oldest lines, silently discarding the live screen bottom. Resize now trims from the top (raising `Trimmed`) before shrinking capacity.
+
+## Why
+
+Without reflow, shrinking a terminal window and growing it back left every long line permanently truncated at the narrowest width — the primary defect tracked as ISS-007. Scrollback lines were also lost on capacity shrink because `CircularList.Resize` preserved the wrong end of the buffer.
+
+## Files changed
+
+- `src/XTerm.NET/Buffer/BufferReflow.cs` — pure reflow functions ported from `BufferReflow.ts`
+- `src/XTerm.NET/Buffer/TerminalBuffer.cs` — `Resize` restructure, `ReflowLarger`/`ReflowSmaller`, `hasScrollback` flag
+- `src/XTerm.NET/Buffer/BufferLine.cs` — `GetWidth`, `HasContent`, `ReplaceCells`; `GetTrimmedLength` wide-char width
+- `src/XTerm.NET/Buffer/CircularList.cs` — `SetLength` for reflow batching
+- `src/XTerm.NET/Terminal.cs` — alt buffer `hasScrollback: false`
+- `src/XTerm.NET.Tests/Buffer/BufferReflowTests.cs` — pure-function tests
+- `src/XTerm.NET.Tests/Buffer/BufferTests.cs` — reflow integration tests
+
+## Validation
+
+```powershell
+dotnet test src/XTerm.NET.slnx
+```
+
+Result on this branch:
+
+```text
+Passed: 624
+Failed: 0
+Skipped: 0
+```
+
 # Docker progress rendering fixes
 
 ## Summary
