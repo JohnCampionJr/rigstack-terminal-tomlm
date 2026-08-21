@@ -347,6 +347,12 @@ namespace Iciclecreek.Terminal
         #endregion
 
         /// <summary>
+        /// Event raised once when the shell produces its first output (e.g. the prompt),
+        /// indicating it is ready to accept input.
+        /// </summary>
+        public event EventHandler? ShellReady;
+
+        /// <summary>
         /// Event raised when the PTY process exits.
         /// </summary>
         public event EventHandler<ProcessExitedEventArgs>? ProcessExited;
@@ -2278,6 +2284,12 @@ namespace Iciclecreek.Terminal
             try
             {
                 var buffer = new byte[0x40000];
+
+                // Local rather than a field: this method runs once per launch, so the flag is
+                // per-process by construction and a chunk still in flight from a previous process
+                // cannot consume the current one's signal.
+                var shellReadyPosted = false;
+
                 while (!cancellationToken.IsCancellationRequested && _ptyConnection != null)
                 {
                     var bytesRead = await _ptyConnection.ReaderStream.ReadAsync(buffer, 0, buffer.Length, cancellationToken);
@@ -2315,6 +2327,23 @@ namespace Iciclecreek.Terminal
                     lock (_terminalLock)
                     {
                         _terminal.Write(output);
+                    }
+
+                    // Signal on the first chunk only. Posting per chunk would keep queueing UI-thread
+                    // callbacks for the life of the process, which is pure overhead once the shell is
+                    // long since ready and adds up under high-throughput output.
+                    if (!shellReadyPosted)
+                    {
+                        shellReadyPosted = true;
+                        Dispatcher.UIThread.Post(() =>
+                        {
+                            // The callback can still be queued when a relaunch swaps the process out
+                            // underneath it; the token identifies which process it belongs to.
+                            if (_processCts?.Token != cancellationToken)
+                                return;
+
+                            ShellReady?.Invoke(this, EventArgs.Empty);
+                        });
                     }
 
                     // Auto-scroll to bottom when new content arrives, but only in normal buffer.
