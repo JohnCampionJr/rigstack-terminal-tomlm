@@ -110,6 +110,8 @@ namespace Iciclecreek.Terminal
         /// <inheritdoc cref="TerminalView.ShellReady"/>
         public event EventHandler? ShellReady;
         public event EventHandler<ProcessExitedEventArgs>? ProcessExited;
+        /// <inheritdoc cref="TerminalView.OutputReceived"/>
+        public event EventHandler<OutputReceivedEventArgs>? OutputReceived;
         /// <inheritdoc cref="TerminalView.UrlClicked"/>
         public event EventHandler<UrlClickedEventArgs>? UrlClicked;
 
@@ -360,6 +362,25 @@ namespace Iciclecreek.Terminal
             set => SetValue(ShowCaretOnClickProperty, value);
         }
 
+        /// <inheritdoc cref="TerminalView.OutputReceivedOnReadTaskProperty"/>
+        /// <remarks>
+        /// Styled and template-bound to PART_TerminalView rather than forwarded onto the inner view. A
+        /// forwarder drops any value assigned before the template runs — the normal timing for XAML
+        /// attributes, styles and object initialisers — which for this property would silently leave a
+        /// consumer on UI-thread delivery having asked for the read task.
+        /// </remarks>
+        public static readonly StyledProperty<bool> OutputReceivedOnReadTaskProperty =
+            AvaloniaProperty.Register<TerminalControl, bool>(
+                nameof(OutputReceivedOnReadTask),
+                defaultValue: false);
+
+        /// <inheritdoc cref="OutputReceivedOnReadTaskProperty"/>
+        public bool OutputReceivedOnReadTask
+        {
+            get => GetValue(OutputReceivedOnReadTaskProperty);
+            set => SetValue(OutputReceivedOnReadTaskProperty, value);
+        }
+
         /// <inheritdoc cref="TerminalView.VerbatimCommandLineProperty"/>
         public bool VerbatimCommandLine
         {
@@ -463,6 +484,7 @@ namespace Iciclecreek.Terminal
                 _terminalView.PropertyChanged -= OnTerminalViewPropertyChanged;
                 _terminalView.ProcessExited -= OnTerminalViewProcessExited;
                 _terminalView.ShellReady -= OnTerminalViewShellReady;
+                _terminalView.OutputReceived -= OnTerminalViewOutputReceived;
                 _terminalView.UrlClicked -= OnTerminalViewUrlClicked;
             }
 
@@ -480,6 +502,7 @@ namespace Iciclecreek.Terminal
                 _terminalView.PropertyChanged += OnTerminalViewPropertyChanged;
                 _terminalView.ProcessExited += OnTerminalViewProcessExited;
                 _terminalView.ShellReady += OnTerminalViewShellReady;
+                _terminalView.OutputReceived += OnTerminalViewOutputReceived;
                 _terminalView.UrlClicked += OnTerminalViewUrlClicked;
                 SetCurrentDirectory(_terminalView.CurrentDirectory);
                 // (no window event hooking needed)
@@ -536,6 +559,11 @@ namespace Iciclecreek.Terminal
         private void OnTerminalViewShellReady(object? sender, EventArgs e)
         {
             ShellReady?.Invoke(this, e);
+        }
+
+        private void OnTerminalViewOutputReceived(object? sender, OutputReceivedEventArgs e)
+        {
+            OutputReceived?.Invoke(this, e);
         }
 
         private void OnTerminalViewUrlClicked(object? sender, UrlClickedEventArgs e)

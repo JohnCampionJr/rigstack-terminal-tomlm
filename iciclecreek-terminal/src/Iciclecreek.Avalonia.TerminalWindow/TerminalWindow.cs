@@ -118,6 +118,9 @@ namespace Iciclecreek.Terminal
 
         public event EventHandler<ProcessExitedEventArgs>? ProcessExited;
 
+        /// <inheritdoc cref="TerminalView.OutputReceived"/>
+        public event EventHandler<OutputReceivedEventArgs>? OutputReceived;
+
         /// <inheritdoc cref="TerminalView.UrlClicked"/>
         public event EventHandler<UrlClickedEventArgs>? UrlClicked;
 
@@ -177,6 +180,19 @@ namespace Iciclecreek.Terminal
         {
             get => GetValue(ShowCaretOnClickProperty);
             set => SetValue(ShowCaretOnClickProperty, value);
+        }
+
+        /// <inheritdoc cref="TerminalView.OutputReceivedOnReadTaskProperty"/>
+        public static readonly StyledProperty<bool> OutputReceivedOnReadTaskProperty =
+            AvaloniaProperty.Register<TerminalWindow, bool>(
+                nameof(OutputReceivedOnReadTask),
+                defaultValue: false);
+
+        /// <inheritdoc cref="OutputReceivedOnReadTaskProperty"/>
+        public bool OutputReceivedOnReadTask
+        {
+            get => GetValue(OutputReceivedOnReadTaskProperty);
+            set => SetValue(OutputReceivedOnReadTaskProperty, value);
         }
 
         /// <inheritdoc cref="TerminalView.VerbatimCommandLineProperty"/>
@@ -425,6 +441,7 @@ namespace Iciclecreek.Terminal
             // Subscribe to terminal events.
             _terminalControl.ProcessExited += OnTerminalControlProcessExited;
             _terminalControl.ShellReady += OnTerminalControlShellReady;
+            _terminalControl.OutputReceived += OnTerminalControlOutputReceived;
             _terminalControl.UrlClicked += OnTerminalControlUrlClicked;
             TerminalView.AddTitleChangedHandler(_terminalControl, OnTerminalTitleChanged);
             TerminalView.AddWindowMovedHandler(_terminalControl, OnTerminalWindowMoved);
@@ -453,6 +470,7 @@ namespace Iciclecreek.Terminal
             _terminalControl.Bind(TerminalControl.OptionsProperty, this.GetObservable(OptionsProperty));
             _terminalControl.Bind(TerminalControl.BufferSizeProperty, this.GetObservable(BufferSizeProperty));
             _terminalControl.Bind(TerminalControl.ShowCaretOnClickProperty, this.GetObservable(ShowCaretOnClickProperty));
+            _terminalControl.Bind(TerminalControl.OutputReceivedOnReadTaskProperty, this.GetObservable(OutputReceivedOnReadTaskProperty));
             _terminalControl.Bind(TerminalControl.VerbatimCommandLineProperty, this.GetObservable(VerbatimCommandLineProperty));
             _terminalControl.Bind(TerminalControl.EnvironmentVariablesProperty, this.GetObservable(EnvironmentVariablesProperty));
             _terminalControl.Bind(TerminalControl.TextDecorationsProperty, this.GetObservable(TextDecorationsProperty));
@@ -565,6 +583,7 @@ namespace Iciclecreek.Terminal
                 _terminalControl.PropertyChanged -= OnTerminalControlPropertyChanged;
                 _terminalControl.ProcessExited -= OnTerminalControlProcessExited;
                 _terminalControl.ShellReady -= OnTerminalControlShellReady;
+                _terminalControl.OutputReceived -= OnTerminalControlOutputReceived;
                 _terminalControl.UrlClicked -= OnTerminalControlUrlClicked;
                 TerminalView.RemoveTitleChangedHandler(_terminalControl, OnTerminalTitleChanged);
                 TerminalView.RemoveWindowMovedHandler(_terminalControl, OnTerminalWindowMoved);
@@ -599,6 +618,11 @@ namespace Iciclecreek.Terminal
         private void OnTerminalControlShellReady(object? sender, EventArgs e)
         {
             ShellReady?.Invoke(this, e);
+        }
+
+        private void OnTerminalControlOutputReceived(object? sender, OutputReceivedEventArgs e)
+        {
+            OutputReceived?.Invoke(this, e);
         }
 
         private void OnTerminalControlUrlClicked(object? sender, UrlClickedEventArgs e)
