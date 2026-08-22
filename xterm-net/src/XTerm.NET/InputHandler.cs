@@ -876,12 +876,22 @@ public class InputHandler
                 }
                 EraseInLine(parameters); // Current line to cursor
                 break;
-            case 2: // Erase all
-            case 3: // Erase scrollback (extension)
+            case 2: // Erase all — the visible screen only; the scrollback is kept
                 for (int i = 0; i < _terminal.Rows; i++)
                 {
                     _buffer.Lines[_buffer.YBase + i]?.Fill(emptyCell);
                 }
+                break;
+            case 3: // Erase scrollback (xterm extension) — the scrollback only; the screen is kept
+                // Previously shared the body above, which erases the VISIBLE screen and never touches the
+                // scrollback: the opposite of what mode 3 asks for. The two modes are complements, not
+                // variations, so a caller wanting both sends 2 and 3 — which is exactly what cmd.exe's
+                // `cls` does under ConPTY (it clears the screen line by line, then sends CSI 3 J).
+                //
+                // Discarding rather than blanking is the point: blanked lines are still scrollable, so the
+                // history stayed reachable with the mouse wheel even though the terminal had been told to
+                // throw it away.
+                _buffer.ClearScrollback();
                 break;
         }
     }

@@ -1396,6 +1396,128 @@ public class InputHandlerTests
         }
     }
 
+    private static bool BufferContains(Terminal terminal, string text)
+    {
+        for (int i = 0; i < terminal.Buffer.Length; i++)
+        {
+            if (terminal.Buffer.Lines[i]?.TranslateToString(true).Contains(text) == true)
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// CSI 3 J discards the scrollback. Not blanks it — discards it, so the lines are gone from the buffer
+    /// and cannot be scrolled back to.
+    ///
+    /// Mode 3 used to share mode 2's body, which erases the VISIBLE screen and never touches the scrollback:
+    /// the opposite of what it asks for. Downstream that surfaced as `cls` in cmd.exe leaving the history
+    /// reachable with the mouse wheel, unlike conhost and Windows Terminal.
+    /// </summary>
+    [Fact]
+    public void HandleCsi_EraseInDisplay_EraseScrollback_DiscardsHistory()
+    {
+        // Arrange - write enough to push lines above the visible screen
+        var terminal = CreateTerminal(rows: 5);
+        for (int i = 0; i < 20; i++)
+        {
+            terminal.Write($"line {i}\r\n");
+        }
+
+        Assert.True(terminal.Buffer.YBase > 0, "test needs scrollback to exist before erasing it");
+        var lengthBefore = terminal.Buffer.Length;
+        var handler = new InputHandler(terminal);
+
+        var params_ = new Params();
+        params_.AddParam(3); // Erase scrollback
+
+        // Act
+        handler.HandleCsi("J", params_);
+
+        // Assert - the history is gone, not merely blank
+        Assert.Equal(0, terminal.Buffer.YBase);
+        Assert.Equal(0, terminal.Buffer.ViewportY);
+        Assert.True(terminal.Buffer.Length < lengthBefore,
+            $"the scrollback should have been discarded: was {lengthBefore}, now {terminal.Buffer.Length}");
+    }
+
+    /// <summary>
+    /// And it leaves the visible screen alone — the two modes are complements, not variations. cmd.exe's
+    /// `cls` relies on that: it clears the screen itself, line by line, then sends CSI 3 J for the rest.
+    /// </summary>
+    [Fact]
+    public void HandleCsi_EraseInDisplay_EraseScrollback_KeepsTheVisibleScreen()
+    {
+        // Arrange
+        var terminal = CreateTerminal(rows: 5);
+        for (int i = 0; i < 20; i++)
+        {
+            terminal.Write($"line {i}\r\n");
+        }
+        terminal.Write("KEEPME");
+
+        var handler = new InputHandler(terminal);
+        var params_ = new Params();
+        params_.AddParam(3);
+
+        // Act
+        handler.HandleCsi("J", params_);
+
+        // Assert
+        Assert.True(BufferContains(terminal, "KEEPME"), "erasing the scrollback must not erase the screen");
+    }
+
+    /// <summary>
+    /// The buffer must still be usable afterwards. YBase and YDisp are absolute indices into the line list,
+    /// so trimming from the start without moving them leaves the visible screen pointing at an offset that
+    /// no longer exists, and the next write runs off the end.
+    /// </summary>
+    [Fact]
+    public void HandleCsi_EraseInDisplay_EraseScrollback_LeavesTheBufferWritable()
+    {
+        // Arrange
+        var terminal = CreateTerminal(rows: 5);
+        for (int i = 0; i < 20; i++)
+        {
+            terminal.Write($"line {i}\r\n");
+        }
+
+        var handler = new InputHandler(terminal);
+        var params_ = new Params();
+        params_.AddParam(3);
+        handler.HandleCsi("J", params_);
+
+        // Act - this threw IndexOutOfRangeException when the indices were left stale
+        var exception = Record.Exception(() => terminal.Write("AFTERWARDS\r\n"));
+
+        // Assert
+        Assert.Null(exception);
+        Assert.True(BufferContains(terminal, "AFTERWARDS"), "text written after the erase should render");
+    }
+
+    /// <summary>Erasing a scrollback that does not exist yet is a no-op, not a crash.</summary>
+    [Fact]
+    public void HandleCsi_EraseInDisplay_EraseScrollback_WithNoScrollback_IsHarmless()
+    {
+        // Arrange
+        var terminal = CreateTerminal(rows: 24);
+        terminal.Write("only one line");
+        Assert.Equal(0, terminal.Buffer.YBase);
+
+        var handler = new InputHandler(terminal);
+        var params_ = new Params();
+        params_.AddParam(3);
+
+        // Act
+        var exception = Record.Exception(() => handler.HandleCsi("J", params_));
+
+        // Assert
+        Assert.Null(exception);
+        Assert.Equal(0, terminal.Buffer.YBase);
+        Assert.True(BufferContains(terminal, "only one line"), "the screen is untouched");
+    }
+
     [Fact]
     public void HandleCsi_EraseInLine_ErasesToLeft()
     {
