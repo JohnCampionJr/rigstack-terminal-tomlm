@@ -255,6 +255,28 @@ public class TerminalBuffer
     }
 
     /// <summary>
+    /// Discards the scrollback — every line above the visible screen — leaving the visible screen and the
+    /// cursor untouched.
+    /// </summary>
+    /// <remarks>
+    /// <para>This is what <c>CSI 3 J</c> asks for, and it is a different operation from erasing: the lines
+    /// are REMOVED from the buffer rather than blanked, so the history is genuinely gone and cannot be
+    /// scrolled back to.</para>
+    /// <para><c>_yBase</c> and <c>_yDisp</c> must move with the lines. They are absolute indices into the
+    /// buffer, so trimming from the start without adjusting them leaves the visible screen indexed at an
+    /// offset that no longer exists, and the next write runs off the end of the list.</para>
+    /// </remarks>
+    public void ClearScrollback()
+    {
+        if (_yBase == 0)
+            return;
+
+        _lines.TrimStart(_yBase);
+        _yBase = 0;
+        _yDisp = 0;
+    }
+
+    /// <summary>
     /// Scrolls the viewport by a relative number of lines.
     /// </summary>
     /// <param name="lines">Number of lines to scroll (negative = up, positive = down)</param>
