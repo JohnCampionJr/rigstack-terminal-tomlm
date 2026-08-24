@@ -199,6 +199,85 @@ public class InputHandlerTests
     }
 
     [Fact]
+    public void Print_ZwjEmojiSequence_OccupiesOneCellPair()
+    {
+        // Arrange
+        var terminal = CreateTerminal(cols: 20, rows: 3);
+
+        // Act — woman + ZWJ + laptop is ONE grapheme cluster, drawn as one glyph.
+        terminal.Write("\U0001F469\u200D\U0001F4BBX");
+
+        // Assert — two cells for the cluster, then the next character. Before this fix each component
+        // opened its own cell pair, so the cluster claimed four cells and left two of them blank.
+        Assert.Equal(3, terminal.Buffer.X);
+        Assert.Equal(2, terminal.Buffer.Lines[0]?[0].Width);
+        Assert.Equal(0, terminal.Buffer.Lines[0]?[1].Width);
+        Assert.Equal("X", terminal.Buffer.Lines[0]?[2].Content);
+    }
+
+    [Fact]
+    public void Print_ZwjEmojiSequence_KeepsEveryComponentInOneCell()
+    {
+        // Arrange
+        var terminal = CreateTerminal(cols: 20, rows: 3);
+
+        // Act
+        terminal.Write("\U0001F469\u200D\U0001F4BB");
+
+        // Assert — the whole cluster is the cell's content, so a renderer can shape it as one glyph.
+        Assert.Equal("\U0001F469\u200D\U0001F4BB", terminal.Buffer.Lines[0]?[0].Content);
+    }
+
+    [Fact]
+    public void Print_FamilyEmoji_OccupiesOneCellPair()
+    {
+        // Arrange
+        var terminal = CreateTerminal(cols: 20, rows: 3);
+
+        // Act — four people joined by three ZWJs, still one glyph.
+        terminal.Write("\U0001F468\u200D\U0001F469\u200D\U0001F467\u200D\U0001F466X");
+
+        // Assert — the worst case: this used to claim eight cells and leave six of them blank.
+        Assert.Equal(3, terminal.Buffer.X);
+        Assert.Equal(2, terminal.Buffer.Lines[0]?[0].Width);
+        Assert.Equal(0, terminal.Buffer.Lines[0]?[1].Width);
+        Assert.Equal("X", terminal.Buffer.Lines[0]?[2].Content);
+    }
+
+    [Fact]
+    public void Print_TwoZwjSequencesInARow_StayInTheirOwnCells()
+    {
+        // Arrange
+        var terminal = CreateTerminal(cols: 20, rows: 3);
+
+        // Act
+        terminal.Write("\U0001F469\u200D\U0001F4BB\U0001F468\u200D\U0001F4BB");
+
+        // Assert — the continuation is spent by the character that follows the ZWJ; the next cluster
+        // starts fresh rather than being swallowed into the first.
+        Assert.Equal(4, terminal.Buffer.X);
+        Assert.Equal("\U0001F469\u200D\U0001F4BB", terminal.Buffer.Lines[0]?[0].Content);
+        Assert.Equal("\U0001F468\u200D\U0001F4BB", terminal.Buffer.Lines[0]?[2].Content);
+    }
+
+    [Fact]
+    public void Print_EmojiAfterCursorMove_DoesNotJoinAcrossTheMove()
+    {
+        // Arrange
+        var terminal = CreateTerminal(cols: 20, rows: 3);
+
+        // Act — a ZWJ, then the cursor is moved away before the next character arrives.
+        terminal.Write("\U0001F469\u200D");
+        terminal.Write("\u001b[1;10H");
+        terminal.Write("\U0001F4BB");
+
+        // Assert — the continuation is tied to a POSITION, so moving the cursor drops it rather than
+        // joining two characters that have nothing to do with each other.
+        Assert.Equal(2, terminal.Buffer.Lines[0]?[9].Width);
+        Assert.Equal("\U0001F4BB", terminal.Buffer.Lines[0]?[9].Content);
+    }
+
+    [Fact]
     public void Write_DockerComposeNetworkLine_KeepsStatusColumnAfterCheckMark()
     {
         // Arrange

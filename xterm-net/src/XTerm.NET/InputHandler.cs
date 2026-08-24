@@ -25,6 +25,16 @@ public class InputHandler
     private const int VariationSelectorTextSymbol = 0xFE0E;   // Text presentation selector
     private const int ZeroWidthJoiner = 0x200D;               // ZWJ for emoji sequences
 
+    // Where a ZWJ was just merged, if anywhere. The character that FOLLOWS a ZWJ continues the same
+    // grapheme cluster and belongs in the same cell, but it is an ordinary emoji and so passes no
+    // combining-character test of its own — without this it opens a new cell and the cluster is spread
+    // across the grid.
+    //
+    // A position rather than a flag, so it invalidates itself: anything that moves the cursor — an escape
+    // sequence, a newline, a cursor address — leaves it pointing somewhere the next Print is not, and the
+    // continuation is silently dropped rather than joining two unrelated characters.
+    private (int Row, int Col)? _zwjContinuation;
+
     public InputHandler(Terminal terminal)
     {
         _terminal = terminal;
@@ -101,11 +111,21 @@ public class InputHandler
         {
             var codePoint = char.ConvertToUtf32(data, 0);
 
-            if (IsCombiningCharacter(codePoint))
+            // A character standing exactly where a ZWJ was just merged continues that cluster.
+            var continuesCluster = _zwjContinuation is { } pending
+                                   && pending.Row == _buffer.Y + _buffer.YBase
+                                   && pending.Col == _buffer.X;
+            _zwjContinuation = null;
+
+            if (continuesCluster || IsCombiningCharacter(codePoint))
             {
                 // Find the previous cell to combine with
                 if (TryAppendToPreviousCell(data, codePoint))
                 {
+                    // A ZWJ promises another component after it; remember where, so it can be recognised.
+                    if (codePoint == ZeroWidthJoiner)
+                        _zwjContinuation = (_buffer.Y + _buffer.YBase, _buffer.X);
+
                     return; // Successfully combined, don't create new cell
                 }
                 // If we can't combine (e.g., at start of line), fall through to normal handling
