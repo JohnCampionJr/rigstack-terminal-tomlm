@@ -65,6 +65,20 @@ public class Terminal
     public string Title { get; set; }
     public string? CurrentDirectory { get; set; }
     public string? CurrentHyperlink { get; set; }
+
+    /// <summary>
+    /// The terminal's colours: the 256-entry palette plus foreground, background and cursor.
+    /// </summary>
+    /// <remarks>
+    /// Seeded from <see cref="TerminalOptions.Theme"/>, then modified by OSC 4 and OSC 10/11/12.
+    /// An embedder following the OS light/dark setting calls
+    /// <see cref="ColorPalette.ApplyTheme"/> when it flips.
+    ///
+    /// This is also what colour QUERIES answer from, which is the point: a program that asks for
+    /// the background before choosing its own palette gets the real one, so a light terminal stops
+    /// being told to render for a dark one.
+    /// </remarks>
+    public ColorPalette Colors { get; }
     public string? HyperlinkId { get; set; }
 
     /// <summary>
@@ -112,6 +126,15 @@ public class Terminal
     /// Fired when a hyperlink is encountered.
     /// </summary>
     public event EventHandler<TerminalEvents.HyperlinkEventArgs>? HyperlinkChanged;
+
+    /// <summary>
+    /// Fired for every OSC sequence, including ones this terminal does not implement.
+    /// </summary>
+    /// <remarks>
+    /// Observation only, raised after any built-in handling. See
+    /// <see cref="TerminalEvents.OscReceivedEventArgs"/>.
+    /// </remarks>
+    public event EventHandler<TerminalEvents.OscReceivedEventArgs>? OscReceived;
 
     // Window manipulation events
     /// <summary>
@@ -175,6 +198,7 @@ public class Terminal
         Cols = Options.Cols;
         Rows = Options.Rows;
         Title = string.Empty;
+        Colors = new ColorPalette(Options.Theme);
 
         // Initialize buffers
         _normalBuffer = new Buffer.TerminalBuffer(Cols, Rows, Options.Scrollback);
@@ -479,6 +503,9 @@ public class Terminal
 
     internal void RaiseHyperlinkChanged(string? url) =>
         HyperlinkChanged?.Invoke(this, new TerminalEvents.HyperlinkEventArgs(url ?? string.Empty, url == null));
+
+    internal void RaiseOscReceived(string identifier, int code, string data, string raw, bool recognized) =>
+        OscReceived?.Invoke(this, new TerminalEvents.OscReceivedEventArgs(identifier, code, data, raw, recognized));
     
     internal void RaiseWindowMoved(int x, int y) => 
         WindowMoved?.Invoke(this, new TerminalEvents.WindowMovedEventArgs(x, y));
@@ -650,6 +677,7 @@ public class Terminal
         LineFed = null;
         DirectoryChanged = null;
         HyperlinkChanged = null;
+        OscReceived = null;
         
         // Clear window manipulation events
         WindowMoved = null;

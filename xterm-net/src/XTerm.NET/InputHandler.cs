@@ -592,6 +592,10 @@ public class InputHandler
 
         var arg = parts.Length > 1 ? parts[1] : string.Empty;
 
+        // Whether this sequence reached a handler. Cleared by the branches that do nothing with it,
+        // so a listener can tell "the terminal acted on this" from "the terminal saw it and moved on".
+        var recognized = true;
+
         // Try to parse as OscCommand enum
         if (parts[0].TryParseOscCommand(out OscCommand command))
         {
@@ -605,6 +609,7 @@ public class InputHandler
 
                 case OscCommand.SetIconName:
                     // Icon name - not typically supported in modern terminals
+                    recognized = false;
                     break;
 
                 case OscCommand.ChangeColor:
@@ -639,11 +644,12 @@ public class InputHandler
                 case OscCommand.ResetForeground:
                 case OscCommand.ResetBackground:
                 case OscCommand.ResetCursor:
-                    HandleColorReset(arg);
+                    HandleColorReset(command, arg);
                     break;
 
                 default:
                     // Known but unhandled command
+                    recognized = false;
                     System.Diagnostics.Debug.WriteLine($"Unhandled OSC command: {command}");
                     break;
             }
@@ -651,21 +657,47 @@ public class InputHandler
         else
         {
             // Unknown or unsupported OSC sequence
+            recognized = false;
             System.Diagnostics.Debug.WriteLine($"Unknown OSC sequence: {parts[0]}");
         }
+
+        // Last, so a listener observes the terminal's own handling as already done rather than
+        // pending. Raised for recognized sequences too: a listener that only wants the rest can say
+        // so with Recognized, and stop compensating by itself once a code lands here.
+        _terminal.RaiseOscReceived(
+            parts[0],
+            int.TryParse(parts[0], out var code) ? code : -1,
+            arg,
+            data,
+            recognized);
     }
 
     private void HandleColorPaletteChange(string data)
     {
-        // OSC 4 ; index ; colorspec ST
-        // Example: OSC 4;1;rgb:ff/00/00 ST (set color 1 to red)
-        // For now, we just acknowledge but don't actually change colors
-        // A full implementation would parse the color and store it
+        // OSC 4 ; index ; spec [ ; index ; spec ]... ST
+        // Pairs, plural: xterm accepts any number in one sequence, and theme scripts routinely send
+        // all sixteen ANSI colours at once rather than as sixteen sequences.
         var parts = data.Split(';');
-        if (parts.Length >= 2)
+
+        for (var i = 0; i + 1 < parts.Length; i += 2)
         {
-            // Color index in parts[0], color spec in parts[1]
-            // TODO: Implement actual color storage and management
+            if (!int.TryParse(parts[i], out var index) || index < 0 || index >= ColorPalette.Size)
+            {
+                continue;
+            }
+
+            if (parts[i + 1] == "?")
+            {
+                // Answering with the CURRENT colour, not a constant. A program asking this is
+                // usually about to pick its own colours to match.
+                _terminal.RaiseDataReceived($"\u001b]4;{index};{ColorSpec.Format(_terminal.Colors[index])}\u0007");
+                continue;
+            }
+
+            if (ColorSpec.TryParse(parts[i + 1], out var rgb))
+            {
+                _terminal.Colors.SetColor(index, rgb);
+            }
         }
     }
 
@@ -731,30 +763,49 @@ public class InputHandler
 
     private void HandleColorQuery(string colorType, string data)
     {
-        // OSC 10/11/12 with ? queries the color
-        // OSC 10/11/12 with color spec sets the color
-        if (data == "?")
+        // OSC 10/11/12 ; spec [ ; spec ]... ST  - set, or query when spec is "?"
+        //
+        // Multiple specs advance through the resources in order, so OSC 10 ; fg ; bg sets the
+        // foreground AND the background. xterm defines it that way and shell prompts written for
+        // xterm use it, so handling only the first would set the foreground and silently drop the
+        // background.
+        if (!int.TryParse(colorType, out var resource))
         {
-            // Query color - respond with current color
-            // Format: OSC colorType ; rgb:rr/gg/bb ST
-            // For now, return a default response
-            string response = colorType switch
-            {
-                "10" => $"\u001b]{colorType};rgb:ff/ff/ff\u0007",  // Foreground
-                "11" => $"\u001b]{colorType};rgb:00/00/00\u0007",  // Background
-                "12" => $"\u001b]{colorType};rgb:ff/ff/ff\u0007",  // Cursor
-                _ => string.Empty
-            };
-
-            if (!string.IsNullOrEmpty(response))
-            {
-                _terminal.RaiseDataReceived(response);
-            }
+            return;
         }
-        else if (!string.IsNullOrEmpty(data))
+
+        foreach (var spec in data.Split(';'))
         {
-            // Set color - would parse and apply the color
-            // TODO: Implement actual color setting
+            if (resource > 12)
+            {
+                break;
+            }
+
+            if (spec == "?")
+            {
+                var current = resource switch
+                {
+                    10 => _terminal.Colors.Foreground,
+                    11 => _terminal.Colors.Background,
+                    _ => _terminal.Colors.Cursor,
+                };
+
+                // The real colour, not a constant. Programs query OSC 11 to decide whether they are
+                // on a light or a dark terminal; answering black regardless told every one of them
+                // "dark", and a light theme got dark-theme colours drawn onto it.
+                _terminal.RaiseDataReceived($"\u001b]{resource};{ColorSpec.Format(current)}\u0007");
+            }
+            else if (ColorSpec.TryParse(spec, out var rgb))
+            {
+                switch (resource)
+                {
+                    case 10: _terminal.Colors.SetForeground(rgb); break;
+                    case 11: _terminal.Colors.SetBackground(rgb); break;
+                    case 12: _terminal.Colors.SetCursor(rgb); break;
+                }
+            }
+
+            resource++;
         }
     }
 
@@ -795,11 +846,41 @@ public class InputHandler
         }
     }
 
-    private void HandleColorReset(string data)
+    private void HandleColorReset(OscCommand command, string data)
     {
-        // OSC 104 ; index ST (reset specific color)
-        // OSC 104 ST (reset all colors)
-        // TODO: Implement color reset functionality
+        // OSC 104 [ ; index ]... ST  - reset palette entries, or all of them when bare
+        // OSC 110/111/112 ST         - reset foreground / background / cursor
+        //
+        // "Reset" means back to the EMBEDDER'S theme, not to a factory dark palette. Anything else
+        // and a program calling OSC 104 would drag a light terminal to black and leave it there.
+        switch (command)
+        {
+            case OscCommand.ResetForeground:
+                _terminal.Colors.ResetForeground();
+                return;
+
+            case OscCommand.ResetBackground:
+                _terminal.Colors.ResetBackground();
+                return;
+
+            case OscCommand.ResetCursor:
+                _terminal.Colors.ResetCursor();
+                return;
+        }
+
+        if (string.IsNullOrEmpty(data))
+        {
+            _terminal.Colors.ResetAllColors();
+            return;
+        }
+
+        foreach (var part in data.Split(';'))
+        {
+            if (int.TryParse(part, out var index) && index >= 0 && index < ColorPalette.Size)
+            {
+                _terminal.Colors.ResetColor(index);
+            }
+        }
     }
 
     // CSI Handler Implementations
