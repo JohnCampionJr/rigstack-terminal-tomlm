@@ -194,6 +194,54 @@ public static class TerminalEvents
         /// The notification body as sent by the application.
         /// </summary>
         public string Text { get; }
+    /// Raw OSC event - fired for EVERY OSC sequence the parser completes, including ones this
+    /// library does not implement.
+    /// </summary>
+    /// <remarks>
+    /// The escape hatch for OSC codes the terminal does not know yet. Without it an unrecognized
+    /// sequence reaches <c>Debug.WriteLine</c> and is gone, and nothing downstream can compensate,
+    /// because the parser's own Osc event is not reachable from <see cref="XTerm.Terminal"/>.
+    ///
+    /// Observation only: this fires AFTER any built-in handling, and setting nothing on it changes
+    /// what the terminal did. Use <see cref="Recognized"/> to implement only what the library
+    /// currently ignores, so a handler stops doing so on its own once a code is implemented here.
+    /// </remarks>
+    public class OscReceivedEventArgs : EventArgs
+    {
+        public OscReceivedEventArgs(string identifier, int code, string data, string raw, bool recognized)
+        {
+            Identifier = identifier;
+            Code = code;
+            Data = data;
+            Raw = raw;
+            Recognized = recognized;
+        }
+
+        /// <summary>
+        /// The identifier field verbatim, before the first ';'. Not always numeric.
+        /// </summary>
+        public string Identifier { get; }
+
+        /// <summary>
+        /// The identifier as a number, or -1 when it is not numeric.
+        /// </summary>
+        public int Code { get; }
+
+        /// <summary>
+        /// Everything after the first ';', or empty when the sequence carried no parameters.
+        /// </summary>
+        public string Data { get; }
+
+        /// <summary>
+        /// The entire payload, identifier included, exactly as the parser delivered it.
+        /// </summary>
+        public string Raw { get; }
+
+        /// <summary>
+        /// Whether the terminal dispatched this sequence itself. False means it was ignored, and a
+        /// handler is the only thing that will act on it.
+        /// </summary>
+        public bool Recognized { get; }
     }
 
     /// <summary>
