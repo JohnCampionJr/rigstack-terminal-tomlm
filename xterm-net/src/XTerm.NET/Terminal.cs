@@ -65,6 +65,20 @@ public class Terminal
     public string Title { get; set; }
     public string? CurrentDirectory { get; set; }
     public string? CurrentHyperlink { get; set; }
+
+    /// <summary>
+    /// The terminal's colours: the 256-entry palette plus foreground, background and cursor.
+    /// </summary>
+    /// <remarks>
+    /// Seeded from <see cref="TerminalOptions.Theme"/>, then modified by OSC 4 and OSC 10/11/12.
+    /// An embedder following the OS light/dark setting calls
+    /// <see cref="ColorPalette.ApplyTheme"/> when it flips.
+    ///
+    /// This is also what colour QUERIES answer from, which is the point: a program that asks for
+    /// the background before choosing its own palette gets the real one, so a light terminal stops
+    /// being told to render for a dark one.
+    /// </remarks>
+    public ColorPalette Colors { get; }
     public string? HyperlinkId { get; set; }
 
     /// <summary>
@@ -184,6 +198,7 @@ public class Terminal
         Cols = Options.Cols;
         Rows = Options.Rows;
         Title = string.Empty;
+        Colors = new ColorPalette(Options.Theme);
 
         // Initialize buffers
         _normalBuffer = new Buffer.TerminalBuffer(Cols, Rows, Options.Scrollback);
