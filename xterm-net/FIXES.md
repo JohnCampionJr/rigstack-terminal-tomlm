@@ -6,6 +6,8 @@ This change ports xterm.js 5.5.0 resize reflow into XTerm.NET. Shrinking column 
 
 A related latent bug is fixed: when the buffer was at capacity and row count shrank, `CircularList.Resize` ran before trimming and kept the oldest lines, silently discarding the live screen bottom. Resize now trims from the top (raising `Trimmed`) before shrinking capacity.
 
+A second bug, in the reflow itself, is fixed here: shrinking a buffer that held an EMPTY wrapped group threw `IndexOutOfRangeException`. `ReflowSmallerGetNewLineLengths` loops while `cellsAvailable < cellsNeeded`, so a group whose trimmed length is zero returns an empty array, and `ReflowSmaller` read `[Length - 1]` from it. Only a one-row group can be empty -- every row of a group except the last counts as a full row of cells regardless of content -- so it takes a blank continuation row at index 0 with an unwrapped row beneath, which is what the scrollback leaves once the row being continued is trimmed away. Twelve spaces at six columns, two further lines, and a narrowing resize reproduce it through `Terminal.Write` alone.
+
 ## Why
 
 Without reflow, shrinking a terminal window and growing it back left every long line permanently truncated at the narrowest width — the primary defect tracked as ISS-007. Scrollback lines were also lost on capacity shrink because `CircularList.Resize` preserved the wrong end of the buffer.
@@ -19,6 +21,7 @@ Without reflow, shrinking a terminal window and growing it back left every long 
 - `src/XTerm.NET/Terminal.cs` — alt buffer `hasScrollback: false`
 - `src/XTerm.NET.Tests/Buffer/BufferReflowTests.cs` — pure-function tests
 - `src/XTerm.NET.Tests/Buffer/BufferTests.cs` — reflow integration tests
+- `src/XTerm.NET.Tests/Buffer/ReflowEmptyGroupTests.cs` — regression tests for the empty wrapped group
 
 ## Validation
 
@@ -29,7 +32,7 @@ dotnet test src/XTerm.NET.slnx
 Result on this branch:
 
 ```text
-Passed: 624
+Passed: 631
 Failed: 0
 Skipped: 0
 ```

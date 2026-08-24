@@ -472,6 +472,20 @@ public class TerminalBuffer
 
             var lastLineLength = wrappedLines[^1].GetTrimmedLength();
             var destLineLengths = BufferReflow.ReflowSmallerGetNewLineLengths(wrappedLines, _cols, newCols);
+            if (destLineLengths.Length == 0)
+            {
+                // A wrapped group holding nothing at all. ReflowSmallerGetNewLineLengths loops while
+                // cellsAvailable < cellsNeeded, so a group whose trimmed length is zero produces an
+                // EMPTY array, and reading [Length - 1] from it below throws.
+                //
+                // Only a one-row group can be empty: GetWrappedLineTrimmedLength returns cols for
+                // every row of a group except the last, so anything with two rows already counts a
+                // full row of cells. A one-row group means a continuation row sitting at index 0
+                // with an unwrapped row beneath it, which is what is left once the row it continued
+                // has been trimmed out of the scrollback -- and it is blank whenever the wrap was
+                // over whitespace. There is nothing to redistribute either way.
+                continue;
+            }
             var linesToAdd = destLineLengths.Length - wrappedLines.Count;
             int trimmedLines;
             if (_yBase == 0 && _y != _lines.Length - 1)
