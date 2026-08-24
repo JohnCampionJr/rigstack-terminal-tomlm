@@ -26,13 +26,14 @@ public partial class MainWindow : Window
         {
             Width = 80 * FontSize,
             Height = 25 * FontSize,
-            Background= Avalonia.Media.Brushes.Black,
-            Foreground= Avalonia.Media.Brushes.LightGray,
+            Background= Avalonia.Media.Brushes.Blue,
+            Foreground= Avalonia.Media.Brushes.Yellow,
             CloseOnProcessExit = true,
             WindowStartupLocation = WindowStartupLocation.Manual,
             Position = new PixelPoint(Random.Shared.Next(0, (int)this.Bounds.Width - maxWidth),
                                           Random.Shared.Next(0, (int)this.Bounds.Height - maxHeight))
         };
+        Demo.PtyTrace.Attach(terminalWindow.Terminal, terminalWindow.Title ?? "managed");
         terminalWindow.Show(Windows);
     }
 
@@ -47,10 +48,13 @@ public partial class MainWindow : Window
             Process = command.Value.Process,
             Args = command.Value.Args,
             Title = command.Value.Process,
+            Background = Avalonia.Media.Brushes.Blue,
+            Foreground = Avalonia.Media.Brushes.Yellow,
             Width = 80*FontSize,
             Height = 25*FontSize,
             CloseOnProcessExit = true
         };
+        Demo.PtyTrace.Attach(terminalWindow.Terminal, terminalWindow.Title ?? "managed");
         terminalWindow.Show(Windows);
     }
 
@@ -68,8 +72,11 @@ public partial class MainWindow : Window
             Title = "TerminalWindow",
             Width = 80 * FontSize,
             Height = 25 * FontSize,
+            Background = Avalonia.Media.Brushes.Blue,
+            Foreground = Avalonia.Media.Brushes.Yellow,
             CloseOnProcessExit = true
         };
+        Demo.PtyTrace.Attach(terminalWindow, terminalWindow.Title ?? "terminal");
         terminalWindow.Show();
     }
 
@@ -84,10 +91,18 @@ public partial class MainWindow : Window
             Process = command.Value.Process,
             Args = command.Value.Args,
             Title = command.Value.Process,
+            Background = Avalonia.Media.Brushes.Blue,
+            Foreground = Avalonia.Media.Brushes.Yellow,
             Width = 80 * FontSize,
             Height = 25 * FontSize,
             CloseOnProcessExit = true
         };
+
+        // Recording what the process writes is on by default here; set PTY_TRACE=0 to turn it off.
+        var traceDir = Demo.PtyTrace.Attach(terminalWindow, command.Value.Process);
+        if (traceDir != null)
+            terminalWindow.Title += $"  [tracing → {traceDir}]";
+
         terminalWindow.Show();
     }
 
