@@ -619,6 +619,14 @@ public class InputHandler
                     HandleHyperlink(arg);
                     break;
 
+                case OscCommand.ConEmu:
+                    HandleConEmu(arg);
+                    break;
+
+                case OscCommand.ShellIntegration:
+                    HandleShellIntegration(arg);
+                    break;
+
                 case OscCommand.ForegroundColor:
                     HandleColorQuery(((int)command).ToString(), arg);
                     break;
@@ -685,6 +693,114 @@ public class InputHandler
                 _terminal.RaiseDirectoryChanged(_terminal.CurrentDirectory);
             }
         }
+    }
+
+    /// <summary>
+    /// OSC 9 - ConEmu-style extensions, dispatched on the FIRST parameter rather than the code.
+    /// </summary>
+    private void HandleConEmu(string data)
+    {
+        // The sub-parameter decides everything, so an unrecognised one must not be treated as a
+        // notification -- OSC 9;4;... would then pop a toast reading "4;1;50" on every progress tick.
+        var parts = data.Split(new[] { ';' }, 2);
+
+        if (parts.Length == 2 && parts[0] == "9")
+        {
+            // OSC 9 ; 9 ; path ST - working directory, the ConEmu convention. Microsoft's documented
+            // Windows prompts emit THIS rather than OSC 7, so a terminal that only reads 7 silently
+            // loses the cwd on Windows. Path is bare, not a file:// URI, and pwsh quotes it.
+            var path = parts[1].Trim('"');
+            if (!string.IsNullOrEmpty(path))
+            {
+                _terminal.CurrentDirectory = path;
+                _terminal.RaiseDirectoryChanged(path);
+            }
+
+            return;
+        }
+
+        if (parts.Length == 2 && parts[0] == "4")
+        {
+            HandleProgress(parts[1]);
+            return;
+        }
+
+        // OSC 9 ; text ST - desktop notification (the iTerm2 reading of this code).
+        if (!string.IsNullOrEmpty(data))
+        {
+            _terminal.RaiseNotificationReceived(data);
+        }
+    }
+
+    /// <summary>
+    /// OSC 9 ; 4 ; state ; progress ST - progress reporting.
+    /// </summary>
+    private void HandleProgress(string data)
+    {
+        var parts = data.Split(';');
+
+        if (!int.TryParse(parts[0], out var rawState) || !Enum.IsDefined(typeof(ProgressState), rawState))
+        {
+            return;
+        }
+
+        var state = (ProgressState)rawState;
+
+        // Value is absent for None and Indeterminate, and meaningless anyway; clamped rather than
+        // rejected, because a sender that overshoots still means "as far as it goes".
+        var value = 0;
+        if (parts.Length > 1 && int.TryParse(parts[1], out var parsed))
+        {
+            value = Math.Clamp(parsed, 0, 100);
+        }
+
+        if (state == ProgressState.None || state == ProgressState.Indeterminate)
+        {
+            value = 0;
+        }
+
+        _terminal.ProgressState = state;
+        _terminal.ProgressValue = value;
+        _terminal.RaiseProgressChanged(state, value);
+    }
+
+    /// <summary>
+    /// OSC 133 - FinalTerm/FTCS shell integration marks.
+    /// </summary>
+    private void HandleShellIntegration(string data)
+    {
+        var parts = data.Split(';');
+        if (parts.Length == 0 || parts[0].Length == 0)
+        {
+            return;
+        }
+
+        ShellIntegrationMark mark;
+        switch (parts[0])
+        {
+            case "A": mark = ShellIntegrationMark.PromptStart; break;
+            case "B": mark = ShellIntegrationMark.CommandStart; break;
+            case "C": mark = ShellIntegrationMark.CommandExecuted; break;
+            case "D": mark = ShellIntegrationMark.CommandFinished; break;
+            default: return;
+        }
+
+        int? exitCode = null;
+        if (mark == ShellIntegrationMark.CommandFinished)
+        {
+            // Only D carries one, and it is optional even there: cmd.exe cannot read the previous
+            // command's status from its prompt and always sends a bare D. Left null rather than
+            // defaulted to 0, so "not reported" never reads as "succeeded".
+            if (parts.Length > 1 && int.TryParse(parts[1], out var parsedExit))
+            {
+                exitCode = parsedExit;
+            }
+
+            _terminal.LastCommandExitCode = exitCode;
+        }
+
+        _terminal.ShellIntegrationState = mark;
+        _terminal.RaiseShellIntegrationMark(mark, exitCode);
     }
 
     private void HandleHyperlink(string data)

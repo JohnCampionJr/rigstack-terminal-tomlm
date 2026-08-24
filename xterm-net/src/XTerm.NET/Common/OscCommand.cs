@@ -46,6 +46,15 @@ public enum OscCommand
     Hyperlink = 8,
     
     /// <summary>
+    /// ConEmu-style extensions (OSC 9). Multiplexed: the FIRST parameter selects the operation
+    /// rather than the code doing so, which is why this one name covers three unrelated features.
+    /// Format: OSC 9 ; 9 ; path ST        - current working directory
+    ///         OSC 9 ; 4 ; state ; pct ST - progress reporting
+    ///         OSC 9 ; text ST            - desktop notification
+    /// </summary>
+    ConEmu = 9,
+    
+    /// <summary>
     /// Set foreground color (OSC 10).
     /// </summary>
     ForegroundColor = 10,
@@ -65,6 +74,15 @@ public enum OscCommand
     /// Format: OSC 52 ; c ; data ST
     /// </summary>
     Clipboard = 52,
+    
+    /// <summary>
+    /// Shell integration marks, FinalTerm/FTCS (OSC 133).
+    /// Format: OSC 133 ; A ST            - start of prompt
+    ///         OSC 133 ; B ST            - start of command line, i.e. end of prompt
+    ///         OSC 133 ; C ST            - start of command output
+    ///         OSC 133 ; D [; exit] ST   - end of command, with optional exit code
+    /// </summary>
+    ShellIntegration = 133,
     
     /// <summary>
     /// Reset color palette (OSC 104).

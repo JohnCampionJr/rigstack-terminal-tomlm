@@ -133,6 +133,70 @@ public static class TerminalEvents
     }
 
     /// <summary>
+    /// Shell integration event - fired for each OSC 133 mark.
+    /// </summary>
+    public class ShellIntegrationEventArgs : EventArgs
+    {
+        public ShellIntegrationEventArgs(ShellIntegrationMark mark, int? exitCode)
+        {
+            Mark = mark;
+            ExitCode = exitCode;
+        }
+
+        /// <summary>
+        /// Which mark the shell reported.
+        /// </summary>
+        public ShellIntegrationMark Mark { get; }
+
+        /// <summary>
+        /// The exit code on <see cref="ShellIntegrationMark.CommandFinished"/>, when the shell sent
+        /// one. Null on every other mark, and also on CommandFinished when the shell omitted it --
+        /// cmd.exe cannot read the previous command's status from its prompt, so it always omits it.
+        /// Null means "not reported", never "succeeded".
+        /// </summary>
+        public int? ExitCode { get; }
+    }
+
+    /// <summary>
+    /// Progress event - fired for OSC 9 ; 4 progress reports.
+    /// </summary>
+    public class ProgressEventArgs : EventArgs
+    {
+        public ProgressEventArgs(ProgressState state, int value)
+        {
+            State = state;
+            Value = value;
+        }
+
+        /// <summary>
+        /// The progress state.
+        /// </summary>
+        public ProgressState State { get; }
+
+        /// <summary>
+        /// Percentage from 0 to 100. Only meaningful for <see cref="ProgressState.Normal"/>,
+        /// <see cref="ProgressState.Error"/> and <see cref="ProgressState.Warning"/>.
+        /// </summary>
+        public int Value { get; }
+    }
+
+    /// <summary>
+    /// Notification event - fired for OSC 9 desktop notifications.
+    /// </summary>
+    public class NotificationEventArgs : EventArgs
+    {
+        public NotificationEventArgs(string text)
+        {
+            Text = text;
+        }
+
+        /// <summary>
+        /// The notification body as sent by the application.
+        /// </summary>
+        public string Text { get; }
+    }
+
+    /// <summary>
     /// Hyperlink event - fired when a hyperlink is encountered or cleared.
     /// </summary>
     public class HyperlinkEventArgs : EventArgs
