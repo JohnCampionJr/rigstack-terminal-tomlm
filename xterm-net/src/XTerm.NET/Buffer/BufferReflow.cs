@@ -205,7 +205,15 @@ public static class BufferReflow
                 srcLine++;
             }
 
-            var endsWithWide = wrappedLines[srcLine].GetWidth(srcCol - 1) == 2;
+            // The newCols > 1 test is what keeps this loop finite. At a single column, a wide
+            // boundary made lineLength zero, cellsAvailable never advanced, and the while loop
+            // appended empty rows until the list threw OutOfMemoryException -- a hang followed by a
+            // crash, from nothing worse than dragging a pane to one column.
+            //
+            // A wide glyph cannot be shown in one column under any layout, so there is no width to
+            // reserve for it and the character is clipped. That is the only available answer; the
+            // bug was pretending otherwise and making no progress instead.
+            var endsWithWide = newCols > 1 && wrappedLines[srcLine].GetWidth(srcCol - 1) == 2;
             if (endsWithWide)
             {
                 srcCol--;

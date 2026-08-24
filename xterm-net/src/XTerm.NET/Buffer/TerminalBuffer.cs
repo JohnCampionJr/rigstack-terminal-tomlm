@@ -324,24 +324,27 @@ public class TerminalBuffer
             _lines.Resize(newMaxLength);
         }
 
+        if (_lines.Length > 0 && _cols < newCols)
+        {
+            for (int i = 0; i < _lines.Length; i++)
+            {
+                _lines[i]?.Resize(newCols, nullCell);
+            }
+        }
+
+        // Outside the "has lines" guard on purpose. A buffer built with zero rows -- which the
+        // constructor allows -- could never be brought to life by a later resize while this sat
+        // inside it: Lines.Length stayed 0 and the next write indexed an empty list.
+        while (_lines.Length < newRows)
+        {
+            _lines.Push(new BufferLine(newCols, nullCell));
+        }
+
+        _yBase = Math.Min(_yBase, Math.Max(0, _lines.Length - newRows));
+        _yDisp = Math.Clamp(_yDisp, 0, _yBase);
+
         if (_lines.Length > 0)
         {
-            if (_cols < newCols)
-            {
-                for (int i = 0; i < _lines.Length; i++)
-                {
-                    _lines[i]?.Resize(newCols, nullCell);
-                }
-            }
-
-            while (_lines.Length < newRows)
-            {
-                _lines.Push(new BufferLine(newCols, nullCell));
-            }
-
-            _yBase = Math.Min(_yBase, Math.Max(0, _lines.Length - newRows));
-            _yDisp = Math.Clamp(_yDisp, 0, _yBase);
-
             if (IsReflowEnabled && newCols != _cols)
             {
                 if (newCols > _cols)
@@ -377,19 +380,35 @@ public class TerminalBuffer
         }
         _scrollTop = Math.Min(_scrollTop, newRows - 1);
 
-        _x = Math.Min(_x, newCols - 1);
-        _y = Math.Min(_y, newRows - 1);
-        SavedCursorState.X = Math.Min(SavedCursorState.X, newCols - 1);
+        // Clamp, not Min. Moving to the NEW column count was the point of this change, but dropping
+        // the lower bound with it meant a negative cursor -- which SetCursorRaw exists to allow --
+        // survived the resize and left the buffer reporting an out-of-bounds position.
+        _x = Math.Clamp(_x, 0, Math.Max(0, newCols - 1));
+        _y = Math.Clamp(_y, 0, Math.Max(0, newRows - 1));
+        SavedCursorState.X = Math.Clamp(SavedCursorState.X, 0, Math.Max(0, newCols - 1));
+        SavedCursorState.Y = Math.Max(SavedCursorState.Y, 0);
 
         if (newMaxLength < _lines.MaxLength)
         {
             var amountToTrim = _lines.Length - newMaxLength;
             if (amountToTrim > 0)
             {
+                // Whether the viewport was following the bottom has to be read BEFORE the trim,
+                // because afterwards there is nothing left to tell from.
+                var wasFollowingBottom = _yDisp == _yBase;
+
                 _lines.TrimStart(amountToTrim);
                 Trimmed?.Invoke(amountToTrim);
-                _yBase = Math.Max(_yBase - amountToTrim, 0);
-                _yDisp = Math.Max(_yDisp - amountToTrim, 0);
+
+                // Recomputed against the trimmed buffer rather than shifted by the trim amount.
+                // Shifting kept the viewport a fixed distance from rows that are no longer there:
+                // a 5-row buffer with 5 of scrollback resized to 3 rows ended up showing rows 3..5
+                // of 8, with the live bottom sitting unseen at row 7, and everything written
+                // afterwards landing outside the visible area.
+                _yBase = Math.Max(0, _lines.Length - _rows);
+                _yDisp = wasFollowingBottom
+                    ? _yBase
+                    : Math.Clamp(_yDisp - amountToTrim, 0, _yBase);
                 SavedCursorState.Y = Math.Max(SavedCursorState.Y - amountToTrim, 0);
             }
             _lines.Resize(newMaxLength);
@@ -446,7 +465,11 @@ public class TerminalBuffer
 
         for (var y = _lines.Length - 1; y >= 0; y--)
         {
-            var nextLine = _lines[y];
+            // Bounds-checked, because this loop's own body shrinks _lines: the viewport adjustment
+            // below calls Pop, so y can be past the end by the next iteration. The reference
+            // implementation is JavaScript, where reading past the end yields undefined and lands in
+            // the null check underneath; in C# the same read throws.
+            var nextLine = y < _lines.Length ? _lines[y] : null;
             if (nextLine == null || (!nextLine.IsWrapped && nextLine.GetTrimmedLength() <= newCols))
             {
                 continue;
@@ -630,7 +653,12 @@ public class TerminalBuffer
             if (nextToInsert.HasValue && nextToInsert.Value.Start > originalLineIndex + countInsertedSoFar)
             {
                 var insert = nextToInsert.Value;
-                for (var nextI = insert.NewLines.Count - 1; nextI >= 0; nextI--)
+
+                // i >= 0 guards the destination. A line that expands by more than the remaining
+                // capacity produces more rows than there are slots, and without this the loop ran
+                // i down past zero and threw. Rows that do not fit are the OLDEST, which is what
+                // capacity trimming discards anyway.
+                for (var nextI = insert.NewLines.Count - 1; nextI >= 0 && i >= 0; nextI--)
                 {
                     _lines[i--] = insert.NewLines[nextI];
                 }
@@ -642,6 +670,13 @@ public class TerminalBuffer
             }
             else
             {
+                // Same guard on the source. Once the originals are exhausted there is nothing left
+                // to place, and the remaining slots already hold inserted rows.
+                if (originalLineIndex < 0)
+                {
+                    break;
+                }
+
                 _lines[i] = originalLines[originalLineIndex--];
             }
         }
