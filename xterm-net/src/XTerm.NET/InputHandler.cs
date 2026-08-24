@@ -592,6 +592,10 @@ public class InputHandler
 
         var arg = parts.Length > 1 ? parts[1] : string.Empty;
 
+        // Whether this sequence reached a handler. Cleared by the branches that do nothing with it,
+        // so a listener can tell "the terminal acted on this" from "the terminal saw it and moved on".
+        var recognized = true;
+
         // Try to parse as OscCommand enum
         if (parts[0].TryParseOscCommand(out OscCommand command))
         {
@@ -605,6 +609,7 @@ public class InputHandler
 
                 case OscCommand.SetIconName:
                     // Icon name - not typically supported in modern terminals
+                    recognized = false;
                     break;
 
                 case OscCommand.ChangeColor:
@@ -644,6 +649,7 @@ public class InputHandler
 
                 default:
                     // Known but unhandled command
+                    recognized = false;
                     System.Diagnostics.Debug.WriteLine($"Unhandled OSC command: {command}");
                     break;
             }
@@ -651,8 +657,19 @@ public class InputHandler
         else
         {
             // Unknown or unsupported OSC sequence
+            recognized = false;
             System.Diagnostics.Debug.WriteLine($"Unknown OSC sequence: {parts[0]}");
         }
+
+        // Last, so a listener observes the terminal's own handling as already done rather than
+        // pending. Raised for recognized sequences too: a listener that only wants the rest can say
+        // so with Recognized, and stop compensating by itself once a code lands here.
+        _terminal.RaiseOscReceived(
+            parts[0],
+            int.TryParse(parts[0], out var code) ? code : -1,
+            arg,
+            data,
+            recognized);
     }
 
     private void HandleColorPaletteChange(string data)

@@ -127,6 +127,15 @@ public class Terminal
     /// </summary>
     public event EventHandler<TerminalEvents.HyperlinkEventArgs>? HyperlinkChanged;
 
+    /// <summary>
+    /// Fired for every OSC sequence, including ones this terminal does not implement.
+    /// </summary>
+    /// <remarks>
+    /// Observation only, raised after any built-in handling. See
+    /// <see cref="TerminalEvents.OscReceivedEventArgs"/>.
+    /// </remarks>
+    public event EventHandler<TerminalEvents.OscReceivedEventArgs>? OscReceived;
+
     // Window manipulation events
     /// <summary>
     /// Fired when a window move command is received.
@@ -494,6 +503,9 @@ public class Terminal
 
     internal void RaiseHyperlinkChanged(string? url) =>
         HyperlinkChanged?.Invoke(this, new TerminalEvents.HyperlinkEventArgs(url ?? string.Empty, url == null));
+
+    internal void RaiseOscReceived(string identifier, int code, string data, string raw, bool recognized) =>
+        OscReceived?.Invoke(this, new TerminalEvents.OscReceivedEventArgs(identifier, code, data, raw, recognized));
     
     internal void RaiseWindowMoved(int x, int y) => 
         WindowMoved?.Invoke(this, new TerminalEvents.WindowMovedEventArgs(x, y));
@@ -665,6 +677,7 @@ public class Terminal
         LineFed = null;
         DirectoryChanged = null;
         HyperlinkChanged = null;
+        OscReceived = null;
         
         // Clear window manipulation events
         WindowMoved = null;
