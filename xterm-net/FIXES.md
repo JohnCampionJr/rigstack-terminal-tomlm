@@ -12,6 +12,19 @@ A second bug, in the reflow itself, is fixed here: shrinking a buffer that held 
 
 Without reflow, shrinking a terminal window and growing it back left every long line permanently truncated at the narrowest width — the primary defect tracked as ISS-007. Scrollback lines were also lost on capacity shrink because `CircularList.Resize` preserved the wrong end of the buffer.
 
+## Resize edge cases found in review
+
+Six further defects, each reproduced before being fixed and each reachable from ordinary use:
+
+- **One-column reflow hung, then threw `OutOfMemoryException`.** A wide glyph at the wrap boundary made the new line length zero, so `ReflowSmallerGetNewLineLengths` never advanced and appended rows until the list could not grow. A wide glyph cannot be shown in one column, so it is clipped.
+- **The viewport adjustment popped rows the outer loop was still walking**, throwing `IndexOutOfRangeException`.
+- **A line expanding past the remaining capacity indexed below zero** in the batched rebuild, throwing. Rows that do not fit are the oldest, which capacity trimming discards anyway.
+- **`Math.Min` dropped the cursor's lower bound.** Moving to the new column count was the point of that change, but a negative cursor -- which `SetCursorRaw` exists to allow -- survived the resize and left the buffer reporting an out-of-bounds position.
+- **The viewport was shifted by the trim amount rather than recomputed.** A 5-row buffer with 5 of scrollback resized to 3 rows showed rows 3..5 of 8, with the live bottom unseen at row 7 and later output landing outside the visible area.
+- **A zero-row buffer could never be initialised by a later resize**, because the row-fill loop had moved inside a "has lines" guard. `Lines.Length` stayed 0 and the next write indexed an empty list.
+
+Two of these are the same root cause: this is a port from JavaScript, where reading past the end of an array yields `undefined` and falls into a null check. In C# the identical read throws.
+
 ## Files changed
 
 - `src/XTerm.NET/Buffer/BufferReflow.cs` — pure reflow functions ported from `BufferReflow.ts`
@@ -22,6 +35,7 @@ Without reflow, shrinking a terminal window and growing it back left every long 
 - `src/XTerm.NET.Tests/Buffer/BufferReflowTests.cs` — pure-function tests
 - `src/XTerm.NET.Tests/Buffer/BufferTests.cs` — reflow integration tests
 - `src/XTerm.NET.Tests/Buffer/ReflowEmptyGroupTests.cs` — regression tests for the empty wrapped group
+- `src/XTerm.NET.Tests/Buffer/ResizeEdgeCaseTests.cs` — regression tests for the six resize edge cases above
 
 ## Validation
 
@@ -32,7 +46,7 @@ dotnet test src/XTerm.NET.slnx
 Result on this branch:
 
 ```text
-Passed: 631
+Passed: 728
 Failed: 0
 Skipped: 0
 ```
