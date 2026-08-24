@@ -26,8 +26,32 @@ public class OscPassthroughTests
     [Fact]
     public void OscReceived_FiresForUnknownSequence()
     {
-        // The reason this event exists: OSC 133 is the shell-integration code this terminal has no
-        // case for, and before this it reached Debug.WriteLine and was unrecoverable.
+        // The reason this event exists: a code with no case here reaches Debug.WriteLine and is
+        // otherwise unrecoverable. OSC 1337 is iTerm2's proprietary space, which this terminal does
+        // not implement and has no plans to.
+        //
+        // This used to use OSC 133, which was unimplemented when the event was added and is not any
+        // more. That is the Recognized contract working rather than a test going stale: a listener
+        // filling the gap stops doing so on its own once a code lands in HandleOsc. The pair below
+        // pins both halves of it.
+        var terminal = CreateTerminal();
+        var seen = Capture(terminal);
+
+        terminal.Write("\x1B]1337;SetMark\x07");
+
+        var osc = Assert.Single(seen);
+        Assert.Equal(1337, osc.Code);
+        Assert.Equal("1337", osc.Identifier);
+        Assert.Equal("SetMark", osc.Data);
+        Assert.Equal("1337;SetMark", osc.Raw);
+        Assert.False(osc.Recognized, "the terminal has no handler for 1337, which is the point");
+    }
+
+    [Fact]
+    public void OscReceived_ReportsShellIntegrationAsRecognized_NowThatItIsImplemented()
+    {
+        // The other half: OSC 133 is handled now, so a listener that only wants what this terminal
+        // ignores must be told to leave it alone.
         var terminal = CreateTerminal();
         var seen = Capture(terminal);
 
@@ -35,10 +59,7 @@ public class OscPassthroughTests
 
         var osc = Assert.Single(seen);
         Assert.Equal(133, osc.Code);
-        Assert.Equal("133", osc.Identifier);
-        Assert.Equal("A", osc.Data);
-        Assert.Equal("133;A", osc.Raw);
-        Assert.False(osc.Recognized, "the terminal has no handler for 133, which is the point");
+        Assert.True(osc.Recognized, "133 reaches a handler now, and Recognized has to say so");
     }
 
     [Fact]

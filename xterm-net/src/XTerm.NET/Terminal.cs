@@ -67,6 +67,32 @@ public class Terminal
     public string? CurrentHyperlink { get; set; }
 
     /// <summary>
+    /// The most recent OSC 133 shell integration mark, or null if the shell has never sent one.
+    /// </summary>
+    /// <remarks>
+    /// Null is a third state, not a default: shell integration must be configured in the shell, so
+    /// a shell without it is indistinguishable from one sitting at a prompt. Treat null as "cannot
+    /// say" rather than folding it into either answer.
+    ///
+    /// <see cref="ShellIntegrationMark.CommandStart"/> means the shell is waiting for input;
+    /// <see cref="ShellIntegrationMark.CommandExecuted"/> means something else holds the terminal.
+    /// </remarks>
+    public ShellIntegrationMark? ShellIntegrationState { get; internal set; }
+
+    /// <summary>
+    /// The exit code from the last OSC 133 ; D, or null if none has been reported.
+    /// </summary>
+    public int? LastCommandExitCode { get; internal set; }
+
+    /// <summary>
+    /// The progress state last reported via OSC 9 ; 4.
+    /// </summary>
+    public ProgressState ProgressState { get; internal set; } = ProgressState.None;
+
+    /// <summary>
+    /// The progress percentage last reported via OSC 9 ; 4, from 0 to 100.
+    /// </summary>
+    public int ProgressValue { get; internal set; }
     /// The terminal's colours: the 256-entry palette plus foreground, background and cursor.
     /// </summary>
     /// <remarks>
@@ -128,6 +154,19 @@ public class Terminal
     public event EventHandler<TerminalEvents.HyperlinkEventArgs>? HyperlinkChanged;
 
     /// <summary>
+    /// Fired for each OSC 133 shell integration mark.
+    /// </summary>
+    public event EventHandler<TerminalEvents.ShellIntegrationEventArgs>? ShellIntegrationMarkReceived;
+
+    /// <summary>
+    /// Fired when progress is reported via OSC 9 ; 4.
+    /// </summary>
+    public event EventHandler<TerminalEvents.ProgressEventArgs>? ProgressChanged;
+
+    /// <summary>
+    /// Fired when a desktop notification is requested via OSC 9.
+    /// </summary>
+    public event EventHandler<TerminalEvents.NotificationEventArgs>? NotificationReceived;
     /// Fired for every OSC sequence, including ones this terminal does not implement.
     /// </summary>
     /// <remarks>
@@ -504,6 +543,14 @@ public class Terminal
     internal void RaiseHyperlinkChanged(string? url) =>
         HyperlinkChanged?.Invoke(this, new TerminalEvents.HyperlinkEventArgs(url ?? string.Empty, url == null));
 
+    internal void RaiseShellIntegrationMark(ShellIntegrationMark mark, int? exitCode) =>
+        ShellIntegrationMarkReceived?.Invoke(this, new TerminalEvents.ShellIntegrationEventArgs(mark, exitCode));
+
+    internal void RaiseProgressChanged(ProgressState state, int value) =>
+        ProgressChanged?.Invoke(this, new TerminalEvents.ProgressEventArgs(state, value));
+
+    internal void RaiseNotificationReceived(string text) =>
+        NotificationReceived?.Invoke(this, new TerminalEvents.NotificationEventArgs(text));
     internal void RaiseOscReceived(string identifier, int code, string data, string raw, bool recognized) =>
         OscReceived?.Invoke(this, new TerminalEvents.OscReceivedEventArgs(identifier, code, data, raw, recognized));
     
@@ -677,6 +724,9 @@ public class Terminal
         LineFed = null;
         DirectoryChanged = null;
         HyperlinkChanged = null;
+        ShellIntegrationMarkReceived = null;
+        ProgressChanged = null;
+        NotificationReceived = null;
         OscReceived = null;
         
         // Clear window manipulation events
