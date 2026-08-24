@@ -732,9 +732,22 @@ public class InputHandler
     /// </summary>
     private void HandleConEmu(string data)
     {
-        // The sub-parameter decides everything, so an unrecognised one must not be treated as a
-        // notification -- OSC 9;4;... would then pop a toast reading "4;1;50" on every progress tick.
+        // The sub-parameter decides which feature this is, and the notification form has no
+        // sub-parameter at all -- OSC 9 ; text -- so it can only be the fallback. That makes the
+        // ORDER load-bearing rather than incidental: every claimed sub-command has to be matched
+        // first, or OSC 9;4;1;50 pops a toast reading "4;1;50" on every progress tick.
+        //
+        // An unclaimed sub-parameter is therefore a notification by definition, which is the right
+        // reading of a permissive extension space, and means a future ConEmu code shows up as text
+        // rather than being dropped.
         var parts = data.Split(new[] { ';' }, 2);
+
+        if (parts.Length == 1 && (data == "9" || data == "4"))
+        {
+            // A claimed sub-command with nothing after it. Malformed rather than a notification:
+            // reporting it as one would raise a toast whose entire body is "9".
+            return;
+        }
 
         if (parts.Length == 2 && parts[0] == "9")
         {

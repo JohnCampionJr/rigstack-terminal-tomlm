@@ -310,6 +310,35 @@ public class ShellIntegrationTests
         Assert.Equal("Build finished", text);
     }
 
+    [Theory]
+    [InlineData("9")]
+    [InlineData("4")]
+    public void Osc9_IgnoresAClaimedSubCommandWithNoPayload(string subCommand)
+    {
+        // "OSC 9;9" carries a sub-command and nothing else. Falling through to the notification case
+        // would raise a toast whose entire body is "9".
+        var terminal = CreateTerminal();
+        var notifications = new List<string>();
+        terminal.NotificationReceived += (_, e) => notifications.Add(e.Text);
+
+        terminal.Write($"\u001b]9;{subCommand}\u0007");
+
+        Assert.Empty(notifications);
+    }
+
+    [Fact]
+    public void Osc9Notification_StillFiresForTextThatContainsSemicolons()
+    {
+        // The fallback must keep the whole body. Only a CLAIMED sub-command is special.
+        var terminal = CreateTerminal();
+        string? text = null;
+        terminal.NotificationReceived += (_, e) => text = e.Text;
+
+        terminal.Write("\u001b]9;Build finished; 3 warnings\u0007");
+
+        Assert.Equal("Build finished; 3 warnings", text);
+    }
+
     [Fact]
     public void Osc9Notification_DoesNotFireForProgressOrCwd()
     {

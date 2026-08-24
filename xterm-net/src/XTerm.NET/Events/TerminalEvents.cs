@@ -194,6 +194,9 @@ public static class TerminalEvents
         /// The notification body as sent by the application.
         /// </summary>
         public string Text { get; }
+    }
+
+    /// <summary>
     /// Raw OSC event - fired for EVERY OSC sequence the parser completes, including ones this
     /// library does not implement.
     /// </summary>
