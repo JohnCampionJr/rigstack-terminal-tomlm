@@ -9,6 +9,7 @@ namespace XTerm.Buffer;
 public class TerminalBuffer
 {
     private readonly CircularList<BufferLine> _lines;
+    private readonly bool _hasScrollback;
     private int _yDisp;
     private int _yBase;
     private int _y;
@@ -91,8 +92,9 @@ public class TerminalBuffer
 
     public SavedCursor SavedCursorState { get; set; }
 
-    public TerminalBuffer(int cols, int rows, int scrollback)
+    public TerminalBuffer(int cols, int rows, int scrollback, bool hasScrollback = true)
     {
+        _hasScrollback = hasScrollback;
         _cols = cols;
         _rows = rows;
         _lines = new CircularList<BufferLine>(rows + scrollback);
@@ -110,6 +112,8 @@ public class TerminalBuffer
             _lines.Push(new BufferLine(cols, BufferCell.Space));
         }
     }
+
+    private bool IsReflowEnabled => _hasScrollback && _lines.MaxLength > _rows;
 
     /// <summary>
     /// Gets a line from the buffer.
@@ -312,30 +316,56 @@ public class TerminalBuffer
     /// </summary>
     public void Resize(int newCols, int newRows)
     {
-        // Calculate new max length keeping the same scrollback capacity
+        var nullCell = BufferCell.Space;
         var newMaxLength = newRows + (_lines.MaxLength - _rows);
 
-        // Resize max length of circular list (may drop oldest lines if shrinking)
-        _lines.Resize(newMaxLength);
-
-        // Resize existing lines to the new column count
-        var fillCell = BufferCell.Space;
-        for (int i = 0; i < _lines.Length; i++)
+        if (newMaxLength > _lines.MaxLength)
         {
-            _lines[i]?.Resize(newCols, fillCell);
+            _lines.Resize(newMaxLength);
         }
 
-        // Ensure we have at least viewport rows available
+        if (_lines.Length > 0 && _cols < newCols)
+        {
+            for (int i = 0; i < _lines.Length; i++)
+            {
+                _lines[i]?.Resize(newCols, nullCell);
+            }
+        }
+
+        // Outside the "has lines" guard on purpose. A buffer built with zero rows -- which the
+        // constructor allows -- could never be brought to life by a later resize while this sat
+        // inside it: Lines.Length stayed 0 and the next write indexed an empty list.
         while (_lines.Length < newRows)
         {
-            _lines.Push(new BufferLine(newCols, fillCell));
+            _lines.Push(new BufferLine(newCols, nullCell));
         }
 
-        // If we have fewer rows, ensure ybase/ydisp stay in range
         _yBase = Math.Min(_yBase, Math.Max(0, _lines.Length - newRows));
         _yDisp = Math.Clamp(_yDisp, 0, _yBase);
 
-        // Update scroll region and dimensions
+        if (_lines.Length > 0)
+        {
+            if (IsReflowEnabled && newCols != _cols)
+            {
+                if (newCols > _cols)
+                {
+                    ReflowLarger(newCols, newRows);
+                }
+                else
+                {
+                    ReflowSmaller(newCols, newRows);
+                }
+            }
+
+            if (_cols > newCols)
+            {
+                for (int i = 0; i < _lines.Length; i++)
+                {
+                    _lines[i]?.Resize(newCols, nullCell);
+                }
+            }
+        }
+
         var oldRows = _rows;
         _cols = newCols;
         _rows = newRows;
@@ -350,9 +380,306 @@ public class TerminalBuffer
         }
         _scrollTop = Math.Min(_scrollTop, newRows - 1);
 
-        // Clamp cursor within new bounds
-        _x = Math.Clamp(_x, 0, _cols - 1);
-        _y = Math.Clamp(_y, 0, _rows - 1);
+        // Clamp, not Min. Moving to the NEW column count was the point of this change, but dropping
+        // the lower bound with it meant a negative cursor -- which SetCursorRaw exists to allow --
+        // survived the resize and left the buffer reporting an out-of-bounds position.
+        _x = Math.Clamp(_x, 0, Math.Max(0, newCols - 1));
+        _y = Math.Clamp(_y, 0, Math.Max(0, newRows - 1));
+        SavedCursorState.X = Math.Clamp(SavedCursorState.X, 0, Math.Max(0, newCols - 1));
+        SavedCursorState.Y = Math.Max(SavedCursorState.Y, 0);
+
+        if (newMaxLength < _lines.MaxLength)
+        {
+            var amountToTrim = _lines.Length - newMaxLength;
+            if (amountToTrim > 0)
+            {
+                // Whether the viewport was following the bottom has to be read BEFORE the trim,
+                // because afterwards there is nothing left to tell from.
+                var wasFollowingBottom = _yDisp == _yBase;
+
+                _lines.TrimStart(amountToTrim);
+                Trimmed?.Invoke(amountToTrim);
+
+                // Recomputed against the trimmed buffer rather than shifted by the trim amount.
+                // Shifting kept the viewport a fixed distance from rows that are no longer there:
+                // a 5-row buffer with 5 of scrollback resized to 3 rows ended up showing rows 3..5
+                // of 8, with the live bottom sitting unseen at row 7, and everything written
+                // afterwards landing outside the visible area.
+                _yBase = Math.Max(0, _lines.Length - _rows);
+                _yDisp = wasFollowingBottom
+                    ? _yBase
+                    : Math.Clamp(_yDisp - amountToTrim, 0, _yBase);
+                SavedCursorState.Y = Math.Max(SavedCursorState.Y - amountToTrim, 0);
+            }
+            _lines.Resize(newMaxLength);
+        }
+    }
+
+    private void ReflowLarger(int newCols, int newRows)
+    {
+        var nullCell = BufferCell.Space;
+        var toRemove = BufferReflow.ReflowLargerGetLinesToRemove(
+            _lines, _cols, newCols, _yBase + _y, nullCell);
+        if (toRemove.Length > 0)
+        {
+            var newLayoutResult = BufferReflow.ReflowLargerCreateNewLayout(_lines, toRemove);
+            BufferReflow.ReflowLargerApplyNewLayout(_lines, newLayoutResult.Layout);
+            ReflowLargerAdjustViewport(newCols, newRows, newLayoutResult.CountRemoved);
+        }
+    }
+
+    private void ReflowLargerAdjustViewport(int newCols, int newRows, int countRemoved)
+    {
+        var nullCell = BufferCell.Space;
+        var viewportAdjustments = countRemoved;
+        while (viewportAdjustments-- > 0)
+        {
+            if (_yBase == 0)
+            {
+                if (_y > 0)
+                {
+                    _y--;
+                }
+                if (_lines.Length < newRows)
+                {
+                    _lines.Push(new BufferLine(newCols, nullCell));
+                }
+            }
+            else
+            {
+                if (_yDisp == _yBase)
+                {
+                    _yDisp--;
+                }
+                _yBase--;
+            }
+        }
+        SavedCursorState.Y = Math.Max(SavedCursorState.Y - countRemoved, 0);
+    }
+
+    private void ReflowSmaller(int newCols, int newRows)
+    {
+        var nullCell = BufferCell.Space;
+        var toInsert = new List<(int Start, List<BufferLine> NewLines)>();
+        var countToInsert = 0;
+
+        for (var y = _lines.Length - 1; y >= 0; y--)
+        {
+            // Bounds-checked, because this loop's own body shrinks _lines: the viewport adjustment
+            // below calls Pop, so y can be past the end by the next iteration. The reference
+            // implementation is JavaScript, where reading past the end yields undefined and lands in
+            // the null check underneath; in C# the same read throws.
+            var nextLine = y < _lines.Length ? _lines[y] : null;
+            if (nextLine == null || (!nextLine.IsWrapped && nextLine.GetTrimmedLength() <= newCols))
+            {
+                continue;
+            }
+
+            var wrappedLines = new List<BufferLine> { nextLine };
+            while (nextLine.IsWrapped && y > 0)
+            {
+                nextLine = _lines[--y]!;
+                wrappedLines.Insert(0, nextLine);
+            }
+
+            if (BufferReflow.HasNonNormalLineAttribute(wrappedLines))
+            {
+                continue;
+            }
+
+            var absoluteY = _yBase + _y;
+            if (absoluteY >= y && absoluteY < y + wrappedLines.Count)
+            {
+                continue;
+            }
+
+            var lastLineLength = wrappedLines[^1].GetTrimmedLength();
+            var destLineLengths = BufferReflow.ReflowSmallerGetNewLineLengths(wrappedLines, _cols, newCols);
+            if (destLineLengths.Length == 0)
+            {
+                // A wrapped group holding nothing at all. ReflowSmallerGetNewLineLengths loops while
+                // cellsAvailable < cellsNeeded, so a group whose trimmed length is zero produces an
+                // EMPTY array, and reading [Length - 1] from it below throws.
+                //
+                // Only a one-row group can be empty: GetWrappedLineTrimmedLength returns cols for
+                // every row of a group except the last, so anything with two rows already counts a
+                // full row of cells. A one-row group means a continuation row sitting at index 0
+                // with an unwrapped row beneath it, which is what is left once the row it continued
+                // has been trimmed out of the scrollback -- and it is blank whenever the wrap was
+                // over whitespace. There is nothing to redistribute either way.
+                continue;
+            }
+            var linesToAdd = destLineLengths.Length - wrappedLines.Count;
+            int trimmedLines;
+            if (_yBase == 0 && _y != _lines.Length - 1)
+            {
+                trimmedLines = Math.Max(0, _y - _lines.MaxLength + linesToAdd);
+            }
+            else
+            {
+                trimmedLines = Math.Max(0, _lines.Length - _lines.MaxLength + linesToAdd);
+            }
+
+            var newLines = new List<BufferLine>();
+            for (var i = 0; i < linesToAdd; i++)
+            {
+                newLines.Add(GetBlankLine(AttributeData.Default, isWrapped: true));
+            }
+
+            if (newLines.Count > 0)
+            {
+                toInsert.Add((y + wrappedLines.Count + countToInsert, newLines));
+                countToInsert += newLines.Count;
+            }
+
+            wrappedLines.AddRange(newLines);
+
+            var destLineIndex = destLineLengths.Length - 1;
+            var destCol = destLineLengths[destLineIndex];
+            if (destCol == 0)
+            {
+                destLineIndex--;
+                destCol = destLineLengths[destLineIndex];
+            }
+
+            var srcLineIndex = wrappedLines.Count - linesToAdd - 1;
+            var srcCol = lastLineLength;
+            while (srcLineIndex >= 0)
+            {
+                var cellsToCopy = Math.Min(srcCol, destCol);
+                if (wrappedLines[destLineIndex] == null)
+                {
+                    break;
+                }
+
+                wrappedLines[destLineIndex].CopyCellsFrom(
+                    wrappedLines[srcLineIndex], srcCol - cellsToCopy, destCol - cellsToCopy, cellsToCopy, true);
+                destCol -= cellsToCopy;
+                if (destCol == 0)
+                {
+                    destLineIndex--;
+                    if (destLineIndex < 0)
+                    {
+                        break;
+                    }
+                    destCol = destLineLengths[destLineIndex];
+                }
+                srcCol -= cellsToCopy;
+                if (srcCol == 0)
+                {
+                    srcLineIndex--;
+                    var wrappedLinesIndex = Math.Max(srcLineIndex, 0);
+                    srcCol = BufferReflow.GetWrappedLineTrimmedLength(wrappedLines, wrappedLinesIndex, _cols);
+                }
+            }
+
+            for (var i = 0; i < wrappedLines.Count && i < destLineLengths.Length; i++)
+            {
+                if (destLineLengths[i] < newCols)
+                {
+                    wrappedLines[i].ReplaceCells(destLineLengths[i], newCols, nullCell);
+                }
+            }
+
+            var viewportAdjustments = linesToAdd - trimmedLines;
+            while (viewportAdjustments-- > 0)
+            {
+                if (_yBase == 0)
+                {
+                    if (_y < newRows - 1)
+                    {
+                        _y++;
+                        _lines.Pop();
+                    }
+                    else
+                    {
+                        _yBase++;
+                        _yDisp++;
+                    }
+                }
+                else
+                {
+                    if (_yBase < Math.Min(_lines.MaxLength, _lines.Length + countToInsert) - newRows)
+                    {
+                        if (_yBase == _yDisp)
+                        {
+                            _yDisp++;
+                        }
+                        _yBase++;
+                    }
+                }
+            }
+
+            SavedCursorState.Y = Math.Min(SavedCursorState.Y + linesToAdd, _yBase + newRows - 1);
+        }
+
+        if (toInsert.Count > 0)
+        {
+            var originalLines = new List<BufferLine>(_lines.Length);
+            for (var i = 0; i < _lines.Length; i++)
+            {
+                originalLines.Add(_lines[i]!);
+            }
+
+            var originalLinesLength = originalLines.Count;
+            RebuildWithInsertions(originalLines, toInsert, countToInsert);
+
+            var amountToTrim = Math.Max(0, originalLinesLength + countToInsert - _lines.MaxLength);
+            if (amountToTrim > 0)
+            {
+                _yBase = Math.Max(_yBase - amountToTrim, 0);
+                _yDisp = Math.Max(_yDisp - amountToTrim, 0);
+                SavedCursorState.Y = Math.Max(SavedCursorState.Y - amountToTrim, 0);
+                Trimmed?.Invoke(amountToTrim);
+            }
+        }
+    }
+
+    private void RebuildWithInsertions(
+        IReadOnlyList<BufferLine> originalLines,
+        IReadOnlyList<(int Start, List<BufferLine> NewLines)> toInsert,
+        int countInserted)
+    {
+        var originalLinesLength = originalLines.Count;
+        _lines.SetLength(Math.Min(_lines.MaxLength, originalLinesLength + countInserted));
+
+        var originalLineIndex = originalLinesLength - 1;
+        var nextToInsertIndex = 0;
+        var nextToInsert = nextToInsertIndex < toInsert.Count ? toInsert[nextToInsertIndex] : ((int Start, List<BufferLine> NewLines)?)null;
+        var countInsertedSoFar = 0;
+
+        for (var i = Math.Min(_lines.MaxLength - 1, originalLinesLength + countInserted - 1); i >= 0; i--)
+        {
+            if (nextToInsert.HasValue && nextToInsert.Value.Start > originalLineIndex + countInsertedSoFar)
+            {
+                var insert = nextToInsert.Value;
+
+                // i >= 0 guards the destination. A line that expands by more than the remaining
+                // capacity produces more rows than there are slots, and without this the loop ran
+                // i down past zero and threw. Rows that do not fit are the OLDEST, which is what
+                // capacity trimming discards anyway.
+                for (var nextI = insert.NewLines.Count - 1; nextI >= 0 && i >= 0; nextI--)
+                {
+                    _lines[i--] = insert.NewLines[nextI];
+                }
+                i++;
+
+                countInsertedSoFar += insert.NewLines.Count;
+                nextToInsertIndex++;
+                nextToInsert = nextToInsertIndex < toInsert.Count ? toInsert[nextToInsertIndex] : null;
+            }
+            else
+            {
+                // Same guard on the source. Once the originals are exhausted there is nothing left
+                // to place, and the remaining slots already hold inserted rows.
+                if (originalLineIndex < 0)
+                {
+                    break;
+                }
+
+                _lines[i] = originalLines[originalLineIndex--];
+            }
+        }
     }
 
     /// <summary>

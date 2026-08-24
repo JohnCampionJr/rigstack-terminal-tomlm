@@ -188,6 +188,16 @@ public class CircularList<T> where T : class
     }
 
     /// <summary>
+    /// Sets the logical length of the list. Used by buffer reflow batching.
+    /// </summary>
+    internal void SetLength(int newLength)
+    {
+        if (newLength < 0 || newLength > MaxLength)
+            throw new ArgumentOutOfRangeException(nameof(newLength));
+        _length = newLength;
+    }
+
+    /// <summary>
     /// Resizes the maximum length of the circular list.
     /// </summary>
     public void Resize(int newMaxLength)
