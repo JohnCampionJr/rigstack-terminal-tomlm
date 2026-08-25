@@ -35,6 +35,18 @@ public class InputHandler
     // continuation is silently dropped rather than joining two unrelated characters.
     private (int Row, int Col)? _zwjContinuation;
 
+    // Where a lone regional indicator is sitting, if one is. Two of them form one flag, and they arrive in
+    // separate Print calls — so pairing them needs state that outlives a call, exactly as a ZWJ cluster does.
+    //
+    // Cell is where the first one went; Cursor is where it left the cursor. Both are checked, so a second
+    // indicator pairs only when it lands exactly where the first one would have put it. Anything that moved
+    // the cursor in between leaves two unrelated indicators standing alone, which is what they are.
+    private (int Row, int Cell, int Cursor)? _regionalPending;
+
+    /// <summary>The regional indicator symbols, U+1F1E6 to U+1F1FF. Two of them make one flag.</summary>
+    private static bool IsRegionalIndicator(int codePoint)
+        => codePoint >= 0x1F1E6 && codePoint <= 0x1F1FF;
+
     public InputHandler(Terminal terminal)
     {
         _terminal = terminal;
@@ -116,6 +128,23 @@ public class InputHandler
                                    && pending.Row == _buffer.Y + _buffer.YBase
                                    && pending.Col == _buffer.X;
             _zwjContinuation = null;
+
+            // A second regional indicator lands beside the first and turns it into a flag: one glyph, two
+            // columns. Handled here rather than through the combining path because it does not merely append
+            // — the cell it joins has to GROW to the width the pair occupies, and gain the placeholder that
+            // every wide cell carries.
+            if (IsRegionalIndicator(codePoint)
+                && _regionalPending is { } flag
+                && flag.Row == _buffer.Y + _buffer.YBase
+                && flag.Cursor == _buffer.X
+                && TryPairRegionalIndicator(data, flag.Cell))
+            {
+                return;
+            }
+
+            // Any other character breaks the pair. A lone indicator is a perfectly good character — it
+            // renders as a letter in a box — so it simply stops being the first half of anything.
+            _regionalPending = null;
 
             if (continuesCluster || IsCombiningCharacter(codePoint))
             {
@@ -201,8 +230,63 @@ public class InputHandler
             }
         }
 
+        // A lone regional indicator may turn out to be the first half of a flag. Remember where it went and
+        // where it left the cursor, so the next one can recognise itself as the second half.
+        if (cell.CodePoint is var cp && IsRegionalIndicator(cp))
+            _regionalPending = (_buffer.Y + _buffer.YBase, _buffer.X, _buffer.X + width);
+
         // Use MoveCursor to allow X to be one past the last column (pending wrap)
         _buffer.SetCursorRaw(_buffer.X + width, _buffer.Y);
+    }
+
+    /// <summary>
+    /// Joins a second regional indicator to the one already at <paramref name="cellX"/>, making the pair a
+    /// single double-width flag.
+    /// </summary>
+    /// <remarks>
+    /// <para>The first indicator was printed as an ordinary single-width character, because at the time it
+    /// was one — nothing says a flag is coming, and a lone indicator is a valid character that renders as a
+    /// letter in a box. So this widens the cell it already wrote rather than laying a new one down.</para>
+    /// <para>Returns false rather than half-doing it if the pair will not fit, which leaves the caller to
+    /// print the second indicator on its own. Two boxed letters at the edge of the screen is a better answer
+    /// than a wide cell hanging off it.</para>
+    /// </remarks>
+    private bool TryPairRegionalIndicator(string data, int cellX)
+    {
+        var line = _buffer.Lines[_buffer.Y + _buffer.YBase];
+        if (line == null || cellX < 0 || cellX >= _terminal.Cols)
+            return false;
+
+        // The flag needs the column after it for the placeholder every wide cell carries.
+        if (cellX + 1 >= _terminal.Cols)
+            return false;
+
+        var first = line[cellX];
+        if (!IsRegionalIndicator(first.CodePoint))
+            return false;
+
+        var flag = new BufferCell
+        {
+            Content = first.Content + data,
+            Width = 2,
+            Attributes = first.Attributes,
+            // The FIRST indicator, which is what identifies the flag — and what a second call would test
+            // against, if a third indicator ever arrives.
+            CodePoint = first.CodePoint,
+        };
+
+        line.SetCell(cellX, ref flag);
+
+        var spacer = BufferCell.Empty;
+        spacer.Attributes = first.Attributes;
+        line.SetCell(cellX + 1, ref spacer);
+
+        _buffer.SetCursorRaw(cellX + 2, _buffer.Y);
+
+        // A third indicator starts a new pair rather than joining this one, which is what UAX #29 says:
+        // indicators pair up from the left, they do not accumulate.
+        _regionalPending = null;
+        return true;
     }
 
     /// <summary>
@@ -2207,7 +2291,6 @@ public class InputHandler
         bool supportsComplexEmoji = true;
         ushort width = 0;
         ushort lastWidth = 0;
-        int regionalRuneCount = 0;
         foreach (Rune rune in text.EnumerateRunes())
         {
             int runeWidth = UnicodeCalculator.GetWidth(rune);
@@ -2243,15 +2326,16 @@ public class InputHandler
 
                     // else: combining � ignore
                 }
-                // regional indicator symbols
-                else if (rune.Value >= 0x1F1E6 && rune.Value <= 0x1F1FF)
-                {
-                    regionalRuneCount++;
-                    if (regionalRuneCount % 2 == 0)
-                        // every pair of regional indicator symbols form a single glyph
-                        width += (ushort)runeWidth;
-                    // If the last rune is a regional indicator symbol, continue the current glyph
-                }
+                // Regional indicator symbols need no special case at all, which is why there is no longer
+                // one: each is worth 1, so a pair comes to 2 — the width of the flag they make — and a lone
+                // one comes to 1, which is the boxed letter it renders as.
+                //
+                // The case that used to be here added width only on the SECOND of a pair, so a single
+                // indicator measured 0. This method is called once per printed character and the two halves
+                // of a flag arrive separately, so the count was always 1, always odd, and the answer was
+                // always 0. Width 0 leaves the cursor standing still, and the next character overwrote the
+                // indicator — which is why a flag disappeared from the buffer rather than merely rendering
+                // oddly. Pairing them is Print's job, where the state to do it survives the call.
                 else
                 {
                     width += (ushort)runeWidth;
