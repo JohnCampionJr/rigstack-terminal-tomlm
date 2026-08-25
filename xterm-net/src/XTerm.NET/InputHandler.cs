@@ -102,8 +102,13 @@ public class InputHandler
         if (codePoint >= 0xFE20 && codePoint <= 0xFE2F)
             return true;
 
-        // Emoji Modifiers / Skin Tones (U+1F3FB�U+1F3FF)
-        if (codePoint >= 0x1F3FB && codePoint <= 0x1F3FF)
+        // Emoji Modifiers / Skin Tones (U+1F3FB..U+1F3FF)
+        //
+        // Combining is not decided here alone: a skin tone modifies an EMOJI, and TryAppendToPreviousCell
+        // checks what it is being asked to attach to. Saying yes unconditionally glued a modifier onto
+        // whatever happened to precede it — "║🏼║" put the tone inside the box-drawing character and drew
+        // the pair as one unreadable cell, where every other terminal shows a swatch standing on its own.
+        if (IsSkinToneModifier(codePoint))
             return true;
 
         // Keycap combining sequence (U+20E3)
@@ -112,6 +117,41 @@ public class InputHandler
 
         return false;
     }
+
+    /// <summary>The Fitzpatrick skin tone modifiers, U+1F3FB to U+1F3FF.</summary>
+    private static bool IsSkinToneModifier(int codePoint)
+        => codePoint >= 0x1F3FB && codePoint <= 0x1F3FF;
+
+    /// <summary>
+    /// The last code point in a cell's content — the one a modifier would actually be attaching to, since a
+    /// cell may already hold a whole cluster.
+    /// </summary>
+    private static int LastRuneOf(string? content)
+    {
+        if (string.IsNullOrEmpty(content))
+            return 0;
+
+        int last = 0;
+        foreach (var rune in content.EnumerateRunes())
+            last = rune.Value;
+
+        return last;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="codePoint"/> is something a skin tone can actually modify.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately broader than Unicode's Emoji_Modifier_Base list, which runs to some thirty ranges and
+    /// would have to be revised every release. Everything on it is an emoji, so "is this an emoji" rejects
+    /// the case that matters — a letter, a box-drawing character, a CJK ideograph — while letting through a
+    /// handful of emoji that take no modifier. Those render as whatever the font makes of them, which is
+    /// what the program asked for; the alternative is a table that silently rots.
+    /// </remarks>
+    private static bool CanTakeSkinTone(int codePoint)
+        => codePoint >= 0x1F000
+           || codePoint == 0x261D || codePoint == 0x26F9
+           || (codePoint >= 0x270A && codePoint <= 0x270D);
 
     /// <summary>
     /// Prints a character to the buffer.
@@ -353,6 +393,15 @@ public class InputHandler
         {
             // Only allow combining with actual content, not empty/space cells
             // unless the space is the only content (which shouldn't happen for valid sequences)
+            return false;
+        }
+
+        // A skin tone modifies an EMOJI. Attaching it to whatever happened to come first put the tone
+        // inside a box-drawing character for "║🏼║" and drew the pair as one unreadable cell, where every
+        // other terminal shows the swatch standing on its own. Refusing here sends it back to Print, which
+        // gives it a cell of its own.
+        if (IsSkinToneModifier(codePoint) && !CanTakeSkinTone(LastRuneOf(prevCell.Content)))
+        {
             return false;
         }
 
@@ -2333,6 +2382,16 @@ public class InputHandler
                     // Emoji modifier (skin tone) or keycap extender should continue current glyph
 
                     // else: combining � ignore
+                }
+                else if (rune.Value >= Emoji.SkinTones.Light && rune.Value <= Emoji.SkinTones.Dark)
+                {
+                    // A skin tone with nothing in front of it to modify. Unicode gives these East Asian
+                    // Width W, and every other terminal draws a lone one as a two-column swatch — so that is
+                    // what it occupies. wcwidth answers 0 because it assumes the modifier is attached to
+                    // something, and 0 meant the cursor never moved and the next character printed over the
+                    // top of it: "🏽X" left an X and no swatch.
+                    width += 2;
+                    lastWidth = 2;
                 }
                 // Regional indicator symbols need no special case at all, which is why there is no longer
                 // one: each is worth 1, so a pair comes to 2 — the width of the flag they make — and a lone
