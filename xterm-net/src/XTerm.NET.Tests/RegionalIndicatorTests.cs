@@ -156,6 +156,27 @@ public class RegionalIndicatorTests
     }
 
     /// <summary>
+    /// U+FFFC has the same shape of bug and the same consequence: it was measured 0, so it never moved the
+    /// cursor and the next character printed over it.
+    /// </summary>
+    /// <remarks>
+    /// It shares a branch with ZWJ, which subtracts the width of the glyph in front of it. With nothing in
+    /// front, that subtracted from zero. Found by sweeping every codepoint ucs-detect expects to be narrow
+    /// against what the buffer actually does — it was the only one of 36,254 that moved the cursor wrongly.
+    /// </remarks>
+    [Fact]
+    public void A_lone_object_replacement_character_keeps_its_column()
+    {
+        var terminal = Write("￼X");
+        var line = terminal.Buffer.Lines[0]!;
+
+        Assert.Equal("￼", line[0].Content);
+        Assert.Equal(1, line[0].Width);
+        Assert.Equal("X", line[1].Content);
+        Assert.Equal(2, terminal.Buffer.X);
+    }
+
+    /// <summary>
     /// The other clusters keep working. Included because this change touches the shared width routine, and
     /// the ZWJ and skin-tone paths run through the same method.
     /// </summary>

@@ -2298,11 +2298,19 @@ public class InputHandler
             {
                 if (rune.Value == Emoji.ZeroWidthJoiner || rune.Value == Emoji.ObjectReplacementCharacter)
                 {
-                    if (supportsComplexEmoji)
-                        width -= lastWidth;
-                    else
+                    if (!supportsComplexEmoji)
                         // we return the first emoji as the result because terminal doesn't support chaining them
                         break;
+
+                    if (lastWidth > 0)
+                        // It joins the glyph before it, which has already been counted.
+                        width -= lastWidth;
+                    else
+                        // Nothing in front of it to join, so it stands on its own. Subtracting unconditionally
+                        // left a lone U+FFFC measuring 0, and a character measuring 0 does not move the
+                        // cursor — so whatever came next printed over the top of it. ZWJ passes through here
+                        // too and is unaffected, being genuinely zero-width in its own right.
+                        width += (ushort)runeWidth;
                 }
                 else if (rune.Value == Codepoints.VariationSelectors.EmojiSymbol &&
                          lastWidth == 1)
