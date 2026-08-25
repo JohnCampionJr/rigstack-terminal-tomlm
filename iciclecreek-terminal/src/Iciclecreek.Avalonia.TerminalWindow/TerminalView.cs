@@ -239,8 +239,21 @@ namespace Iciclecreek.Terminal
         /// and box drawing, alignment and cursor positioning all come apart. A terminal control has to be
         /// usable without the consumer knowing to style it.
         /// </remarks>
+        /// <remarks>
+        /// The emoji families are at the END and never in front. The cell grid comes from the first family
+        /// that exists on the machine, these are proportional, and one of them in that position breaks the
+        /// grid rather than fixing the glyphs.
+        ///
+        /// They are named rather than left to the platform because the fallback picks badly for a joined
+        /// sequence. With no emoji family in the chain, a cluster the monospace families cannot shape falls
+        /// to whatever monochrome symbol font the system offers — and that font has the COMPONENTS without a
+        /// ligature for the sequence, so a couple or a family is drawn as its separate parts, tinted by the
+        /// terminal's foreground. That tint is the giveaway: a colour emoji carries its own colours, so
+        /// anything wearing the foreground is not one.
+        /// </remarks>
         public static readonly FontFamily DefaultFontFamily = new FontFamily(
-            "Cascadia Mono,Cascadia Code,Consolas,Menlo,DejaVu Sans Mono,Liberation Mono,Courier New,monospace");
+            "Cascadia Mono,Cascadia Code,Consolas,Menlo,DejaVu Sans Mono,Liberation Mono,Courier New," +
+            "Segoe UI Emoji,Apple Color Emoji,Noto Color Emoji,monospace");
 
         public static readonly StyledProperty<FontFamily> FontFamilyProperty =
             AvaloniaProperty.Register<TerminalView, FontFamily>(
@@ -3045,9 +3058,22 @@ namespace Iciclecreek.Terminal
             });
         }
 
+        /// <summary>
+        /// Answers a program asking about the window — its size in cells or pixels, its position, its title.
+        /// </summary>
+        /// <remarks>
+        /// <para>INVOKE, not Post, and the difference is the whole behaviour. The emulator raises this
+        /// synchronously and reads <c>e.Handled</c> the moment the handler returns, to decide whether it has
+        /// an answer to send. Post returns immediately, so Handled was still false and the reply was never
+        /// sent — the answer was written correctly, on the UI thread, after the only reader of it had moved
+        /// on. Every window query went unanswered and the program asking waited out its timeout.</para>
+        /// <para>Blocking the reader thread here is safe because nothing on the UI thread waits on it: output
+        /// is delivered by posting, and input is written asynchronously. Invoke also runs inline when this
+        /// is already the UI thread, so a host driving the terminal directly does not deadlock on itself.</para>
+        /// </remarks>
         private void OnTerminalWindowInfoRequested(object? sender, XT.Events.TerminalEvents.WindowInfoRequestedEventArgs e)
         {
-            Dispatcher.UIThread.Post(() =>
+            Dispatcher.UIThread.Invoke(() =>
             {
                 // Raise routed event so any parent can handle it without custom plumbing.
                 var args = new WindowInfoRequestedEventArgs(e.Request)
@@ -4373,10 +4399,21 @@ namespace Iciclecreek.Terminal
                 int cellCount = 0;
                 int runStartX = 0;
 
-                // Skip placeholder cells (width 0) that follow wide characters
+                // Skip width-0 cells. There are TWO kinds, and only one of them is a placeholder.
+                //
+                // The placeholder behind a wide glyph carries no content, and skipping it is what stops the
+                // glyph being drawn twice. The other kind is a combining character that had nothing in front
+                // of it to combine with — a line beginning with U+0301, a stray variation selector, a keycap
+                // with no digit — which the emulator stores in a cell of its own after
+                // TryAppendToPreviousCell finds no base. That one DOES carry content, and skipping it is
+                // also right: a combining mark with nothing to combine with has nothing to draw.
+                //
+                // This used to assert the content was empty, on the assumption that a placeholder was the
+                // only way to reach here. It is not, so the assert fired on ordinary output — printing a
+                // lone combining acute is enough — and cost a debugging session before anyone questioned
+                // the premise rather than the buffer.
                 if (cell.Width == 0)
                 {
-                    Debug.Assert(cell.Content == BufferCell.Empty.Content, "Placeholder cell should be null content");
                     x++;
                     continue;
                 }
