@@ -1,4 +1,4 @@
-using NeoSmart.Unicode;
+﻿using NeoSmart.Unicode;
 using System.Text;
 using Wcwidth;
 using XTerm.Buffer;
@@ -34,6 +34,18 @@ public class InputHandler
     // sequence, a newline, a cursor address — leaves it pointing somewhere the next Print is not, and the
     // continuation is silently dropped rather than joining two unrelated characters.
     private (int Row, int Col)? _zwjContinuation;
+
+    // Where a lone regional indicator is sitting, if one is. Two of them form one flag, and they arrive in
+    // separate Print calls — so pairing them needs state that outlives a call, exactly as a ZWJ cluster does.
+    //
+    // Cell is where the first one went; Cursor is where it left the cursor. Both are checked, so a second
+    // indicator pairs only when it lands exactly where the first one would have put it. Anything that moved
+    // the cursor in between leaves two unrelated indicators standing alone, which is what they are.
+    private (int Row, int Cell, int Cursor)? _regionalPending;
+
+    /// <summary>The regional indicator symbols, U+1F1E6 to U+1F1FF. Two of them make one flag.</summary>
+    private static bool IsRegionalIndicator(int codePoint)
+        => codePoint >= 0x1F1E6 && codePoint <= 0x1F1FF;
 
     public InputHandler(Terminal terminal)
     {
@@ -90,8 +102,13 @@ public class InputHandler
         if (codePoint >= 0xFE20 && codePoint <= 0xFE2F)
             return true;
 
-        // Emoji Modifiers / Skin Tones (U+1F3FB�U+1F3FF)
-        if (codePoint >= 0x1F3FB && codePoint <= 0x1F3FF)
+        // Emoji Modifiers / Skin Tones (U+1F3FB..U+1F3FF)
+        //
+        // Combining is not decided here alone: a skin tone modifies an EMOJI, and TryAppendToPreviousCell
+        // checks what it is being asked to attach to. Saying yes unconditionally glued a modifier onto
+        // whatever happened to precede it — "║🏼║" put the tone inside the box-drawing character and drew
+        // the pair as one unreadable cell, where every other terminal shows a swatch standing on its own.
+        if (IsSkinToneModifier(codePoint))
             return true;
 
         // Keycap combining sequence (U+20E3)
@@ -100,6 +117,41 @@ public class InputHandler
 
         return false;
     }
+
+    /// <summary>The Fitzpatrick skin tone modifiers, U+1F3FB to U+1F3FF.</summary>
+    private static bool IsSkinToneModifier(int codePoint)
+        => codePoint >= 0x1F3FB && codePoint <= 0x1F3FF;
+
+    /// <summary>
+    /// The last code point in a cell's content — the one a modifier would actually be attaching to, since a
+    /// cell may already hold a whole cluster.
+    /// </summary>
+    private static int LastRuneOf(string? content)
+    {
+        if (string.IsNullOrEmpty(content))
+            return 0;
+
+        int last = 0;
+        foreach (var rune in content.EnumerateRunes())
+            last = rune.Value;
+
+        return last;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="codePoint"/> is something a skin tone can actually modify.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately broader than Unicode's Emoji_Modifier_Base list, which runs to some thirty ranges and
+    /// would have to be revised every release. Everything on it is an emoji, so "is this an emoji" rejects
+    /// the case that matters — a letter, a box-drawing character, a CJK ideograph — while letting through a
+    /// handful of emoji that take no modifier. Those render as whatever the font makes of them, which is
+    /// what the program asked for; the alternative is a table that silently rots.
+    /// </remarks>
+    private static bool CanTakeSkinTone(int codePoint)
+        => codePoint >= 0x1F000
+           || codePoint == 0x261D || codePoint == 0x26F9
+           || (codePoint >= 0x270A && codePoint <= 0x270D);
 
     /// <summary>
     /// Prints a character to the buffer.
@@ -116,6 +168,23 @@ public class InputHandler
                                    && pending.Row == _buffer.Y + _buffer.YBase
                                    && pending.Col == _buffer.X;
             _zwjContinuation = null;
+
+            // A second regional indicator lands beside the first and turns it into a flag: one glyph, two
+            // columns. Handled here rather than through the combining path because it does not merely append
+            // — the cell it joins has to GROW to the width the pair occupies, and gain the placeholder that
+            // every wide cell carries.
+            if (IsRegionalIndicator(codePoint)
+                && _regionalPending is { } flag
+                && flag.Row == _buffer.Y + _buffer.YBase
+                && flag.Cursor == _buffer.X
+                && TryPairRegionalIndicator(data, flag.Cell))
+            {
+                return;
+            }
+
+            // Any other character breaks the pair. A lone indicator is a perfectly good character — it
+            // renders as a letter in a box — so it simply stops being the first half of anything.
+            _regionalPending = null;
 
             if (continuesCluster || IsCombiningCharacter(codePoint))
             {
@@ -201,8 +270,61 @@ public class InputHandler
             }
         }
 
+        // A lone regional indicator may turn out to be the first half of a flag. Remember where it went and
+        // where it left the cursor, so the next one can recognise itself as the second half.
+        if (cell.CodePoint is var cp && IsRegionalIndicator(cp))
+            _regionalPending = (_buffer.Y + _buffer.YBase, _buffer.X, _buffer.X + width);
+
         // Use MoveCursor to allow X to be one past the last column (pending wrap)
         _buffer.SetCursorRaw(_buffer.X + width, _buffer.Y);
+    }
+
+    /// <summary>
+    /// Joins a second regional indicator to the one already at <paramref name="cellX"/>, making the pair a
+    /// single double-width flag.
+    /// </summary>
+    /// <remarks>
+    /// <para>The first indicator was printed as an ordinary single-width character, because at the time it
+    /// was one — nothing says a flag is coming, and a lone indicator is a valid character that renders as a
+    /// letter in a box. So this widens the cell it already wrote rather than laying a new one down.</para>
+    /// <para>Returns false rather than half-doing it if the pair will not fit, which leaves the caller to
+    /// print the second indicator on its own. Two boxed letters at the edge of the screen is a better answer
+    /// than a wide cell hanging off it.</para>
+    /// </remarks>
+    private bool TryPairRegionalIndicator(string data, int cellX)
+    {
+        var line = _buffer.Lines[_buffer.Y + _buffer.YBase];
+        if (line == null || cellX < 0 || cellX >= _terminal.Cols)
+            return false;
+
+        // The flag needs the column after it for the placeholder every wide cell carries.
+        if (cellX + 1 >= _terminal.Cols)
+            return false;
+
+        var first = line[cellX];
+        if (!IsRegionalIndicator(first.CodePoint))
+            return false;
+
+        // The first indicator already claimed both columns — one is two wide on its own, and the flag the
+        // pair makes is the same two. So this joins the content and moves nothing: no new width, no second
+        // placeholder, and the cursor stays where the first one left it.
+
+        var flag = new BufferCell
+        {
+            Content = first.Content + data,
+            Width = 2,
+            Attributes = first.Attributes,
+            // The FIRST indicator, which is what identifies the flag — and what a second call would test
+            // against, if a third indicator ever arrives.
+            CodePoint = first.CodePoint,
+        };
+
+        line.SetCell(cellX, ref flag);
+
+        // A third indicator starts a new pair rather than joining this one, which is what UAX #29 says:
+        // indicators pair up from the left, they do not accumulate.
+        _regionalPending = null;
+        return true;
     }
 
     /// <summary>
@@ -269,6 +391,15 @@ public class InputHandler
         {
             // Only allow combining with actual content, not empty/space cells
             // unless the space is the only content (which shouldn't happen for valid sequences)
+            return false;
+        }
+
+        // A skin tone modifies an EMOJI. Attaching it to whatever happened to come first put the tone
+        // inside a box-drawing character for "║🏼║" and drew the pair as one unreadable cell, where every
+        // other terminal shows the swatch standing on its own. Refusing here sends it back to Print, which
+        // gives it a cell of its own.
+        if (IsSkinToneModifier(codePoint) && !CanTakeSkinTone(LastRuneOf(prevCell.Content)))
+        {
             return false;
         }
 
@@ -2215,11 +2346,19 @@ public class InputHandler
             {
                 if (rune.Value == Emoji.ZeroWidthJoiner || rune.Value == Emoji.ObjectReplacementCharacter)
                 {
-                    if (supportsComplexEmoji)
-                        width -= lastWidth;
-                    else
+                    if (!supportsComplexEmoji)
                         // we return the first emoji as the result because terminal doesn't support chaining them
                         break;
+
+                    if (lastWidth > 0)
+                        // It joins the glyph before it, which has already been counted.
+                        width -= lastWidth;
+                    else
+                        // Nothing in front of it to join, so it stands on its own. Subtracting unconditionally
+                        // left a lone U+FFFC measuring 0, and a character measuring 0 does not move the
+                        // cursor — so whatever came next printed over the top of it. ZWJ passes through here
+                        // too and is unaffected, being genuinely zero-width in its own right.
+                        width += (ushort)runeWidth;
                 }
                 else if (rune.Value == Codepoints.VariationSelectors.EmojiSymbol &&
                          lastWidth == 1)
@@ -2243,14 +2382,33 @@ public class InputHandler
 
                     // else: combining � ignore
                 }
-                // regional indicator symbols
+                else if (rune.Value >= Emoji.SkinTones.Light && rune.Value <= Emoji.SkinTones.Dark)
+                {
+                    // A skin tone with nothing in front of it to modify. Unicode gives these East Asian
+                    // Width W, and every other terminal draws a lone one as a two-column swatch — so that is
+                    // what it occupies. wcwidth answers 0 because it assumes the modifier is attached to
+                    // something, and 0 meant the cursor never moved and the next character printed over the
+                    // top of it: "🏽X" left an X and no swatch.
+                    width += 2;
+                    lastWidth = 2;
+                }
+                // Regional indicator symbols. These carry emoji presentation, so ONE is two columns wide and
+                // a PAIR is the flag they make — also two. So the width is added on the first of a pair and
+                // the second joins it rather than adding again.
+                //
+                // The parity used to be the other way round: width was added on the SECOND, so a single
+                // indicator measured 0. This method is called once per printed character and the two halves
+                // of a flag arrive separately, so the count was always 1, always odd, and the answer always
+                // zero. Width 0 leaves the cursor standing still, and the next character then overwrote the
+                // indicator — which is why a flag vanished from the buffer rather than merely rendering
+                // oddly. Joining the two is Print's job, where state survives the call.
                 else if (rune.Value >= 0x1F1E6 && rune.Value <= 0x1F1FF)
                 {
                     regionalRuneCount++;
-                    if (regionalRuneCount % 2 == 0)
-                        // every pair of regional indicator symbols form a single glyph
-                        width += (ushort)runeWidth;
-                    // If the last rune is a regional indicator symbol, continue the current glyph
+                    if (regionalRuneCount % 2 == 1)
+                        width += 2;
+
+                    lastWidth = 2;
                 }
                 else
                 {
