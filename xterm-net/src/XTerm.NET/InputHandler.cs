@@ -1,4 +1,4 @@
-using NeoSmart.Unicode;
+﻿using NeoSmart.Unicode;
 using System.Text;
 using Wcwidth;
 using XTerm.Buffer;
@@ -305,6 +305,10 @@ public class InputHandler
         if (!IsRegionalIndicator(first.CodePoint))
             return false;
 
+        // The first indicator already claimed both columns — one is two wide on its own, and the flag the
+        // pair makes is the same two. So this joins the content and moves nothing: no new width, no second
+        // placeholder, and the cursor stays where the first one left it.
+
         var flag = new BufferCell
         {
             Content = first.Content + data,
@@ -316,12 +320,6 @@ public class InputHandler
         };
 
         line.SetCell(cellX, ref flag);
-
-        var spacer = BufferCell.Empty;
-        spacer.Attributes = first.Attributes;
-        line.SetCell(cellX + 1, ref spacer);
-
-        _buffer.SetCursorRaw(cellX + 2, _buffer.Y);
 
         // A third indicator starts a new pair rather than joining this one, which is what UAX #29 says:
         // indicators pair up from the left, they do not accumulate.
@@ -2340,6 +2338,7 @@ public class InputHandler
         bool supportsComplexEmoji = true;
         ushort width = 0;
         ushort lastWidth = 0;
+        int regionalRuneCount = 0;
         foreach (Rune rune in text.EnumerateRunes())
         {
             int runeWidth = UnicodeCalculator.GetWidth(rune);
@@ -2393,16 +2392,24 @@ public class InputHandler
                     width += 2;
                     lastWidth = 2;
                 }
-                // Regional indicator symbols need no special case at all, which is why there is no longer
-                // one: each is worth 1, so a pair comes to 2 — the width of the flag they make — and a lone
-                // one comes to 1, which is the boxed letter it renders as.
+                // Regional indicator symbols. These carry emoji presentation, so ONE is two columns wide and
+                // a PAIR is the flag they make — also two. So the width is added on the first of a pair and
+                // the second joins it rather than adding again.
                 //
-                // The case that used to be here added width only on the SECOND of a pair, so a single
+                // The parity used to be the other way round: width was added on the SECOND, so a single
                 // indicator measured 0. This method is called once per printed character and the two halves
-                // of a flag arrive separately, so the count was always 1, always odd, and the answer was
-                // always 0. Width 0 leaves the cursor standing still, and the next character overwrote the
-                // indicator — which is why a flag disappeared from the buffer rather than merely rendering
-                // oddly. Pairing them is Print's job, where the state to do it survives the call.
+                // of a flag arrive separately, so the count was always 1, always odd, and the answer always
+                // zero. Width 0 leaves the cursor standing still, and the next character then overwrote the
+                // indicator — which is why a flag vanished from the buffer rather than merely rendering
+                // oddly. Joining the two is Print's job, where state survives the call.
+                else if (rune.Value >= 0x1F1E6 && rune.Value <= 0x1F1FF)
+                {
+                    regionalRuneCount++;
+                    if (regionalRuneCount % 2 == 1)
+                        width += 2;
+
+                    lastWidth = 2;
+                }
                 else
                 {
                     width += (ushort)runeWidth;

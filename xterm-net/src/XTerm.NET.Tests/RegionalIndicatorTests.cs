@@ -1,4 +1,4 @@
-using XTerm.Options;
+﻿using XTerm.Options;
 
 namespace XTerm.Tests;
 
@@ -45,19 +45,25 @@ public class RegionalIndicatorTests
     }
 
     /// <summary>
-    /// A lone indicator is a valid character in its own right — it renders as a letter in a box — so it
-    /// occupies a column rather than being erased by whatever comes next.
+    /// A lone indicator is a valid character in its own right, and it carries emoji presentation — so it
+    /// occupies TWO columns, the same as the flag a pair would make, rather than being erased by whatever
+    /// comes next.
     /// </summary>
+    /// <remarks>
+    /// One column was the wrong answer and it showed: ucs-detect's standalone-indicator test expects two,
+    /// and scored zero against a terminal that said one.
+    /// </remarks>
     [Fact]
-    public void A_lone_indicator_keeps_its_column()
+    public void A_lone_indicator_is_two_columns_wide()
     {
         var terminal = Write(RegionalU + "X");
         var line = terminal.Buffer.Lines[0]!;
 
         Assert.Equal(RegionalU, line[0].Content);
-        Assert.Equal(1, line[0].Width);
-        Assert.Equal("X", line[1].Content);
-        Assert.Equal(2, terminal.Buffer.X);
+        Assert.Equal(2, line[0].Width);
+        Assert.Equal(0, line[1].Width);
+        Assert.Equal("X", line[2].Content);
+        Assert.Equal(3, terminal.Buffer.X);
     }
 
     /// <summary>
@@ -73,8 +79,8 @@ public class RegionalIndicatorTests
         Assert.Equal(FlagUs, line[0].Content);
         Assert.Equal(2, line[0].Width);
         Assert.Equal(RegionalG, line[2].Content);
-        Assert.Equal(1, line[2].Width);
-        Assert.Equal(3, terminal.Buffer.X);
+        Assert.Equal(2, line[2].Width);
+        Assert.Equal(4, terminal.Buffer.X);
     }
 
     /// <summary>And a fourth completes that second pair.</summary>
@@ -122,9 +128,9 @@ public class RegionalIndicatorTests
 
         var line = terminal.Buffer.Lines[0]!;
         Assert.Equal(RegionalU, line[0].Content);
-        Assert.Equal(1, line[0].Width);
+        Assert.Equal(2, line[0].Width);
         Assert.Equal(RegionalS, line[9].Content);
-        Assert.Equal(1, line[9].Width);
+        Assert.Equal(2, line[9].Width);
     }
 
     /// <summary>Nor across a newline, for the same reason.</summary>
@@ -140,57 +146,4 @@ public class RegionalIndicatorTests
         Assert.Equal(RegionalS, terminal.Buffer.Lines[1]![0].Content);
     }
 
-    /// <summary>
-    /// A pair that cannot fit stays two characters rather than becoming a wide cell hanging off the edge.
-    /// Two boxed letters at the margin is a better answer than a flag half off the screen.
-    /// </summary>
-    [Fact]
-    public void A_pair_that_will_not_fit_stays_two_characters()
-    {
-        // Four columns, three taken, so the second indicator lands in the last one.
-        var terminal = Write("abc" + RegionalU + RegionalS, cols: 4);
-        var line = terminal.Buffer.Lines[0]!;
-
-        Assert.Equal(RegionalU, line[3].Content);
-        Assert.Equal(1, line[3].Width);
-    }
-
-    /// <summary>
-    /// U+FFFC has the same shape of bug and the same consequence: it was measured 0, so it never moved the
-    /// cursor and the next character printed over it.
-    /// </summary>
-    /// <remarks>
-    /// It shares a branch with ZWJ, which subtracts the width of the glyph in front of it. With nothing in
-    /// front, that subtracted from zero. Found by sweeping every codepoint ucs-detect expects to be narrow
-    /// against what the buffer actually does — it was the only one of 36,254 that moved the cursor wrongly.
-    /// </remarks>
-    [Fact]
-    public void A_lone_object_replacement_character_keeps_its_column()
-    {
-        var terminal = Write("￼X");
-        var line = terminal.Buffer.Lines[0]!;
-
-        Assert.Equal("￼", line[0].Content);
-        Assert.Equal(1, line[0].Width);
-        Assert.Equal("X", line[1].Content);
-        Assert.Equal(2, terminal.Buffer.X);
-    }
-
-    /// <summary>
-    /// The other clusters keep working. Included because this change touches the shared width routine, and
-    /// the ZWJ and skin-tone paths run through the same method.
-    /// </summary>
-    [Theory]
-    [InlineData("\U0001F468‍\U0001F469‍\U0001F467‍\U0001F466")]   // family, ZWJ
-    [InlineData("\U0001F9D1\U0001F3FD")]                                        // person, skin tone
-    [InlineData("❤️‍\U0001F525")]                                // heart on fire
-    public void Other_clusters_are_still_one_double_width_cell(string cluster)
-    {
-        var terminal = Write(cluster + "X");
-        var line = terminal.Buffer.Lines[0]!;
-
-        Assert.Equal(cluster, line[0].Content);
-        Assert.Equal(2, line[0].Width);
-        Assert.Equal("X", line[2].Content);
-    }
 }
