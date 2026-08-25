@@ -234,10 +234,22 @@ public class EscapeSequenceParser
             case ParserState.DcsParam:
             case ParserState.DcsIgnore:
             case ParserState.DcsPassthrough:
-                // DCS handling (simplified)
-                if (code == 0x9C || code == 0x1B) // ST or ESC
+            case ParserState.SosPmApcString:
+                // DCS, and SOS/PM/APC, are consumed whole and answered by nobody. What matters is LEAVING
+                // them — and SosPmApcString had no case here at all. ESC _ , ESC ^ and ESC X were entered
+                // and never exited, so the parser sat in that state discarding every byte that followed it.
+                // One kitty graphics query and the terminal stopped answering anything, permanently.
+                //
+                // ESC moves to Escape rather than Ground so the backslash of a two-byte ST is consumed as
+                // part of the terminator, which is what OSC already does. Dropping straight to Ground left
+                // that backslash to be printed as text.
+                if (code == 0x9C) // ST
                 {
                     Transition(ParserState.Ground);
+                }
+                else if (code == 0x1B) // ESC, the first half of ESC \
+                {
+                    Transition(ParserState.Escape);
                 }
                 break;
         }
