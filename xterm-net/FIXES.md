@@ -317,3 +317,111 @@ dotnet test src/XTerm.NET.slnx --no-restore
 ```
 
 Expected result: all tests pass.
+
+---
+
+# Sixel graphics
+
+## Summary
+
+Sixel images (`ESC P … q … ESC \`) are decoded and placed in the buffer. Each cell an image covers
+carries a reference to one shared, immutable `TerminalImage` plus the coordinates of the tile it
+shows, so a picture behaves like terminal content rather than an overlay.
+
+Sixel was not merely unimplemented before this — it was unreachable. `EscapeSequenceParser`
+collapsed `DcsEntry`/`DcsParam`/`DcsIgnore`/`DcsPassthrough` into a single "discard every byte until
+ST" case, `_dcs` was allocated but never written to, and the `Dcs` event was marked `[Obsolete]`
+because nothing raised it. The payload never reached anything that could decode it.
+
+## Why storage on the cell
+
+`BufferCell` is a struct, and `InputHandler.Print` builds a fresh one for every character. That
+single fact gives the whole feature its semantics for free:
+
+| Terminal action | Existing mechanism | Effect on images |
+|---|---|---|
+| Print over an image cell | `new BufferCell{…}` + `SetCell` | the new struct has no image, so that cell reverts to text |
+| ED / EL / ECH / DECALN | `Fill`/`ReplaceCells` with `BufferCell.Space` | tiles cleared |
+| Scroll / scrollback | `CircularList` moves whole `BufferLine` objects | tiles ride along |
+| Line trimmed from scrollback | line dereferenced | the image is collected with its last tile |
+| Selection / `TranslateToString` | reads `cell.Content` | image cells hold `" "`, so copying yields blanks |
+
+A reference to a shared image rather than a per-cell bitmap slice: identical overwrite granularity,
+one allocation per image instead of columns times rows, and a host can coalesce a run of adjacent
+tiles into a single draw call. `BufferCell` grows from 32 to 40 bytes — the packed tile `int` fits
+in padding the reference already forces — which is roughly 0.65 MB on an 80-column buffer with 1000
+lines of scrollback.
+
+## Two live bugs fixed along the way
+
+- **`CSI ? 1;1;0 S` scrolled the screen.** XTSMGRAPHICS shares its final character with SCROLL UP,
+  and `ToCsiCommand` strips the private marker before the lookup, so a graphics capability query
+  was routed to the scroll handler. Every Sixel-capable program sends one during startup, which
+  made this routine rather than obscure. `ScrollUp` is now guarded on `isPrivate` and the query is
+  answered.
+- **The primary DA reply did not advertise Sixel.** `libsixel`, `chafa`, `img2sixel` and everything
+  built on them read attribute `4` from `CSI c` and send text art instead of pictures without it.
+  The reply is now `CSI ? 1 ; 2 ; 4 c`, following `Options.SixelEnabled` so it never claims a
+  capability that is switched off.
+
+## Decisions worth recording
+
+- **Images are dropped on a column resize.** Reflow re-wraps a logical line by copying ranges of
+  cells between lines; tiles carried through it would reassemble as a shuffled mosaic — every piece
+  intact, in the wrong place. A change of row count alone moves whole lines and keeps them.
+- **The DCS payload is streamed, not buffered.** A full-screen Sixel runs to hundreds of kilobytes.
+  The parser raises `DcsHook`/`DcsPut`/`DcsUnhook` and only accumulates a whole-payload string for
+  the legacy `Dcs` event when something is subscribed and the sequence stays under 4 KB.
+- **An abandoned sequence is distinguishable from a finished one.** `DcsUnhook` reports whether a
+  string terminator ended it, so a truncated image is discarded rather than half-drawn. An `ESC`
+  mid-payload is resolved one character late, since `ESC \` terminates and anything else abandons.
+- **Sixel colour registers are kept apart from `ColorPalette`.** They are a separate numbering that
+  an image may redefine as it draws, and doing that to the palette the renderer reads on its hot
+  path would repaint the text as a side effect of showing a picture.
+- **Nothing in the decoder throws.** The payload is untrusted output from another process; a
+  nonsense register, an absurd repeat count or a truncated stream yields no image, not an exception
+  escaping into the parser.
+- **A host must answer the window queries from the grid, not from its control.** Not a change here
+  -- an unhandled query still produces no reply, deliberately -- but the reason the README now spells
+  the handler out. An image viewer works out the cell size for itself by dividing the pixel size from
+  `CSI 14 t` by the row count it already has, so anything else in that figure (a scrollbar, window
+  chrome, or the strip below the last row, since the grid is a truncated division) is read back as
+  picture that does not fit. It runs off the bottom and scrolls the screen. The only safe answer is
+  `Cols * CellWidthPixels` by `Rows * CellHeightPixels`, which is also what xterm reports.
+- **The image budget is swept by the byte, not by the picture.** A program animating with Sixel
+  draws one image per frame, and sweeping on each would walk every cell of both buffers ten times a
+  second. Bytes placed are counted instead, and a sweep runs only once a budget's worth has arrived
+  — one scan per budget rather than one per picture, at the cost of the buffer sitting up to one
+  budget over before it is trimmed.
+
+## Files changed
+
+- `src/XTerm.NET/Parser/EscapeSequenceParser.cs` — real DCS state machine; streaming hook/put/unhook
+- `src/XTerm.NET/Common/Types.cs` — `ParserState.DcsIntermediate`
+- `src/XTerm.NET/Events/ParserEvents.cs` — `DcsHookEventArgs`, `DcsPutEventArgs`, `DcsUnhookEventArgs`
+- `src/XTerm.NET/Graphics/TerminalImage.cs` — immutable BGRA image plus tile geometry
+- `src/XTerm.NET/Graphics/SixelDecoder.cs` — streaming DECSIXEL decoder
+- `src/XTerm.NET/Graphics/SixelPalette.cs` — VT340 defaults, RGB and HLS colour
+- `src/XTerm.NET/Buffer/BufferCell.cs` — `Image`, packed `ImageTile`, equality
+- `src/XTerm.NET/Buffer/BufferLine.cs` — `ClearImages`, `HasImages`
+- `src/XTerm.NET/Buffer/TerminalBuffer.cs` — `ClearImages`, dropped on column resize
+- `src/XTerm.NET/InputHandler.cs` — DCS dispatch, `PlaceImage`, DA, modes 80/1070/8452, XTSMGRAPHICS
+- `src/XTerm.NET/Terminal.cs` — parser wiring, Sixel mode flags, `EnforceImageBudget`
+- `src/XTerm.NET/Options/TerminalOptions.cs` — `SixelEnabled`, cell pixel size, budgets
+- `src/XTerm.NET.Tests/Parser/DcsSequenceTests.cs`
+- `src/XTerm.NET.Tests/Graphics/SixelDecoderTests.cs`
+- `src/XTerm.NET.Tests/Graphics/SixelPlacementTests.cs`
+- `src/XTerm.NET.Tests/Graphics/ImageCellLifetimeTests.cs`
+- `src/XTerm.NET.Tests/Graphics/GraphicsAttributesTests.cs`
+
+## Validation
+
+```powershell
+dotnet test src/XTerm.NET.slnx
+```
+
+```text
+Passed: 847
+Failed: 0
+Skipped: 0
+```

@@ -69,6 +69,18 @@ public enum TerminalMode
     /// When set, enables national replacement character sets.
     /// </summary>
     NationalCharset = 42,
+
+    /// <summary>
+    /// Sixel Display Mode (DECSDM).
+    /// </summary>
+    /// <remarks>
+    /// The sense of this one reads backwards, and the name is why. Reset -- the default -- gives
+    /// "sixel scrolling": an image is drawn at the cursor, scrolls the screen if it runs off the
+    /// bottom, and leaves the cursor below itself. Set gives the older display behaviour: the
+    /// image is pinned to the top-left of the screen, clipped rather than scrolled, and the cursor
+    /// does not move.
+    /// </remarks>
+    SixelDisplayMode = 80,
     
     /// <summary>
     /// Reverse Wraparound Mode.
@@ -182,7 +194,22 @@ public enum TerminalMode
     AltSendsEscape = 1039,
 
     /// <summary>
+    /// Sixel private colour registers.
+    /// </summary>
+    /// <remarks>
+    /// Set -- the default -- gives each image its own colour registers, so one picture cannot
+    /// recolour the one before it. Reset shares a single set across images, which is how a VT340
+    /// behaved and what a handful of old programs rely on.
+    /// </remarks>
+    SixelPrivateColorRegisters = 1070,
+
+    /// <summary>
     /// Win32 Input Mode.
     /// </summary>
-    Win32InputMode = 9001
+    Win32InputMode = 9001,
+
+    /// <summary>
+    /// Leave the cursor to the right of a Sixel image rather than below it.
+    /// </summary>
+    SixelCursorRight = 8452
 }

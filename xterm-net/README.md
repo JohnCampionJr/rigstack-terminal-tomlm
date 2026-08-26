@@ -15,6 +15,7 @@ making it easy to host conosole applications in your .NET applications.
 - **Rich Event System** — Subscribe to terminal events like title changes, bell, resize, and window manipulation
 - **256 and True Color Support** — Full RGB and 256-color palette support
 - **Unicode Support** — Proper handling of wide characters and Unicode text
+- **Sixel Graphics** — Decodes Sixel images and places them in the buffer as ordinary cell content
 
 ## Installation
 
@@ -245,6 +246,92 @@ void RenderTerminal(Terminal terminal)
 **Handling wide characters:**
 
 Wide characters (e.g., CJK ideographs, emoji) have `Width = 2`. The first cell contains the character, and the second cell has `Width = 0` as a placeholder — skip it during rendering but allocate space for the double-width glyph.
+
+### Sixel Images
+
+A Sixel image (`ESC P … q … ESC \`) is decoded and written into the cells it covers. Each covered
+cell carries a reference to one shared `TerminalImage` plus the coordinates of the piece it shows,
+so an image behaves like terminal content rather than an overlay: printing over a cell replaces
+that part of the picture, `ED`/`EL` clear it, scrolling carries it, and the image is freed once the
+last cell holding it is gone.
+
+**Tell the terminal your cell size.** XTerm.NET is headless and cannot measure a font, so it cannot
+work out how many columns an image covers unless you say. Set these from your renderer's metrics,
+in *device* pixels:
+
+```csharp
+terminal.Options.CellWidthPixels  = 8;
+terminal.Options.CellHeightPixels = 17;
+```
+
+**Answer the window queries from these same numbers.** An image viewer works out the cell size for
+itself, by dividing the pixel size it gets from `CSI 14 t` by the row and column counts it already
+has. So your `WindowInfoRequested` handler must report the **grid**, not the control:
+
+```csharp
+case WindowInfoRequest.SizePixels:      // CSI 14 t
+    e.WidthPixels  = terminal.Cols * terminal.Options.CellWidthPixels;
+    e.HeightPixels = terminal.Rows * terminal.Options.CellHeightPixels;
+    e.Handled = true;
+    break;
+
+case WindowInfoRequest.CellSizePixels:  // CSI 16 t
+    e.CellWidth  = terminal.Options.CellWidthPixels;
+    e.CellHeight = terminal.Options.CellHeightPixels;
+    e.Handled = true;
+    break;
+```
+
+Reporting your control's own size instead is the classic way to get this wrong. It includes the
+scrollbar, any window chrome, and the strip below the last row — the grid is a truncated division, so
+up to a whole row of the control's height belongs to no row at all. An application dividing that
+figure by the row count is told the terminal is taller than it is, sizes a picture to fill it, and the
+surplus runs off the bottom and scrolls the screen.
+
+**Rendering the tiles.** Extend the per-cell loop above:
+
+```csharp
+BufferCell cell = line[col];
+
+if (cell.Image is TerminalImage image &&
+    image.TryGetTileSource(cell.ImageCol, cell.ImageRow, out int sx, out int sy, out int sw, out int sh))
+{
+    // Pixels are BGRA8888 with straight (unpremultiplied) alpha, top row first.
+    // Cache your framework's bitmap against the image object — a ConditionalWeakTable keyed on
+    // `image` lets the bitmap die when the image does, with no eviction list to maintain.
+    var bitmap = _bitmaps.GetOrCreate(image);
+
+    // Edge tiles are clipped, so scale the destination to match rather than stretching a partial
+    // tile over a whole cell.
+    double destW = cellWidth  * sw / (double)image.CellWidth;
+    double destH = cellHeight * sh / (double)image.CellHeight;
+
+    DrawImage(bitmap,
+        source: (sx, sy, sw, sh),
+        dest: (col * cellWidth, row * cellHeight, destW, destH));
+    continue;
+}
+```
+
+Adjacent cells sharing the same `Image` reference and `ImageRow` with consecutive `ImageCol` values
+are contiguous, so a renderer can coalesce them into a single draw call per row instead of one per
+cell. If you cache rendered rows, note that image cells must break a text run: compare `Image` by
+reference as well as comparing `Attributes`.
+
+Image cells hold `" "` as their content, so `TranslateToString` and selection copy yield blanks.
+
+**Options:**
+
+| Option | Default | Purpose |
+|---|---|---|
+| `SixelEnabled` | `true` | Decode images, and advertise Sixel in the primary Device Attributes reply |
+| `CellWidthPixels` / `CellHeightPixels` | `10` / `20` | Cell size images are laid out against |
+| `MaxSixelPixels` | `4_000_000` | Largest single image accepted |
+| `MaxImageBytes` | `64 MB` | Budget for image data live in the buffer; oldest are dropped past it |
+
+Images are dropped when the terminal is resized to a different **column** count, because reflow
+re-wraps lines by copying ranges of cells and the pieces would reassemble in the wrong places. A
+change of row count alone keeps them.
 
 ## License
 

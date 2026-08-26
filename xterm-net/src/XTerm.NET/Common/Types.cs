@@ -137,7 +137,8 @@ public enum ParserState
     DcsEntry = 9,
     DcsParam = 10,
     DcsIgnore = 11,
-    DcsPassthrough = 12
+    DcsPassthrough = 12,
+    DcsIntermediate = 13
 }
 
 /// <summary>

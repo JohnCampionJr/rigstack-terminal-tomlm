@@ -43,7 +43,24 @@ public class Terminal
     public bool ReverseVideo { get; set; }
     public bool SendFocusEvents { get; set; }
     public bool Win32InputMode { get; set; }
-    
+
+    /// <summary>
+    /// Sixel Display Mode (DECSDM, mode 80). See <see cref="TerminalMode.SixelDisplayMode"/> --
+    /// false, the default, is the scrolling behaviour applications expect.
+    /// </summary>
+    public bool SixelDisplayMode { get; set; }
+
+    /// <summary>
+    /// Whether each Sixel image gets its own colour registers (mode 1070). On by default.
+    /// </summary>
+    public bool SixelPrivateColorRegisters { get; set; } = true;
+
+    /// <summary>
+    /// Whether the cursor is left to the right of a Sixel image rather than below it (mode 8452).
+    /// </summary>
+    public bool SixelCursorRight { get; set; }
+
+
     /// <summary>
     /// When enabled, the eighth bit of input characters is used for Meta key.
     /// Mode 1034 (eightBitInput).
@@ -258,6 +275,9 @@ public class Terminal
         _parser.Csi += OnParserCsi;
         _parser.Esc += OnParserEsc;
         _parser.Osc += OnParserOsc;
+        _parser.DcsHook += OnParserDcsHook;
+        _parser.DcsPut += OnParserDcsPut;
+        _parser.DcsUnhook += OnParserDcsUnhook;
 
         InsertMode = false;
         ApplicationCursorKeys = false;
@@ -299,6 +319,30 @@ public class Terminal
     private void OnParserEsc(object? sender, EscEventArgs e)
     {
         _inputHandler.HandleEsc(e.FinalChar, e.Collected);
+    }
+
+    /// <summary>
+    /// Handles the start of a DCS sequence from the parser.
+    /// </summary>
+    private void OnParserDcsHook(object? sender, DcsHookEventArgs e)
+    {
+        _inputHandler.HandleDcsHook(e.Identifier, e.Parameters);
+    }
+
+    /// <summary>
+    /// Handles a chunk of a DCS payload from the parser.
+    /// </summary>
+    private void OnParserDcsPut(object? sender, DcsPutEventArgs e)
+    {
+        _inputHandler.HandleDcsPut(e.Data.Span);
+    }
+
+    /// <summary>
+    /// Handles the end of a DCS sequence from the parser.
+    /// </summary>
+    private void OnParserDcsUnhook(object? sender, DcsUnhookEventArgs e)
+    {
+        _inputHandler.HandleDcsUnhook(e.TerminatedCleanly);
     }
 
     /// <summary>
@@ -419,6 +463,131 @@ public class Terminal
     {
         _buffer.ScrollDisp(lines);
         Scrolled?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>
+    /// Drops the oldest images once the buffer holds more image data than the budget allows.
+    /// </summary>
+    /// <remarks>
+    /// <para>Images normally need no managing: one is freed when the last cell showing it is
+    /// overwritten or scrolls out of the scrollback, because that was its last reference. This is
+    /// the backstop for the case that defeats it -- a deep scrollback full of pictures, every one
+    /// still referenced and every one still in memory.</para>
+    /// <para>Oldest first, by the identifier each image is stamped with when it is decoded, so
+    /// what disappears is the picture furthest back in the history rather than the one on screen.
+    /// Both buffers are swept: an image on the alternate screen costs the same memory as one on
+    /// the normal screen.</para>
+    /// </remarks>
+    /// <summary>
+    /// Image bytes placed since the last sweep. See <see cref="NoteImagePlaced"/>.
+    /// </summary>
+    private long _imageBytesSinceSweep;
+
+    /// <summary>
+    /// Records a newly placed image and sweeps the budget when enough has arrived to matter.
+    /// </summary>
+    /// <remarks>
+    /// Sweeping on every image would mean walking both buffers -- every cell of the scrollback -- each time
+    /// one is drawn, and a program animating with Sixel draws one per frame. Since a sweep leaves the buffer
+    /// inside the budget, it takes a further budget's worth of images to get back outside it, so counting
+    /// bytes and sweeping when the counter says it is possible costs one scan per budget rather than one per
+    /// picture. What that trades away is exactness: the buffer can sit up to one budget over before the
+    /// sweep, which is a ceiling on overshoot rather than an unbounded one.
+    /// </remarks>
+    internal void NoteImagePlaced(Graphics.TerminalImage image)
+    {
+        if (Options.MaxImageBytes <= 0)
+            return;
+
+        _imageBytesSinceSweep += image.ByteCount;
+        if (_imageBytesSinceSweep < Options.MaxImageBytes)
+            return;
+
+        _imageBytesSinceSweep = 0;
+        EnforceImageBudget();
+    }
+
+    internal void EnforceImageBudget()
+    {
+        var budget = Options.MaxImageBytes;
+        if (budget <= 0)
+            return;
+
+        var live = CollectLiveImages();
+        long total = 0;
+        foreach (var image in live)
+            total += image.ByteCount;
+
+        if (total <= budget)
+            return;
+
+        var doomed = new HashSet<Graphics.TerminalImage>();
+        foreach (var image in live.OrderBy(i => i.Id))
+        {
+            if (total <= budget)
+                break;
+            doomed.Add(image);
+            total -= image.ByteCount;
+        }
+
+        if (doomed.Count == 0)
+            return;
+
+        DropImages(_normalBuffer, doomed);
+        DropImages(_altBuffer, doomed);
+    }
+
+    private HashSet<Graphics.TerminalImage> CollectLiveImages()
+    {
+        var live = new HashSet<Graphics.TerminalImage>();
+        Collect(_normalBuffer);
+        Collect(_altBuffer);
+        return live;
+
+        void Collect(Buffer.TerminalBuffer buffer)
+        {
+            for (int i = 0; i < buffer.Lines.Length; i++)
+            {
+                var line = buffer.Lines[i];
+                if (line is null)
+                    continue;
+                for (int x = 0; x < line.Length; x++)
+                {
+                    var image = line[x].Image;
+                    if (image is not null)
+                        live.Add(image);
+                }
+            }
+        }
+    }
+
+    private static void DropImages(Buffer.TerminalBuffer buffer, HashSet<Graphics.TerminalImage> doomed)
+    {
+        for (int i = 0; i < buffer.Lines.Length; i++)
+        {
+            var line = buffer.Lines[i];
+            if (line is null)
+                continue;
+
+            bool touched = false;
+            for (int x = 0; x < line.Length; x++)
+            {
+                var cell = line[x];
+                if (cell.Image is null || !doomed.Contains(cell.Image))
+                    continue;
+
+                cell.Image = null;
+                cell.ImageTile = 0;
+                cell.Content = " ";
+                cell.Width = 1;
+                cell.CodePoint = 0x20;
+                line.SetCell(x, ref cell);
+                touched = true;
+            }
+
+            if (touched)
+                line.Cache = null;
+        }
     }
 
     /// <summary>
@@ -714,6 +883,9 @@ public class Terminal
         _parser.Csi -= OnParserCsi;
         _parser.Esc -= OnParserEsc;
         _parser.Osc -= OnParserOsc;
+        _parser.DcsHook -= OnParserDcsHook;
+        _parser.DcsPut -= OnParserDcsPut;
+        _parser.DcsUnhook -= OnParserDcsUnhook;
 
         // Clear all event subscriptions
         DataReceived = null;
