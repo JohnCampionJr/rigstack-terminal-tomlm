@@ -398,9 +398,18 @@ Not supported, and refused with a proper error reply rather than ignored:
   usually holds more privilege than that program does. Direct transmission (`t=d`) is the only medium
   accepted.
 - **Animation** (`a=f`, `a=a`).
-- **Overlapping placements.** `z=` is recorded, and deletes can select by it, but a cell has one
-  image slot — so a placement written over an occupied cell replaces what was there rather than
-  layering over it.
+
+**Draw order (`z=`)** is honoured, with one documented limit. A cell holds one placement, so ordering
+between two *pictures* is expressed by which of them the cell keeps: a placement never displaces one
+with a higher z-index, and at equal z the newer wins. That is exact for opaque pictures and loses
+only the blend where a translucent one overlaps another.
+
+A **negative** z-index means something different in kind — behind the *text*. There the cell keeps
+both, so a picture placed under existing text leaves it readable, and text typed onto a background
+picture does not erase it. Erasing (`ED`/`EL`) still clears both, because a picture showing through a
+cleared screen would be a leak rather than a feature. A host renders these by drawing the tile first
+and the glyph over it; text with no background colour of its own paints no fill, which is what lets
+the picture show through.
 
 ## License
 

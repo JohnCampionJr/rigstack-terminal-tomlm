@@ -267,6 +267,11 @@ public class InputHandler
             line?.CopyCellsFrom(line, _buffer.X, _buffer.X + width, _terminal.Cols - _buffer.X - width, false);
         }
 
+        // A picture placed behind the text survives being typed over -- that is the whole meaning of
+        // a negative z-index. Anything at zero or above is in front of the text and is replaced by
+        // it, which is the ordinary case and the behaviour every image had before z existed.
+        CarryBackgroundImage(line, _buffer.X, ref cell);
+
         // Set the cell
         line?.SetCell(_buffer.X, ref cell);
 
@@ -278,6 +283,7 @@ public class InputHandler
             {
                 var spacer = BufferCell.Empty;
                 spacer.Attributes = _curAttr;
+                CarryBackgroundImage(line, _buffer.X + 1, ref spacer);
                 line?.SetCell(_buffer.X + 1, ref spacer);
             }
         }
@@ -909,6 +915,30 @@ public class InputHandler
     }
 
     /// <summary>
+    /// Keeps a behind-the-text picture on a cell that is being written over.
+    /// </summary>
+    /// <remarks>
+    /// <para>A cell is rebuilt from scratch for every character printed, which is what gives images
+    /// their overwrite semantics for free. A negative z-index is the one case where that is wrong:
+    /// the client asked for the picture to sit BEHIND whatever text lands on it, so the placement
+    /// has to be carried across to the new cell rather than dropped with the old one.</para>
+    /// <para>Only negative z. At zero or above the picture is in front of the text and printing
+    /// replaces it, exactly as it did before z-indexes were honoured at all.</para>
+    /// </remarks>
+    private static void CarryBackgroundImage(BufferLine? line, int col, ref BufferCell cell)
+    {
+        if (line is null || col < 0 || col >= line.Length)
+            return;
+
+        var existing = line[col];
+        if (existing.Placement is not { } placement || placement.ZIndex >= 0)
+            return;
+
+        cell.Placement = placement;
+        cell.ImageTile = existing.ImageTile;
+    }
+
+    /// <summary>
     /// U+10EEEE, the character Kitty uses to mean "part of a picture belongs in this cell".
     /// </summary>
     private const int KittyPlaceholder = 0x10EEEE;
@@ -1520,11 +1550,30 @@ public class InputHandler
                 if (col >= _terminal.Cols)
                     break;
 
-                var cell = new BufferCell(" ", 1, _curAttr)
+                var existing = line[col];
+
+                // A picture already here with a higher z-index stays in front. A cell holds one
+                // placement, so "in front" has to mean "instead of" rather than "over the top of":
+                // what is lost is blending two overlapping pictures, not the ordering between them.
+                if (existing.Placement is { } inFront && inFront.ZIndex > placement.ZIndex)
+                    continue;
+
+                BufferCell cell;
+
+                if (placement.ZIndex < 0 && !existing.IsImage)
                 {
-                    Placement = placement,
-                    ImageTile = BufferCell.PackTile(tileCol, tileRow)
-                };
+                    // Negative z means behind the text. The glyph and its attributes stay exactly as
+                    // they were and the picture is attached underneath, so a host draws the tile and
+                    // then the character over it -- which is how a background image is expressed.
+                    cell = existing;
+                }
+                else
+                {
+                    cell = new BufferCell(" ", 1, _curAttr);
+                }
+
+                cell.Placement = placement;
+                cell.ImageTile = BufferCell.PackTile(tileCol, tileRow);
                 line.SetCell(col, ref cell);
             }
 
