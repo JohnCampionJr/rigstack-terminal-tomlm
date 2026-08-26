@@ -249,10 +249,10 @@ public class BufferLine : IEnumerable<BufferCell>
         bool found = false;
         for (int i = 0; i < _length; i++)
         {
-            if (_cells[i].Image is null)
+            if (_cells[i].Placement is null)
                 continue;
 
-            _cells[i].Image = null;
+            _cells[i].Placement = null;
             _cells[i].ImageTile = 0;
             _cells[i].Content = " ";
             _cells[i].Width = 1;
@@ -275,7 +275,7 @@ public class BufferLine : IEnumerable<BufferCell>
         {
             for (int i = 0; i < _length; i++)
             {
-                if (_cells[i].Image is not null)
+                if (_cells[i].Placement is not null)
                     return true;
             }
             return false;

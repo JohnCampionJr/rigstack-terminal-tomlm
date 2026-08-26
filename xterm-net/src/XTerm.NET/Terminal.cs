@@ -282,6 +282,9 @@ public class Terminal
         _parser.DcsHook += OnParserDcsHook;
         _parser.DcsPut += OnParserDcsPut;
         _parser.DcsUnhook += OnParserDcsUnhook;
+        _parser.ApcHook += OnParserApcHook;
+        _parser.ApcPut += OnParserApcPut;
+        _parser.ApcUnhook += OnParserApcUnhook;
 
         InsertMode = false;
         ApplicationCursorKeys = false;
@@ -347,6 +350,30 @@ public class Terminal
     private void OnParserDcsUnhook(object? sender, DcsUnhookEventArgs e)
     {
         _inputHandler.HandleDcsUnhook(e.TerminatedCleanly);
+    }
+
+    /// <summary>
+    /// Handles the start of an APC sequence from the parser.
+    /// </summary>
+    private void OnParserApcHook(object? sender, ApcHookEventArgs e)
+    {
+        _inputHandler.HandleApcHook(e.Introducer);
+    }
+
+    /// <summary>
+    /// Handles a chunk of an APC payload from the parser.
+    /// </summary>
+    private void OnParserApcPut(object? sender, ApcPutEventArgs e)
+    {
+        _inputHandler.HandleApcPut(e.Data.Span);
+    }
+
+    /// <summary>
+    /// Handles the end of an APC sequence from the parser.
+    /// </summary>
+    private void OnParserApcUnhook(object? sender, ApcUnhookEventArgs e)
+    {
+        _inputHandler.HandleApcUnhook(e.TerminatedCleanly);
     }
 
     /// <summary>
@@ -511,6 +538,20 @@ public class Terminal
     /// Both buffers are swept: an image on the alternate screen costs the same memory as one on
     /// the normal screen.</para>
     /// </remarks>
+    /// <summary>
+    /// Removes every appearance of one image from both buffers.
+    /// </summary>
+    /// <remarks>
+    /// What Kitty's delete-by-id asks for. The pixels themselves go when the last reference to them
+    /// does, so this is about what is on screen rather than about memory.
+    /// </remarks>
+    internal void DropImage(Graphics.TerminalImage image)
+    {
+        var doomed = new HashSet<Graphics.TerminalImage> { image };
+        DropImages(_normalBuffer, doomed);
+        DropImages(_altBuffer, doomed);
+    }
+
     internal void EnforceImageBudget()
     {
         var budget = Options.MaxImageBytes;
@@ -548,8 +589,14 @@ public class Terminal
         Collect(_altBuffer);
         return live;
 
-        void Collect(Buffer.TerminalBuffer buffer)
+        // Nullable because the fields are: the buffers are built in the constructor and never
+        // cleared, but nothing in the type system says so, and a sweep of a buffer that does not
+        // exist has nothing to find.
+        void Collect(Buffer.TerminalBuffer? buffer)
         {
+            if (buffer is null)
+                return;
+
             for (int i = 0; i < buffer.Lines.Length; i++)
             {
                 var line = buffer.Lines[i];
@@ -565,8 +612,15 @@ public class Terminal
         }
     }
 
-    private static void DropImages(Buffer.TerminalBuffer buffer, HashSet<Graphics.TerminalImage> doomed)
+    /// <remarks>
+    /// Takes a nullable buffer for the same reason <c>Collect</c> does: the fields are nullable, and
+    /// dropping images from a buffer that does not exist is a no-op rather than an error.
+    /// </remarks>
+    private static void DropImages(Buffer.TerminalBuffer? buffer, HashSet<Graphics.TerminalImage> doomed)
     {
+        if (buffer is null)
+            return;
+
         for (int i = 0; i < buffer.Lines.Length; i++)
         {
             var line = buffer.Lines[i];
@@ -580,7 +634,9 @@ public class Terminal
                 if (cell.Image is null || !doomed.Contains(cell.Image))
                     continue;
 
-                cell.Image = null;
+                // Doomed by IMAGE, cleared by placement: every appearance of a picture goes when
+                // its pixels do, which is the point of freeing them.
+                cell.Placement = null;
                 cell.ImageTile = 0;
                 cell.Content = " ";
                 cell.Width = 1;
@@ -890,6 +946,9 @@ public class Terminal
         _parser.DcsHook -= OnParserDcsHook;
         _parser.DcsPut -= OnParserDcsPut;
         _parser.DcsUnhook -= OnParserDcsUnhook;
+        _parser.ApcHook -= OnParserApcHook;
+        _parser.ApcPut -= OnParserApcPut;
+        _parser.ApcUnhook -= OnParserApcUnhook;
 
         // Clear all event subscriptions
         DataReceived = null;

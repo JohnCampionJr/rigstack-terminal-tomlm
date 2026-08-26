@@ -143,6 +143,25 @@ public class TerminalOptions : ICloneable
     public bool SixelEnabled { get; set; } = true;
 
     /// <summary>
+    /// Whether Kitty graphics commands are honoured.
+    /// </summary>
+    /// <remarks>
+    /// Turning it off makes the terminal refuse a query as well as a picture, so a well-behaved
+    /// application falls back to text rather than sending images that get dropped.
+    /// </remarks>
+    public bool KittyGraphicsEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Budget for images held by client id but not currently on screen, in bytes.
+    /// </summary>
+    /// <remarks>
+    /// Kitty transmits a picture once and may show it later, so an image can be live with no cell
+    /// referencing it. Cell references cannot account for those, and without a ceiling a program
+    /// could transmit without ever placing and never be collected. Oldest goes first.
+    /// </remarks>
+    public long MaxImageRegistryBytes { get; set; } = 32L * 1024 * 1024;
+
+    /// <summary>
     /// Width of a character cell in pixels.
     /// </summary>
     /// <remarks>
@@ -244,6 +263,8 @@ public class TerminalOptions : ICloneable
         RightClickSelectsWord = other.RightClickSelectsWord;
         RendererType = other.RendererType;
         SixelEnabled = other.SixelEnabled;
+        KittyGraphicsEnabled = other.KittyGraphicsEnabled;
+        MaxImageRegistryBytes = other.MaxImageRegistryBytes;
         CellWidthPixels = other.CellWidthPixels;
         CellHeightPixels = other.CellHeightPixels;
         MaxSixelPixels = other.MaxSixelPixels;

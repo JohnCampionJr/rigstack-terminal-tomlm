@@ -425,3 +425,139 @@ Passed: 847
 Failed: 0
 Skipped: 0
 ```
+
+# Kitty graphics protocol
+
+## Summary
+
+The Kitty graphics protocol (`ESC _ G <control> ; <base64> ESC \`) is decoded and placed in the
+buffer alongside Sixel. `icat`, `chafa -f kitty`, `timg -pk`, `yazi` and `image.nvim` draw pictures
+against a host that renders tiles.
+
+Kitty was unreachable for the same reason Sixel had been. `EscapeSequenceParser` collapsed SOS, PM
+and APC into one state that hunted for the terminator and discarded every byte, so the payload never
+reached anything that could decode it. APC now has a real streaming path -- `ApcHook`/`ApcPut`/
+`ApcUnhook` -- mirroring the DCS one, routed from `ESC _` only; `ESC ^` and `ESC X` keep the discard
+path they should have.
+
+Scope in: transmit (`a=t`), transmit-and-display (`a=T`), place (`a=p`), delete (`a=d`), query
+(`a=q`); chunked payloads; RGB, RGBA and PNG; zlib; cropping; cell-box scaling; cursor policy; quiet
+levels; and U+10EEEE Unicode placeholders. Out: animation, z-index and overlapping placements.
+
+## Placements, because a picture can now appear twice
+
+Sixel decodes a picture and shows it once, so a cell could reference the `TerminalImage` directly.
+Kitty transmits once under an id and places as often as it likes, so "which image" no longer answers
+"which pixels, and where". Cells reference an `ImagePlacement` instead -- an image, the source
+rectangle it takes, and the cell box it fills -- and `BufferCell.Image` stays as a computed
+`Placement?.Image` so existing readers compile untouched. Still two references per cell, so the
+struct does not grow.
+
+This immediately surfaced a real bug in the host renderer. `AppendImageRun` continued a run on
+`ReferenceEquals(current.Image, image)`, which is safe with one decode per placement and wrong the
+moment two appearances of one picture abut horizontally: they coalesce into a single strip and blit
+the wrong pixels into both halves. The predicate now compares the placement.
+
+## Two tile geometries, which are not the same formula
+
+`TryGetTileSource` has two modes, and collapsing them would have quietly resampled every existing
+Sixel image:
+
+- **Natural** -- fixed cell pitch, edge tiles clipped. Sixel always, and Kitty with no `c`/`r`.
+- **Stretched** -- the source rectangle divided proportionally across the cell box, which is what
+  `c`/`r` mean.
+
+A 1160px-wide image at a 14px cell needs 83 cells, and 83 x 14 = 1162. The two forms therefore
+disagree on *every* tile, not merely the last one: tile 0 is 14px wide naturally and 13px
+proportionally. Sixel constructs itself in natural mode, and
+`ImagePlacementTests.A_natural_placement_lays_tiles_exactly_where_the_image_does` pins the
+equivalence so the migration cannot drift.
+
+Stretched tile boundaries are computed from the tile index at both edges (`left` from `tileCol`,
+`right` from `tileCol + 1`) rather than as origin-plus-width, so adjacent tiles meet exactly with no
+seam or overlap from rounding.
+
+## Decisions worth recording
+
+- **File, temp-file and shared-memory transmission are refused, not implemented.** `t=f`/`t=t`/`t=s`
+  would have the terminal open a path named by the program it hosts, and a host generally holds more
+  privilege than its guest. They are answered with `ENOTSUP` rather than ignored, so a client falls
+  back instead of waiting. `t=d` is the only medium accepted.
+- **Base64 is accumulated as text and decoded once at `m=0`.** Decoding per chunk is only safe if
+  every chunk is a multiple of four characters, which the protocol does not promise.
+- **`a=q` places nothing.** It is the detection path, and `StringSequenceTests`
+  `Text_after_a_string_sequence_still_prints` was already the guard: it writes
+  `ESC_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA` and asserts row 0 is exactly `"OK"`. `AAAA` decodes to three
+  zero bytes -- a perfectly valid 1x1 RGB image -- so a naive decode-and-place breaks it.
+- **A separate `_apcPendingUnhook` flag.** The DCS path resolves a mid-payload `ESC` one character
+  late, since `ESC \` terminates and anything else abandons. Sharing that flag with APC would let a
+  DCS and an APC sequence interleaved cross-fire each other's unhook and close the wrong payload.
+- **A registry, because a Kitty image can be live with zero placements.** "Which images exist" was
+  answered by scanning cells, which cannot express a picture transmitted but not yet shown. Stored
+  images are held in insertion order under their own `MaxImageRegistryBytes` budget and evicted
+  oldest first.
+- **Crop rectangles are clamped, not rejected.** They come from another process; a `w` that runs off
+  the right edge should show the part that exists rather than nothing at all.
+- **Interlaced PNG is refused rather than decoded.** Adam7 is rare from these tools, and a wrong
+  picture is worse than a reported failure.
+- **Nothing in the decoders throws.** As with Sixel: `PngDecoder.TryDecode` wraps its whole body, and
+  `KittyCommand.Parse` cannot fail -- unknown keys are ignored, per spec. Note that a continuation
+  chunk carries only `m=1`, so the action defaults to transmit only when no action key was seen at
+  all; otherwise a chunk would read as a fresh transmission.
+- **Placeholder ids ride in the foreground colour, which fits.** `AttributeData` packs colour into 25
+  bits, so a 24-bit image id round-trips intact. Only a *direct* colour is read as an id -- a palette
+  index stays a colour, so red text does not summon image number one. The row/column combining marks
+  are consumed and ignored, which is correct for the contiguous rectangles these clients emit.
+- **A diacritic after a placeholder must not join the image cell.** `TryAppendToPreviousCell` would
+  otherwise append it to a cell holding a picture; a test caught it, and image cells now refuse
+  combining marks.
+
+## Files changed
+
+- `src/XTerm.NET/Parser/EscapeSequenceParser.cs` -- APC streaming state, separate pending-unhook flag
+- `src/XTerm.NET/Common/Types.cs` -- `ParserState.ApcString`
+- `src/XTerm.NET/Events/ParserEvents.cs` -- `ApcHookEventArgs`, `ApcPutEventArgs`, `ApcUnhookEventArgs`
+- `src/XTerm.NET/Graphics/ImagePlacement.cs` -- placement, both tile geometries, tile coverage
+- `src/XTerm.NET/Graphics/PngDecoder.cs` -- chunk walk, zlib, five scanline filters, colour types 0/2/3/4/6
+- `src/XTerm.NET/Graphics/KittyCommand.cs` -- control-data parsing, non-allocating
+- `src/XTerm.NET/Graphics/KittyTransmission.cs` -- chunk reassembly, zlib, raw and PNG decode
+- `src/XTerm.NET/Graphics/ImageRegistry.cs` -- id-keyed store with oldest-first eviction
+- `src/XTerm.NET/Buffer/BufferCell.cs` -- `Placement` storage, `Image` computed, equality by placement
+- `src/XTerm.NET/InputHandler.cs` -- APC dispatch, kitty actions, replies, U+10EEEE placeholders
+- `src/XTerm.NET/Terminal.cs` -- APC wiring, `DropImage`, nullable-buffer fixes
+- `src/XTerm.NET/Options/TerminalOptions.cs` -- `KittyGraphicsEnabled`, `MaxImageRegistryBytes`
+- `src/XTerm.NET/Assembly.cs` -- `InternalsVisibleTo` for the decoder tests
+- `src/XTerm.NET.Tests/Parser/ApcSequenceTests.cs`
+- `src/XTerm.NET.Tests/Graphics/ImagePlacementTests.cs`
+- `src/XTerm.NET.Tests/Graphics/PngDecoderTests.cs`
+- `src/XTerm.NET.Tests/Graphics/KittyGraphicsTests.cs`
+- `src/XTerm.NET.Tests/Graphics/KittyPlaceholderTests.cs`
+
+## Validation
+
+```powershell
+dotnet test src/XTerm.NET.slnx
+```
+
+```text
+Passed: 938
+Failed: 0
+Skipped: 0
+```
+
+End to end, through a real ConPTY into a `Terminal`:
+
+```text
+> chafa --format kitty --size 4x2 test.png
+  apc[0]  control="a=T,f=32,s=40,v=40,c=4,r=2,m=1,q=2"  payload=none
+  apc[1]  control="m=1"                                 payload=680 chars
+  ...
+  apc[14] control="m=0"                                 payload=none
+  15 APC sequences, 8536 base64 chars of payload
+  placement: 40x40px image, source (0,0) 40x40 -> 4 cols x 2 rows, Stretched
+  rows 0-1 hold 4 tiles each; nothing scrolled
+```
+
+One invocation covers chunking, `f=32`, `c`/`r` scaling, `q=2`, a control-only opening sequence and
+an empty terminating one. A 30x14 run reassembles 617 sequences and 418 KB of base64 into one
+280x280 image across 28x14 cells.
