@@ -133,6 +133,55 @@ public class TerminalOptions : ICloneable
     public RendererType RendererType { get; set; } = RendererType.Canvas;
 
     /// <summary>
+    /// Whether Sixel images are decoded and placed in the buffer.
+    /// </summary>
+    /// <remarks>
+    /// Also governs whether the terminal advertises Sixel in its primary Device Attributes reply.
+    /// Turning it off makes well-behaved applications send text instead of pictures, rather than
+    /// sending pictures that get dropped.
+    /// </remarks>
+    public bool SixelEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Width of a character cell in pixels.
+    /// </summary>
+    /// <remarks>
+    /// The terminal is headless and cannot measure a font, so a host that renders images should
+    /// set this and <see cref="CellHeightPixels"/> from its own metrics -- in device pixels, not
+    /// layout units. It decides how many columns an image of a given pixel width covers, and it is
+    /// the answer given to a CSI 16 t query when the host does not handle that itself. The default
+    /// is a plausible 10x20 so that images placed without a host configuring anything still land
+    /// somewhere sensible.
+    /// </remarks>
+    public int CellWidthPixels { get; set; } = 10;
+
+    /// <summary>
+    /// Height of a character cell in pixels. See <see cref="CellWidthPixels"/>.
+    /// </summary>
+    public int CellHeightPixels { get; set; } = 20;
+
+    /// <summary>
+    /// Largest Sixel image accepted, in pixels. Larger ones are discarded as they decode.
+    /// </summary>
+    /// <remarks>
+    /// A Sixel payload declares no size until it has been drawn, so without a ceiling a hostile
+    /// or simply broken process can make the terminal allocate until it dies. Four megapixels is
+    /// comfortably larger than a full-screen image on a high-DPI display.
+    /// </remarks>
+    public int MaxSixelPixels { get; set; } = 4_000_000;
+
+    /// <summary>
+    /// Budget for image pixels held live in the buffer, in bytes.
+    /// </summary>
+    /// <remarks>
+    /// Images normally look after themselves: one is freed when the last cell showing it is
+    /// overwritten or scrolls out of the scrollback. This is the backstop for the case that
+    /// defeats it -- a long scrollback full of pictures, all still referenced and all still in
+    /// memory. Over budget, the oldest are dropped from the buffer.
+    /// </remarks>
+    public long MaxImageBytes { get; set; } = 64L * 1024 * 1024;
+
+    /// <summary>
     /// Window options handling.
     /// </summary>
     public WindowOptions WindowOptions { get; set; } = new WindowOptions();
@@ -194,6 +243,11 @@ public class TerminalOptions : ICloneable
         MacOptionIsMeta = other.MacOptionIsMeta;
         RightClickSelectsWord = other.RightClickSelectsWord;
         RendererType = other.RendererType;
+        SixelEnabled = other.SixelEnabled;
+        CellWidthPixels = other.CellWidthPixels;
+        CellHeightPixels = other.CellHeightPixels;
+        MaxSixelPixels = other.MaxSixelPixels;
+        MaxImageBytes = other.MaxImageBytes;
         WindowOptions = new WindowOptions(other.WindowOptions);
         Theme = new ThemeOptions(other.Theme);
         MinimumContrastRatio = other.MinimumContrastRatio;

@@ -1090,7 +1090,29 @@ public class InputHandlerTests
         // Act
         handler.HandleCsi("c", params_);
 
-        // Assert - Should respond with CSI ? 1 ; 2 c (VT100 with AVO)
+        // Assert - CSI ? 1 ; 2 ; 4 c: VT100 with AVO, plus Sixel graphics.
+        // Attribute 4 is how libsixel-based programs decide whether to send a picture at all, so
+        // dropping it from this reply silently turns every image back into text art.
+        Assert.Equal("\u001b[?1;2;4c", receivedData);
+    }
+
+    [Fact]
+    public void HandleCsi_DA_Primary_OmitsSixelWhenDisabled()
+    {
+        // Arrange
+        var terminal = CreateTerminal();
+        terminal.Options.SixelEnabled = false;
+        var handler = new InputHandler(terminal);
+        var params_ = new Params();
+        params_.AddParam(0);
+
+        string? receivedData = null;
+        terminal.DataReceived += (_, e) => receivedData = e.Data;
+
+        // Act
+        handler.HandleCsi("c", params_);
+
+        // Assert - claiming Sixel while it is switched off would send pictures we then drop
         Assert.Equal("\u001b[?1;2c", receivedData);
     }
 

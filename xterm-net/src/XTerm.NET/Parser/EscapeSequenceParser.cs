@@ -16,7 +16,27 @@ public class EscapeSequenceParser
     private readonly StringBuilder _collect;
     private readonly StringBuilder _osc;
     private readonly StringBuilder _dcs;
-    
+
+    /// <summary>
+    /// Payload characters held back so <see cref="DcsPut"/> fires once per chunk rather than once
+    /// per character. A Sixel image is a few hundred thousand characters and an event apiece would
+    /// cost more than the decoding does.
+    /// </summary>
+    private readonly char[] _dcsChunk = new char[512];
+    private int _dcsChunkLength;
+
+    /// <summary>True between a <see cref="DcsHook"/> and its matching <see cref="DcsUnhook"/>.</summary>
+    private bool _dcsHooked;
+
+    /// <summary>
+    /// True when an ESC arrived mid-payload and we do not yet know whether it begins a string
+    /// terminator or abandons the sequence. Resolved by the very next character.
+    /// </summary>
+    private bool _dcsPendingUnhook;
+
+    /// <summary>Whether the payload is still being accumulated for the <see cref="Dcs"/> event.</summary>
+    private bool _dcsAccumulating;
+
     // Parser events - Standard C# event pattern
     /// <summary>
     /// Fired when printable characters are parsed.
@@ -44,12 +64,39 @@ public class EscapeSequenceParser
     public event EventHandler<OscEventArgs>? Osc;
 
     /// <summary>
-    /// DCS parsing is not implemented yet. This event is retained for source compatibility.
+    /// Fired when a DCS sequence completes, carrying its whole payload.
     /// </summary>
-#pragma warning disable CS0067
-    [Obsolete("DCS parsing is not implemented yet; this event is retained for source compatibility.")]
+    /// <remarks>
+    /// Convenient for the short sequences -- DECRQSS and friends -- and useless for the long ones,
+    /// because a Sixel image would have to be buffered into a single string first. So the payload
+    /// is only accumulated while something is subscribed here AND the sequence stayed under
+    /// <see cref="MaxAccumulatedDcsLength"/>. Anything larger is streamed and nothing else; use
+    /// <see cref="DcsHook"/>/<see cref="DcsPut"/>/<see cref="DcsUnhook"/> for those.
+    /// </remarks>
     public event EventHandler<DcsEventArgs>? Dcs;
-#pragma warning restore CS0067
+
+    /// <summary>
+    /// Fired when a DCS sequence's final character has been seen, before any payload.
+    /// </summary>
+    public event EventHandler<DcsHookEventArgs>? DcsHook;
+
+    /// <summary>
+    /// Fired for each chunk of a DCS payload.
+    /// </summary>
+    public event EventHandler<DcsPutEventArgs>? DcsPut;
+
+    /// <summary>
+    /// Fired when a DCS sequence ends, cleanly or otherwise.
+    /// </summary>
+    public event EventHandler<DcsUnhookEventArgs>? DcsUnhook;
+
+    /// <summary>
+    /// How much of a DCS payload will be accumulated for the <see cref="Dcs"/> event. A Sixel
+    /// image is unbounded and a screenful can run to megabytes; buffering that so a convenience
+    /// event can hand it over as one string is how a terminal ends up holding a copy of every
+    /// picture ever drawn.
+    /// </summary>
+    public const int MaxAccumulatedDcsLength = 4096;
 
     public EscapeSequenceParser()
     {
@@ -76,6 +123,15 @@ public class EscapeSequenceParser
     /// </summary>
     private void ParseChar(int code)
     {
+        // An ESC in a DCS payload is ambiguous until the next character arrives: "ESC \" ends the
+        // sequence, anything else abandons it. Resolving it here, one character late, is what lets
+        // a handler tell a finished image from a truncated one.
+        if (_dcsPendingUnhook)
+        {
+            _dcsPendingUnhook = false;
+            EndDcs(terminatedCleanly: code == 0x5C); // backslash
+        }
+
         var currentState = _state;
 
         // C0/C1 control characters
@@ -230,15 +286,11 @@ public class EscapeSequenceParser
                 OscPut(code);
                 break;
 
-            case ParserState.DcsEntry:
-            case ParserState.DcsParam:
-            case ParserState.DcsIgnore:
-            case ParserState.DcsPassthrough:
             case ParserState.SosPmApcString:
-                // DCS, and SOS/PM/APC, are consumed whole and answered by nobody. What matters is LEAVING
-                // them — and SosPmApcString had no case here at all. ESC _ , ESC ^ and ESC X were entered
-                // and never exited, so the parser sat in that state discarding every byte that followed it.
-                // One kitty graphics query and the terminal stopped answering anything, permanently.
+                // SOS/PM/APC are consumed whole and answered by nobody. What matters is LEAVING them —
+                // and this state had no case here at all. ESC _ , ESC ^ and ESC X were entered and never
+                // exited, so the parser sat in that state discarding every byte that followed it. One
+                // kitty graphics query and the terminal stopped answering anything, permanently.
                 //
                 // ESC moves to Escape rather than Ground so the backslash of a two-byte ST is consumed as
                 // part of the terminator, which is what OSC already does. Dropping straight to Ground left
@@ -250,6 +302,115 @@ public class EscapeSequenceParser
                 else if (code == 0x1B) // ESC, the first half of ESC \
                 {
                     Transition(ParserState.Escape);
+                }
+                break;
+
+            // ---- DCS ------------------------------------------------------------------------
+            // The prologue states mirror their CSI counterparts exactly, because the grammar in
+            // front of the final character is the same one. What differs is the final character:
+            // CSI dispatches and returns to Ground, DCS opens a payload that runs until ST.
+
+            case ParserState.DcsEntry:
+                if (code == 0x9C) { Transition(ParserState.Ground); }
+                else if (code == 0x1B) { Transition(ParserState.Escape); }
+                else if (code == 0x18 || code == 0x1A) { Transition(ParserState.Ground); }
+                else if (code < 0x20 || code == 0x7F) { /* ignored */ }
+                else if (code >= 0x3C && code <= 0x3F) // private markers <, =, >, ?
+                {
+                    Collect(code);
+                    Transition(ParserState.DcsParam);
+                }
+                else if (code >= 0x30 && code < 0x3C) // 0-9, :, ;
+                {
+                    if (code == 0x3A) { Transition(ParserState.DcsIgnore); }
+                    else { Param(code); Transition(ParserState.DcsParam); }
+                }
+                else if (code >= 0x20 && code < 0x30) // intermediates
+                {
+                    Collect(code);
+                    Transition(ParserState.DcsIntermediate);
+                }
+                else if (code >= 0x40 && code < 0x7F)
+                {
+                    BeginDcs(code);
+                }
+                break;
+
+            case ParserState.DcsParam:
+                if (code == 0x9C) { Transition(ParserState.Ground); }
+                else if (code == 0x1B) { Transition(ParserState.Escape); }
+                else if (code == 0x18 || code == 0x1A) { Transition(ParserState.Ground); }
+                else if (code < 0x20 || code == 0x7F) { /* ignored */ }
+                else if (code >= 0x30 && code < 0x3C) // 0-9, ;
+                {
+                    if (code == 0x3A) { Transition(ParserState.DcsIgnore); }
+                    else { Param(code); }
+                }
+                else if (code >= 0x3C && code <= 0x3F)
+                {
+                    // A private marker is only legal before the parameters. Arriving here it is
+                    // malformed, and the sequence is discarded rather than half-honoured.
+                    Transition(ParserState.DcsIgnore);
+                }
+                else if (code >= 0x20 && code < 0x30)
+                {
+                    Collect(code);
+                    Transition(ParserState.DcsIntermediate);
+                }
+                else if (code >= 0x40 && code < 0x7F)
+                {
+                    BeginDcs(code);
+                }
+                break;
+
+            case ParserState.DcsIntermediate:
+                if (code == 0x9C) { Transition(ParserState.Ground); }
+                else if (code == 0x1B) { Transition(ParserState.Escape); }
+                else if (code == 0x18 || code == 0x1A) { Transition(ParserState.Ground); }
+                else if (code < 0x20 || code == 0x7F) { /* ignored */ }
+                else if (code >= 0x20 && code < 0x30)
+                {
+                    Collect(code);
+                }
+                else if (code >= 0x30 && code < 0x40)
+                {
+                    // Parameters after an intermediate are out of order; discard the sequence.
+                    Transition(ParserState.DcsIgnore);
+                }
+                else if (code >= 0x40 && code < 0x7F)
+                {
+                    BeginDcs(code);
+                }
+                break;
+
+            case ParserState.DcsIgnore:
+                if (code == 0x9C) { Transition(ParserState.Ground); }
+                else if (code == 0x1B) { Transition(ParserState.Escape); }
+                else if (code == 0x18 || code == 0x1A) { Transition(ParserState.Ground); }
+                break;
+
+            case ParserState.DcsPassthrough:
+                if (code == 0x9C) // ST
+                {
+                    EndDcs(terminatedCleanly: true);
+                    Transition(ParserState.Ground);
+                }
+                else if (code == 0x1B) // ESC, possibly the first half of ESC \
+                {
+                    // Do not decide yet. The next character says whether this terminated the
+                    // sequence or abandoned it; ParseChar resolves it on the way in.
+                    _dcsPendingUnhook = true;
+                    Transition(ParserState.Escape);
+                }
+                else if (code == 0x18 || code == 0x1A) // CAN, SUB — an explicit abort
+                {
+                    EndDcs(terminatedCleanly: false);
+                    Transition(ParserState.Ground);
+                }
+                else if (code == 0x7F) { /* DEL is not payload */ }
+                else
+                {
+                    DcsPutChar(code);
                 }
                 break;
         }
@@ -365,6 +526,119 @@ public class EscapeSequenceParser
         _osc.Append(char.ConvertFromUtf32(code));
     }
 
+    /// <summary>
+    /// Handles the final character of a DCS: announces the sequence and opens its payload.
+    /// </summary>
+    private void BeginDcs(int code)
+    {
+        // Read the prologue before transitioning — Transition's entry action for a later state is
+        // free to clear it.
+        var identifier = _collect.ToString() + (char)code;
+        _collect.Clear();
+        var paramsClone = _params.Clone();
+        _dcsChunkLength = 0;
+        _dcs.Clear();
+        _dcsHooked = true;
+
+        // Only pay for accumulation if somebody is actually listening for the whole-payload event.
+        _dcsAccumulating = Dcs != null;
+
+        Transition(ParserState.DcsPassthrough);
+        OnDcsHook(identifier, paramsClone);
+    }
+
+    /// <summary>
+    /// Adds one character to the payload, flushing to <see cref="DcsPut"/> a chunk at a time.
+    /// </summary>
+    private void DcsPutChar(int code)
+    {
+        if (code > 0xFFFF)
+        {
+            // Not something Sixel or DECRQSS produce, but the parser is rune-based and dropping
+            // half a surrogate pair into the payload would be worse than spending two slots.
+            var surrogates = char.ConvertFromUtf32(code);
+            foreach (var c in surrogates)
+                DcsPutChar(c);
+            return;
+        }
+
+        if (_dcsAccumulating)
+        {
+            if (_dcs.Length < MaxAccumulatedDcsLength)
+                _dcs.Append((char)code);
+            else
+                _dcsAccumulating = false; // too big to hand over as one string; stop paying for it
+        }
+
+        _dcsChunk[_dcsChunkLength++] = (char)code;
+        if (_dcsChunkLength == _dcsChunk.Length)
+            FlushDcsChunk();
+    }
+
+    private void FlushDcsChunk()
+    {
+        if (_dcsChunkLength == 0)
+            return;
+
+        var length = _dcsChunkLength;
+        _dcsChunkLength = 0;
+        OnDcsPut(new ReadOnlyMemory<char>(_dcsChunk, 0, length));
+    }
+
+    /// <summary>
+    /// Closes an open DCS payload. Safe to call when none is open, which is what makes it usable
+    /// from <see cref="Reset"/> and from every abort path without a guard at each call site.
+    /// </summary>
+    private void EndDcs(bool terminatedCleanly)
+    {
+        if (!_dcsHooked)
+            return;
+
+        _dcsHooked = false;
+        FlushDcsChunk();
+
+        if (_dcsAccumulating)
+        {
+            _dcsAccumulating = false;
+            OnDcs(_dcs.ToString(), _params.Clone());
+        }
+        _dcs.Clear();
+
+        OnDcsUnhook(terminatedCleanly);
+    }
+
+    /// <summary>
+    /// Raises the DcsHook event.
+    /// </summary>
+    protected virtual void OnDcsHook(string identifier, Params parameters)
+    {
+        DcsHook?.Invoke(this, new DcsHookEventArgs(identifier, parameters));
+    }
+
+    /// <summary>
+    /// Raises the DcsPut event.
+    /// </summary>
+    protected virtual void OnDcsPut(ReadOnlyMemory<char> data)
+    {
+        DcsPut?.Invoke(this, new DcsPutEventArgs(data));
+    }
+
+    /// <summary>
+    /// Raises the DcsUnhook event.
+    /// </summary>
+    protected virtual void OnDcsUnhook(bool terminatedCleanly)
+    {
+        DcsUnhook?.Invoke(this, new DcsUnhookEventArgs(terminatedCleanly));
+    }
+
+    /// <summary>
+    /// Raises the Dcs event.
+    /// </summary>
+    protected virtual void OnDcs(string data, Params parameters)
+    {
+        Dcs?.Invoke(this, new DcsEventArgs(data, parameters));
+    }
+
     private void DispatchOsc()
     {
         OnOsc(_osc.ToString());
@@ -383,10 +657,17 @@ public class EscapeSequenceParser
     /// </summary>
     public void Reset()
     {
+        // A reset mid-image abandons it. Say so, rather than leaving a decoder open forever
+        // waiting for a payload that will never arrive.
+        EndDcs(terminatedCleanly: false);
+
         _state = ParserState.Ground;
         _params.Reset();
         _collect.Clear();
         _osc.Clear();
         _dcs.Clear();
+        _dcsChunkLength = 0;
+        _dcsPendingUnhook = false;
+        _dcsAccumulating = false;
     }
 }

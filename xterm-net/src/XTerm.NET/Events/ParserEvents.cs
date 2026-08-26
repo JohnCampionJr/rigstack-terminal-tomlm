@@ -115,3 +115,68 @@ public class DcsEventArgs : EventArgs
         Parameters = parameters;
     }
 }
+
+/// <summary>
+/// Event arguments raised when a DCS sequence's final character has been seen and its payload is
+/// about to begin.
+/// </summary>
+/// <remarks>
+/// A DCS carries an open-ended payload -- a Sixel image can run to megabytes -- so the parser
+/// streams it as hook/put/unhook rather than handing over one finished string. A handler decides
+/// at hook time whether this is a sequence worth listening to, and only then does it pay for the
+/// bytes.
+/// </remarks>
+public class DcsHookEventArgs : EventArgs
+{
+    /// <summary>
+    /// Intermediate characters followed by the final character, e.g. "q" for DECSIXEL or "$q" for
+    /// DECRQSS. Built the same way as the CSI identifier, so the two read alike.
+    /// </summary>
+    public string Identifier { get; }
+
+    /// <summary>
+    /// The numeric parameters that preceded the final character.
+    /// </summary>
+    public Params Parameters { get; }
+
+    public DcsHookEventArgs(string identifier, Params parameters)
+    {
+        Identifier = identifier;
+        Parameters = parameters;
+    }
+}
+
+/// <summary>
+/// Event arguments for a chunk of a DCS payload.
+/// </summary>
+public class DcsPutEventArgs : EventArgs
+{
+    /// <summary>
+    /// A slice of the payload. Only valid for the duration of the event -- a handler that needs to
+    /// keep it must copy it.
+    /// </summary>
+    public ReadOnlyMemory<char> Data { get; }
+
+    public DcsPutEventArgs(ReadOnlyMemory<char> data)
+    {
+        Data = data;
+    }
+}
+
+/// <summary>
+/// Event arguments raised when a DCS sequence ends.
+/// </summary>
+public class DcsUnhookEventArgs : EventArgs
+{
+    /// <summary>
+    /// True when the sequence ended at a string terminator, false when it was abandoned -- a CAN,
+    /// a SUB, or another escape sequence starting on top of it. A half-received image is not worth
+    /// showing, so handlers use this to tell "finished" from "gave up".
+    /// </summary>
+    public bool TerminatedCleanly { get; }
+
+    public DcsUnhookEventArgs(bool terminatedCleanly)
+    {
+        TerminatedCleanly = terminatedCleanly;
+    }
+}

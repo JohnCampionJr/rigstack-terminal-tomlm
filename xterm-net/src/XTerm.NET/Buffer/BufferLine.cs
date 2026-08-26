@@ -241,6 +241,48 @@ public class BufferLine : IEnumerable<BufferCell>
     }
 
     /// <summary>
+    /// Drops any image pieces on this line, leaving the cells blank but otherwise untouched.
+    /// </summary>
+    /// <returns>True if the line held any, which is also the signal that it needs repainting.</returns>
+    public bool ClearImages()
+    {
+        bool found = false;
+        for (int i = 0; i < _length; i++)
+        {
+            if (_cells[i].Image is null)
+                continue;
+
+            _cells[i].Image = null;
+            _cells[i].ImageTile = 0;
+            _cells[i].Content = " ";
+            _cells[i].Width = 1;
+            _cells[i].CodePoint = 0x20;
+            found = true;
+        }
+
+        if (found)
+            Cache = null;
+        return found;
+    }
+
+    /// <summary>
+    /// Whether any cell on this line shows part of an image. Cheap enough for a renderer to ask
+    /// once per row rather than testing every cell it draws.
+    /// </summary>
+    public bool HasImages
+    {
+        get
+        {
+            for (int i = 0; i < _length; i++)
+            {
+                if (_cells[i].Image is not null)
+                    return true;
+            }
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Gets the last non-whitespace cell index.
     /// </summary>
     public int GetTrimmedLength()

@@ -1,4 +1,4 @@
-﻿using NeoSmart.Unicode;
+using NeoSmart.Unicode;
 using System.Text;
 using Wcwidth;
 using XTerm.Buffer;
@@ -546,7 +546,13 @@ public class InputHandler
                 break;
 
             case CsiCommand.ScrollUp:
-                ScrollUp(parameters);
+                // "CSI ? ... S" is XTSMGRAPHICS, not SCROLL UP. They share a final character, and
+                // the identifier has its private marker stripped before the lookup, so without
+                // this guard a Sixel program's opening capability query scrolled the screen.
+                if (isPrivate)
+                    GraphicsAttributes(parameters);
+                else
+                    ScrollUp(parameters);
                 break;
 
             case CsiCommand.ScrollDown:
@@ -732,6 +738,166 @@ public class InputHandler
         _currentCharset = CharsetMode.G0;
     }
 
+    #region DCS / Sixel
+
+    /// <summary>The Sixel image being decoded, if a DECSIXEL payload is currently arriving.</summary>
+    private Graphics.SixelDecoder? _sixelDecoder;
+
+    /// <summary>
+    /// The colour registers used when mode 1070 is reset, so images inherit each other's palette
+    /// the way they did on a VT340. Built on first use, because the default is private registers
+    /// and most sessions never touch this.
+    /// </summary>
+    private Graphics.SixelPalette? _sharedSixelPalette;
+
+    /// <summary>
+    /// Handles the start of a DCS sequence.
+    /// </summary>
+    /// <remarks>
+    /// The payload that follows is streamed rather than handed over whole, so this is where we
+    /// decide whether it is worth reading at all. Only DECSIXEL is; anything else is left to the
+    /// parser's whole-payload event, which is capped and cheap.
+    /// </remarks>
+    public void HandleDcsHook(string identifier, Params parameters)
+    {
+        _sixelDecoder = null;
+
+        if (identifier != "q" || !_terminal.Options.SixelEnabled)
+            return;
+
+        // P1 aspect ratio, P2 background select, P3 horizontal grid.
+        var p1 = parameters.GetParam(0, 0);
+        var p2 = parameters.GetParam(1, 0);
+        var p3 = parameters.GetParam(2, 0);
+
+        // Mode 1070 set -- the default -- gives every image its own registers, so one picture
+        // cannot recolour the next. Reset shares one set across images.
+        var palette = _terminal.SixelPrivateColorRegisters
+            ? new Graphics.SixelPalette()
+            : _sharedSixelPalette ??= new Graphics.SixelPalette();
+
+        _sixelDecoder = new Graphics.SixelDecoder(
+            p1, p2, p3,
+            Math.Max(1, _terminal.Options.CellWidthPixels),
+            Math.Max(1, _terminal.Options.CellHeightPixels),
+            _terminal.Options.MaxSixelPixels,
+            (uint)(0xFF000000 | (uint)(_terminal.Colors.Background & 0xFFFFFF)),
+            palette);
+    }
+
+    /// <summary>
+    /// Handles a chunk of a DCS payload.
+    /// </summary>
+    public void HandleDcsPut(ReadOnlySpan<char> data)
+    {
+        _sixelDecoder?.Put(data);
+    }
+
+    /// <summary>
+    /// Handles the end of a DCS sequence.
+    /// </summary>
+    /// <param name="terminatedCleanly">
+    /// False when the sequence was abandoned rather than terminated. A half-arrived image is
+    /// dropped: showing the top third of a picture is not a kindness.
+    /// </param>
+    public void HandleDcsUnhook(bool terminatedCleanly)
+    {
+        var decoder = _sixelDecoder;
+        _sixelDecoder = null;
+
+        if (decoder is null || !terminatedCleanly)
+            return;
+
+        var image = decoder.Finish();
+        if (image is not null)
+            PlaceImage(image);
+    }
+
+    /// <summary>
+    /// Writes an image into the buffer, one cell per tile.
+    /// </summary>
+    /// <remarks>
+    /// <para>Each covered cell gets a blank space carrying a reference to the shared image and the
+    /// coordinates of the piece it shows. Writing it through <c>SetCell</c> is what makes the rest
+    /// of the terminal treat it as content: the line's render cache is dropped, printing over it
+    /// replaces it, erasing clears it, and scrolling carries it along.</para>
+    /// <para>The cell keeps a space as its character so that selecting the image and copying it
+    /// yields blanks rather than something unreadable.</para>
+    /// </remarks>
+    private void PlaceImage(Graphics.TerminalImage image)
+    {
+        // DECSDM set means the older display behaviour: pinned to the top-left, clipped rather
+        // than scrolled, cursor untouched.
+        var scrolling = !_terminal.SixelDisplayMode;
+
+        var startCol = scrolling ? Math.Min(_buffer.X, _terminal.Cols - 1) : 0;
+        if (startCol < 0)
+            startCol = 0;
+        var row = scrolling ? _buffer.Y : 0;
+
+        var lastRowDrawn = row;
+
+        for (int tileRow = 0; tileRow < image.Rows; tileRow++)
+        {
+            if (row > _buffer.ScrollBottom)
+            {
+                if (!scrolling)
+                    break; // clipped at the bottom of the screen
+
+                // Ran off the bottom of the scroll region: push a line into the scrollback and
+                // carry on writing at the last row, which is what a long image does to a screen.
+                _buffer.ScrollUp(1);
+                row = _buffer.ScrollBottom;
+            }
+
+            var line = _buffer.Lines[_buffer.YBase + row];
+            if (line is null)
+                break;
+
+            for (int tileCol = 0; tileCol < image.Cols; tileCol++)
+            {
+                var col = startCol + tileCol;
+                if (col >= _terminal.Cols)
+                    break;
+
+                var cell = new BufferCell(" ", 1, _curAttr)
+                {
+                    Image = image,
+                    ImageTile = BufferCell.PackTile(tileCol, tileRow)
+                };
+                line.SetCell(col, ref cell);
+            }
+
+            lastRowDrawn = row;
+            if (tileRow < image.Rows - 1)
+                row++;
+        }
+
+        if (!scrolling)
+            return;
+
+        if (_terminal.SixelCursorRight)
+        {
+            // Mode 8452: stay on the image's last row, just past its right edge.
+            _buffer.SetCursor(Math.Min(startCol + image.Cols, _terminal.Cols - 1), lastRowDrawn);
+        }
+        else
+        {
+            // The cursor belongs on the line below the image, which may need one more scroll if
+            // the image finished on the last row of the region.
+            var below = lastRowDrawn + 1;
+            if (below > _buffer.ScrollBottom)
+            {
+                _buffer.ScrollUp(1);
+                below = _buffer.ScrollBottom;
+            }
+            _buffer.SetCursor(0, below);
+        }
+
+        _terminal.NoteImagePlaced(image);
+    }
+
+    #endregion
     /// <summary>
     /// Handles OSC sequences (Operating System Command).
     /// </summary>
@@ -1455,10 +1621,70 @@ public class InputHandler
             // Response: CSI ? 1 ; 2 c (VT100 with AVO)
             // More complete: CSI ? 1 ; 2 ; 6 ; 9 c
             // 1 = 132 columns, 2 = Printer, 6 = Selective erase, 9 = National replacement character sets
-            _terminal.RaiseDataReceived("\u001b[?1;2c");
+            //
+            // Attribute 4 is Sixel graphics, and it is not decoration: libsixel, chafa, img2sixel
+            // and everything built on them read this reply, and send text art instead of pictures
+            // unless they see it. Claiming it while Sixel is switched off would be a lie in the
+            // other direction, so it follows the option.
+            _terminal.RaiseDataReceived(_terminal.Options.SixelEnabled
+                ? "\u001b[?1;2;4c"
+                : "\u001b[?1;2c");
         }
     }
 
+    /// <summary>
+    /// XTSMGRAPHICS -- CSI ? Pi ; Pa ; Pv S. Reports the terminal's graphics limits.
+    /// </summary>
+    /// <remarks>
+    /// <para>This shares its final character with SCROLL UP, and <c>ToCsiCommand</c> strips the
+    /// private marker before looking the command up, so until this existed a graphics query
+    /// scrolled the screen instead of being answered. Every Sixel-capable program sends one during
+    /// startup, which made the damage routine rather than obscure.</para>
+    /// <para>Only the read operations are answered. The limits are fixed, so accepting a request
+    /// to change them and quietly not doing it would be worse than refusing outright.</para>
+    /// </remarks>
+    private void GraphicsAttributes(Params parameters)
+    {
+        const int readAttribute = 1;
+        const int readDefault = 2;
+        const int readMaximum = 4;
+
+        const int success = 0;
+        const int badItem = 1;
+        const int badAction = 2;
+
+        var item = parameters.GetParam(0, 0);
+        var action = parameters.GetParam(1, 0);
+        var isRead = action == readAttribute || action == readDefault || action == readMaximum;
+
+        switch (item)
+        {
+            case 1: // number of colour registers
+                _terminal.RaiseDataReceived(isRead
+                    ? $"\u001b[?1;{success};{Graphics.SixelPalette.RegisterCount}S"
+                    : $"\u001b[?1;{badAction}S");
+                break;
+
+            case 2: // Sixel geometry
+                if (isRead)
+                {
+                    // Reported as what MaxSixelPixels allows across the full terminal width, so a
+                    // program that sizes an image to fit gets one we will not then throw away.
+                    var width = Math.Max(1, _terminal.Cols * Math.Max(1, _terminal.Options.CellWidthPixels));
+                    var height = Math.Max(1, _terminal.Options.MaxSixelPixels / width);
+                    _terminal.RaiseDataReceived($"\u001b[?2;{success};{width};{height}S");
+                }
+                else
+                {
+                    _terminal.RaiseDataReceived($"\u001b[?2;{badAction}S");
+                }
+                break;
+
+            default:
+                _terminal.RaiseDataReceived($"\u001b[?{item};{badItem}S");
+                break;
+        }
+    }
     private void DeviceStatusReport(Params parameters, bool isPrivate)
     {
         // DSR - Device Status Report (CSI n or CSI ? n)
@@ -2034,6 +2260,18 @@ public class InputHandler
                     _terminal.Win32InputMode = false;
                     break;
 
+                case TerminalMode.SixelDisplayMode:
+                    _terminal.SixelDisplayMode = true;
+                    break;
+
+                case TerminalMode.SixelPrivateColorRegisters:
+                    _terminal.SixelPrivateColorRegisters = true;
+                    break;
+
+                case TerminalMode.SixelCursorRight:
+                    _terminal.SixelCursorRight = true;
+                    break;
+
                 case TerminalMode.Win32InputMode:
                     System.Diagnostics.Debug.WriteLine($">>> Mode {mode} Win32InputMode ENABLED (disabling MetaSendsEscape and AltSendsEscape)");
                     _terminal.Win32InputMode = true;
@@ -2197,6 +2435,18 @@ public class InputHandler
                 case TerminalMode.AltSendsEscape:
                     System.Diagnostics.Debug.WriteLine($">>> Mode {mode} AltSendsEscape DISABLED");
                     _terminal.AltSendsEscape = false;
+                    break;
+
+                case TerminalMode.SixelDisplayMode:
+                    _terminal.SixelDisplayMode = false;
+                    break;
+
+                case TerminalMode.SixelPrivateColorRegisters:
+                    _terminal.SixelPrivateColorRegisters = false;
+                    break;
+
+                case TerminalMode.SixelCursorRight:
+                    _terminal.SixelCursorRight = false;
                     break;
 
                 case TerminalMode.Win32InputMode:
