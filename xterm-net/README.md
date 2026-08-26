@@ -308,7 +308,10 @@ surplus runs off the bottom and scrolls the screen.
 BufferCell cell = line[col];
 
 if (cell.Placement is ImagePlacement placement &&
-    placement.TryGetTileSource(cell.ImageCol, cell.ImageRow, out int sx, out int sy, out int sw, out int sh))
+    placement.TryGetTileLayout(cell.ImageCol, cell.ImageRow,
+                               out int sx, out int sy, out int sw, out int sh,
+                               out double offX, out double offY,
+                               out double cellsWide, out double cellsHigh))
 {
     // Pixels are BGRA8888 with straight (unpremultiplied) alpha, top row first.
     // Cache your framework's bitmap against `placement.Image` — a ConditionalWeakTable keyed on the
@@ -316,16 +319,21 @@ if (cell.Placement is ImagePlacement placement &&
     // placements of one picture share the single upload.
     var bitmap = _bitmaps.GetOrCreate(placement.Image);
 
-    // Ask the placement how much of a cell this tile covers rather than assuming a whole one. A
-    // natural-size tile at the edge is clipped; a scaled tile is a proportional slice.
-    placement.GetTileCoverage(sw, sh, out double cellsWide, out double cellsHigh);
-
     DrawImage(bitmap,
         source: (sx, sy, sw, sh),
-        dest: (col * cellWidth, row * cellHeight, cellWidth * cellsWide, cellHeight * cellsHigh));
+        dest: ((col + offX) * cellWidth, (row + offY) * cellHeight,
+               cellWidth * cellsWide, cellHeight * cellsHigh));
     continue;
 }
 ```
+
+`TryGetTileLayout` answers both halves in one call: which pixels to take, and where in the cell to
+put them. Both are needed because neither implies the other — a natural-size tile at the right edge
+is clipped short, a stretched tile is a proportional slice, and a placement carrying `X=`/`Y=` starts
+partway into its first cell and is *both* narrower and shifted. The older
+`GetTileCoverage(sw, sh, out cellsWide, out cellsHigh)` still works and still returns the same
+numbers, but it has no way to express that shift, so a renderer that wants offsets must use the
+layout call.
 
 Adjacent cells sharing the same **`Placement`** reference and `ImageRow` with consecutive `ImageCol`
 values are contiguous, so a renderer can coalesce them into a single draw call per row instead of one
@@ -369,14 +377,19 @@ change of row count alone keeps them.
 
 Supported: transmit (`a=t`), transmit-and-display (`a=T`), place a stored image (`a=p`), delete
 (`a=d`), and query (`a=q`); chunked payloads (`m=1`/`m=0`); RGB (`f=24`), RGBA (`f=32`) and PNG
-(`f=100`); zlib compression (`o=z`); source cropping (`x`,`y`,`w`,`h`); cell-box scaling (`c`,`r`);
-cursor policy (`C`); and response suppression (`q=1`/`q=2`).
+(`f=100`, including interlaced); zlib compression (`o=z`); source cropping (`x`,`y`,`w`,`h`);
+cell-box scaling (`c`,`r`); pixel offsets within the first cell (`X`,`Y`); cursor policy (`C`); and
+response suppression (`q=1`/`q=2`).
 
-Images may be transmitted once under an id and placed repeatedly, including via **U+10EEEE Unicode
+An image may be named by the id the client chose (`i=`) or by a number it chose (`I=`), in which
+case the terminal picks an id and reports both back. The whole delete matrix is implemented — by id,
+by number, by placement id, at the cursor, at a cell, by row, by column, and by z-index — with the
+upper-case form of each additionally releasing the stored image.
+
+Images may be transmitted once and placed repeatedly, including via **U+10EEEE Unicode
 placeholders**, where the image id travels in the cell's foreground colour. That is how `yazi`,
 `ranger` and `image.nvim` draw. The combining marks that state an explicit tile row and column are
-ignored rather than misread — a contiguous rectangle written in reading order lands correctly, which
-is what those clients emit.
+decoded, so a client may write tiles in any order rather than as a rectangle in reading order.
 
 Not supported, and refused with a proper error reply rather than ignored:
 
@@ -385,9 +398,9 @@ Not supported, and refused with a proper error reply rather than ignored:
   usually holds more privilege than that program does. Direct transmission (`t=d`) is the only medium
   accepted.
 - **Animation** (`a=f`, `a=a`).
-- **Interlaced (Adam7) PNG**, refused rather than decoded incorrectly.
-- **Z-index and overlapping placements.** A cell has one image slot, so a placement over an occupied
-  cell replaces what was there instead of layering over it.
+- **Overlapping placements.** `z=` is recorded, and deletes can select by it, but a cell has one
+  image slot — so a placement written over an occupied cell replaces what was there rather than
+  layering over it.
 
 ## License
 

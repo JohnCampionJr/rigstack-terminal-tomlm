@@ -286,16 +286,107 @@ public class PngDecoderTests
     }
 
     /// <summary>
-    /// Adam7 is refused rather than decoded wrong. Nothing that talks to a terminal emits it, and a
-    /// scrambled picture would be worse than an error reply.
+    /// An Adam7 picture must come out pixel-for-pixel identical to the same picture stored plainly.
+    /// </summary>
+    /// <remarks>
+    /// Eight by eight so that all seven passes carry data -- a smaller picture leaves some of them
+    /// empty and the scatter arithmetic goes untested for those.
+    /// </remarks>
+    [Fact]
+    public void An_interlaced_png_decodes_to_the_same_pixels_as_a_plain_one()
+    {
+        var (source, width, height) = Gradient(8, 8);
+
+        Assert.True(TryDecode(Encode(source, width, height, filter: 0),
+                              out var plain, out _, out _));
+        Assert.True(TryDecode(EncodeInterlaced(source, width, height),
+                              out var interlaced, out var w, out var h));
+
+        Assert.Equal(8, w);
+        Assert.Equal(8, h);
+        Assert.Equal(plain, interlaced);
+    }
+
+    /// <summary>
+    /// A picture small enough that four of the seven passes are empty. Those contribute no bytes at
+    /// all, not even a filter byte -- counting one would shift every later pass and turn the rest of
+    /// the image into noise.
     /// </summary>
     [Fact]
-    public void An_interlaced_png_is_refused()
+    public void An_interlaced_png_with_empty_passes_still_decodes()
     {
-        var (source, width, height) = Gradient(4, 4);
+        var (source, width, height) = Gradient(2, 2);
+
+        Assert.True(TryDecode(Encode(source, width, height, filter: 0), out var plain, out _, out _));
+        Assert.True(TryDecode(EncodeInterlaced(source, width, height), out var interlaced, out _, out _));
+
+        Assert.Equal(plain, interlaced);
+    }
+
+    /// <summary>
+    /// The interlace flag set over scanlines that are not interlaced. The pass lengths cannot match,
+    /// and a picture decoded from misread bytes would be worse than an error reply.
+    /// </summary>
+    [Fact]
+    public void A_png_claiming_interlace_it_does_not_have_is_refused()
+    {
+        var (source, width, height) = Gradient(8, 8);
         var png = Encode(source, width, height, filter: 0, interlace: 1);
 
         Assert.False(TryDecode(png, out _, out _, out _));
+    }
+
+    /// <summary>An interlace method that does not exist is refused rather than guessed at.</summary>
+    [Fact]
+    public void An_unknown_interlace_method_is_refused()
+    {
+        var (source, width, height) = Gradient(4, 4);
+        var png = Encode(source, width, height, filter: 0, interlace: 2);
+
+        Assert.False(TryDecode(png, out _, out _, out _));
+    }
+
+    /// <summary>
+    /// Writes an Adam7 picture: seven independently filtered sub-images, in pass order.
+    /// </summary>
+    /// <remarks>
+    /// Filter 0 throughout, because what is under test here is the pass geometry and the scatter,
+    /// not the filters -- those have their own tests on the straight-through path.
+    /// </remarks>
+    private static byte[] EncodeInterlaced(byte[] rgba, int width, int height)
+    {
+        var passes = new (int X, int Y, int StepX, int StepY)[]
+        {
+            (0, 0, 8, 8), (4, 0, 8, 8), (0, 4, 4, 8), (2, 0, 4, 4),
+            (0, 2, 2, 4), (1, 0, 2, 2), (0, 1, 1, 2)
+        };
+
+        var raw = new List<byte>();
+
+        foreach (var pass in passes)
+        {
+            var passWidth = (width - pass.X + pass.StepX - 1) / pass.StepX;
+            var passHeight = (height - pass.Y + pass.StepY - 1) / pass.StepY;
+            if (passWidth <= 0 || passHeight <= 0)
+                continue;
+
+            for (int y = 0; y < passHeight; y++)
+            {
+                raw.Add(0);   // filter: none
+                for (int x = 0; x < passWidth; x++)
+                {
+                    var sourceX = pass.X + x * pass.StepX;
+                    var sourceY = pass.Y + y * pass.StepY;
+                    var at = (sourceY * width + sourceX) * 4;
+                    raw.Add(rgba[at]);
+                    raw.Add(rgba[at + 1]);
+                    raw.Add(rgba[at + 2]);
+                    raw.Add(rgba[at + 3]);
+                }
+            }
+        }
+
+        return WrapPng(raw.ToArray(), width, height, interlace: 1);
     }
 
     // ---- a minimal encoder, so a filter can be demanded ------------------------------------------

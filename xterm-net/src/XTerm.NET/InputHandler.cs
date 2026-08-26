@@ -169,6 +169,12 @@ public class InputHandler
             if (codePoint == KittyPlaceholder && TryPrintKittyPlaceholder())
                 return;
 
+            // The combining marks that state a placeholder's tile explicitly. They must be taken
+            // here too: left to the machinery below they would be appended to the image cell as
+            // text, and left to nothing at all they would print as visible marks of their own.
+            if (TryApplyPlaceholderDiacritic(codePoint))
+                return;
+
             // A character standing exactly where a ZWJ was just merged continues that cluster.
             var continuesCluster = _zwjContinuation is { } pending
                                    && pending.Row == _buffer.Y + _buffer.YBase
@@ -911,7 +917,23 @@ public class InputHandler
     /// Where the placeholder rectangle currently being written started, so a cell can work out
     /// which tile of the picture it is.
     /// </summary>
-    private (int Row, int Col, uint ImageId)? _placeholderOrigin;
+    /// <remarks>
+    /// The placement is held here as well as the position so that every cell of one run references
+    /// the same object. A fresh placement per cell would be correct but would defeat the host's run
+    /// coalescing, turning one blit per strip into one blit per cell.
+    /// </remarks>
+    private (int Row, int Col, uint ImageId, Graphics.ImagePlacement Placement)? _placeholderOrigin;
+
+    /// <summary>
+    /// The placeholder cell just written, and how many of its combining marks have arrived.
+    /// </summary>
+    /// <remarks>
+    /// The marks modify the cell BEFORE them, and there are up to three: row, then column, then the
+    /// most significant byte of the image id. Tracking the count is what tells the second from the
+    /// first, since the characters themselves are drawn from one table and carry no clue which
+    /// position they are filling.
+    /// </remarks>
+    private (int Row, int Col, int MarksSeen)? _placeholderCell;
 
     /// <summary>
     /// Writes a cell that a client marked as showing part of an image.
@@ -921,11 +943,10 @@ public class InputHandler
     /// than a colour. That works here because <c>AttributeData</c> keeps 25 bits for the value, so
     /// it survives the round trip unchanged.</para>
     /// <para>Which tile the cell shows is worked out from where it sits relative to the top-left of
-    /// the run, which is how a contiguous rectangle written in reading order comes out right. The
-    /// protocol also allows the row and column to be stated explicitly, as combining marks chosen
-    /// from a fixed table of 297 characters; that is NOT implemented, and the marks are consumed and
-    /// ignored. A client placing a whole picture in order is unaffected; one placing a scattered
-    /// subset of tiles would be.</para>
+    /// the run, which is how a contiguous rectangle written in reading order comes out right. A
+    /// client may also state the row and column explicitly, as combining marks drawn from a fixed
+    /// table; those arrive after this cell and are applied by
+    /// <see cref="TryApplyPlaceholderDiacritic"/>.</para>
     /// </remarks>
     /// <returns>False when nothing can be resolved, so the character prints as ordinary text.</returns>
     private bool TryPrintKittyPlaceholder()
@@ -952,13 +973,22 @@ public class InputHandler
                         && col >= origin.Col;
 
         if (!continues)
-            _placeholderOrigin = (row, col, imageId);
+            _placeholderOrigin = (row, col, imageId, Graphics.ImagePlacement.Natural(image));
 
         var start = _placeholderOrigin!.Value;
-        var tileCol = col - start.Col;
-        var tileRow = row - start.Row;
+        if (!WritePlaceholderCell(row, col, start.Placement, col - start.Col, row - start.Row))
+            return false;
 
-        var placement = Graphics.ImagePlacement.Natural(image);
+        _placeholderCell = (row, col, 0);
+        _buffer.SetCursorRaw(_buffer.X + 1, _buffer.Y);
+        return true;
+    }
+
+    /// <summary>Puts one tile of a placeholder run into a cell.</summary>
+    /// <returns>False when the tile falls outside the picture.</returns>
+    private bool WritePlaceholderCell(int row, int col, Graphics.ImagePlacement placement,
+                                      int tileCol, int tileRow)
+    {
         if (tileCol < 0 || tileRow < 0 || tileCol >= placement.Cols || tileRow >= placement.Rows)
             return false;
 
@@ -972,8 +1002,76 @@ public class InputHandler
             ImageTile = BufferCell.PackTile(tileCol, tileRow)
         };
         line.SetCell(col, ref cell);
+        return true;
+    }
 
-        _buffer.SetCursorRaw(_buffer.X + 1, _buffer.Y);
+    /// <summary>
+    /// Applies a combining mark that states part of the preceding placeholder cell's identity.
+    /// </summary>
+    /// <remarks>
+    /// <para>The marks come in a fixed order and are positional: the first gives the tile row, the
+    /// second the tile column, the third the most significant byte of the image id. A client may
+    /// send fewer than three and let the rest be inferred, which is why each is applied on its own
+    /// rather than waiting for the set.</para>
+    /// <para>The third one can change WHICH image the cell shows, so the placement has to be
+    /// rebuilt. That is rare -- it only matters for ids above 16777215 -- but resolving it late is
+    /// the only option, since the id is not complete until the mark arrives.</para>
+    /// </remarks>
+    /// <returns>False if this is not a mark applying to a placeholder, so it prints normally.</returns>
+    private bool TryApplyPlaceholderDiacritic(int codePoint)
+    {
+        if (_placeholderCell is not { } target || _placeholderOrigin is not { } origin)
+            return false;
+
+        // Only the cell immediately to the left, and only up to three marks.
+        if (target.Row != _buffer.Y + _buffer.YBase || target.Col != _buffer.X - 1 || target.MarksSeen >= 3)
+            return false;
+
+        if (!Graphics.PlaceholderDiacritics.TryGetValue(codePoint, out var value))
+            return false;
+
+        var line = _buffer.Lines[target.Row];
+        if (line is null)
+            return false;
+
+        var cell = line[target.Col];
+        if (cell.Placement is null)
+            return false;
+
+        var tileCol = cell.ImageCol;
+        var tileRow = cell.ImageRow;
+        var placement = cell.Placement;
+
+        switch (target.MarksSeen)
+        {
+            case 0:
+                tileRow = value;
+                break;
+
+            case 1:
+                tileCol = value;
+                break;
+
+            default:
+                // The high byte of the id. Re-resolving can fail, and when it does the cell keeps
+                // the picture it already had rather than becoming a blank.
+                var extendedId = ((uint)value << 24) | (origin.ImageId & 0x00FFFFFF);
+                if (_kittyImages.TryGet(extendedId, out var extended))
+                {
+                    placement = Graphics.ImagePlacement.Natural(extended);
+                    _placeholderOrigin = (origin.Row, origin.Col, extendedId, placement);
+                }
+                break;
+        }
+
+        _placeholderCell = (target.Row, target.Col, target.MarksSeen + 1);
+
+        // An explicit row or column outside the picture is a client error; keeping the cell as it
+        // was is better than blanking it, and better than throwing on another process's input.
+        if (tileCol >= placement.Cols || tileRow >= placement.Rows)
+            return true;
+
+        WritePlaceholderCell(target.Row, target.Col, placement, tileCol, tileRow);
         return true;
     }
 
@@ -1091,8 +1189,9 @@ public class InputHandler
             return;
         }
 
+        // A client that sent only a number gets an id chosen here, and is told what it was.
         var id = command.ImageId != 0 ? command.ImageId : _kittyImages.NextAssignedId();
-        _kittyImages.Store(id, image, _terminal.Options.MaxImageRegistryBytes);
+        _kittyImages.Store(id, image, _terminal.Options.MaxImageRegistryBytes, command.ImageNumber);
 
         if (command.Action == Graphics.KittyAction.TransmitAndDisplay)
             PlaceKittyImage(image, command);
@@ -1102,14 +1201,39 @@ public class InputHandler
 
     private void PlaceStoredKittyImage(Graphics.KittyCommand command)
     {
-        if (!_kittyImages.TryGet(command.ImageId, out var image))
+        if (!TryResolveKittyImage(command, out var id, out var image))
         {
             ReplyToKitty(command, Graphics.KittyError.NotFound);
             return;
         }
 
         PlaceKittyImage(image, command);
-        ReplyToKitty(command, Graphics.KittyError.None, command.ImageId);
+        ReplyToKitty(command, Graphics.KittyError.None, id);
+    }
+
+    /// <summary>
+    /// Finds a stored image from whichever identity the client used.
+    /// </summary>
+    /// <remarks>
+    /// A client may name an image by the id it chose (<c>i=</c>) or by a number it chose
+    /// (<c>I=</c>), leaving the terminal to pick the id. The id wins when both are present, since
+    /// it is the more specific of the two.
+    /// </remarks>
+    private bool TryResolveKittyImage(Graphics.KittyCommand command,
+                                      out uint id, out Graphics.TerminalImage image)
+    {
+        if (command.ImageId != 0)
+        {
+            id = command.ImageId;
+            return _kittyImages.TryGet(id, out image);
+        }
+
+        if (command.ImageNumber != 0)
+            return _kittyImages.TryGetByNumber(command.ImageNumber, out id, out image);
+
+        id = 0;
+        image = null!;
+        return false;
     }
 
     /// <summary>
@@ -1140,7 +1264,8 @@ public class InputHandler
             image, command.PlacementId,
             command.CropX, command.CropY, cropWidth, cropHeight,
             cols, rows,
-            stretched ? Graphics.ImageScaling.Stretched : Graphics.ImageScaling.Natural);
+            stretched ? Graphics.ImageScaling.Stretched : Graphics.ImageScaling.Natural,
+            command.ZIndex, command.OffsetX, command.OffsetY);
 
         PlaceImage(placement, command.KeepCursor);
     }
@@ -1149,14 +1274,25 @@ public class InputHandler
     /// Removes placements, and with an upper-case target the pixels behind them too.
     /// </summary>
     /// <remarks>
-    /// Only the targets that address the whole screen or a single id are implemented. The ones that
-    /// select by cell, column, row or z-index need a placement index this terminal does not keep,
-    /// and are refused rather than silently doing nothing.
+    /// <para>The case of the target letter is the whole difference between "stop showing this" and
+    /// "forget it entirely": lower case removes the appearances, upper case additionally releases
+    /// the stored image so its id no longer resolves.</para>
+    /// <para>Several keys mean something different here than they do on a transmission. On a delete,
+    /// <c>x</c> and <c>y</c> are screen cell coordinates rather than a crop origin, and <c>z</c> is
+    /// the z-index being matched rather than one being assigned. The protocol overloads them by
+    /// action, so the parsed <c>CropX</c>/<c>CropY</c> carry the cell here.</para>
+    /// <para>Positional targets find a placement through one of its cells and then remove all of it.
+    /// Deleting only the cells that fall in the named row or column would leave a picture with a
+    /// hole through it, which is not what "delete the placements intersecting row 3" means.</para>
     /// </remarks>
     private void DeleteKittyImages(Graphics.KittyCommand command)
     {
         var target = command.DeleteTarget;
         var alsoFree = char.IsUpper(target);
+
+        // Kitty numbers the screen from one; the buffer numbers it from zero.
+        var cellX = command.CropX - 1;
+        var cellY = command.CropY - 1;
 
         switch (char.ToLowerInvariant(target))
         {
@@ -1166,13 +1302,42 @@ public class InputHandler
                     _kittyImages.Clear();
                 break;
 
+            // By image id, or by image number -- d=i and d=n name different identities, so each
+            // looks up the one it is about rather than sharing a resolver that prefers the id.
             case 'i':
-                if (_kittyImages.TryGet(command.ImageId, out var image))
-                {
-                    _terminal.DropImage(image);
-                    if (alsoFree)
-                        _kittyImages.Remove(command.ImageId);
-                }
+            case 'n':
+                DeleteKittyImageByIdentity(command, byNumber: char.ToLowerInvariant(target) == 'n',
+                                           alsoFree);
+                break;
+
+            case 'c':
+                DropPlacementsAt(_buffer.X, _buffer.Y, alsoFree);
+                break;
+
+            case 'p':
+                DropPlacementsAt(cellX, cellY, alsoFree);
+                break;
+
+            case 'q':
+                DropPlacementsWhere(p => p.ZIndex == command.ZIndex,
+                                    (col, row) => col == cellX && row == cellY, alsoFree);
+                break;
+
+            case 'x':
+                DropPlacementsWhere(null, (col, _) => col == cellX, alsoFree);
+                break;
+
+            case 'y':
+                DropPlacementsWhere(null, (_, row) => row == cellY, alsoFree);
+                break;
+
+            case 'z':
+                DropPlacementsWhere(p => p.ZIndex == command.ZIndex, null, alsoFree);
+                break;
+
+            case 'f':
+                // Animation frames. Nothing here stores any, so there is nothing to remove -- but
+                // saying "unsupported" would be wrong, since the requested state is the state.
                 break;
 
             default:
@@ -1181,6 +1346,90 @@ public class InputHandler
         }
 
         ReplyToKitty(command, Graphics.KittyError.None, command.ImageId);
+    }
+
+    /// <summary>
+    /// Removes the appearances of one stored image, named by id or by number.
+    /// </summary>
+    /// <remarks>
+    /// A placement id narrows it to a single appearance. That case deliberately does not release the
+    /// pixels even for an upper-case target: other placements of the same image may still be on
+    /// screen, and freeing it would blank pictures the client did not name.
+    /// </remarks>
+    private void DeleteKittyImageByIdentity(Graphics.KittyCommand command, bool byNumber, bool alsoFree)
+    {
+        uint id;
+        Graphics.TerminalImage image;
+
+        if (byNumber)
+        {
+            if (!_kittyImages.TryGetByNumber(command.ImageNumber, out id, out image))
+                return;
+        }
+        else
+        {
+            id = command.ImageId;
+            if (id == 0 || !_kittyImages.TryGet(id, out image))
+                return;
+        }
+
+        if (command.PlacementId != 0)
+        {
+            _terminal.DropPlacements(p => ReferenceEquals(p.Image, image) && p.Id == command.PlacementId);
+            return;
+        }
+
+        _terminal.DropImage(image);
+
+        if (alsoFree)
+            _kittyImages.Remove(id);
+    }
+
+    /// <summary>Removes every placement covering one screen cell.</summary>
+    private void DropPlacementsAt(int col, int row, bool alsoFree)
+        => DropPlacementsWhere(null, (c, r) => c == col && r == row, alsoFree);
+
+    /// <summary>
+    /// Removes placements chosen by identity, by position, or by both.
+    /// </summary>
+    /// <param name="matches">A test on the placement, or null to accept any.</param>
+    /// <param name="cellMatches">A test on a cell's screen position, or null to search everywhere.</param>
+    private void DropPlacementsWhere(Func<Graphics.ImagePlacement, bool>? matches,
+                                     Func<int, int, bool>? cellMatches,
+                                     bool alsoFree)
+    {
+        HashSet<Graphics.ImagePlacement> doomed;
+
+        if (cellMatches is null)
+        {
+            // No position to search by, so every placement on screen is a candidate and the identity
+            // test does all the work.
+            doomed = _terminal.CollectPlacementsOnScreen((_, _) => true);
+        }
+        else
+        {
+            doomed = _terminal.CollectPlacementsOnScreen(cellMatches);
+        }
+
+        if (matches is not null)
+            doomed.RemoveWhere(p => !matches(p));
+
+        if (doomed.Count == 0)
+            return;
+
+        _terminal.DropPlacements(doomed);
+
+        if (!alsoFree)
+            return;
+
+        // The images behind the placements that just went. Any of them still shown elsewhere is
+        // kept, because releasing it would blank an appearance the client did not name.
+        var stillShown = _terminal.CollectPlacementsOnScreen((_, _) => true);
+        foreach (var placement in doomed)
+        {
+            if (!stillShown.Any(p => ReferenceEquals(p.Image, placement.Image)))
+                _kittyImages.RemoveImage(placement.Image);
+        }
     }
 
     /// <summary>
@@ -1203,7 +1452,15 @@ public class InputHandler
         if (replyId == 0 && command.ImageNumber == 0)
             return;
 
-        var identity = replyId != 0 ? $"i={replyId}" : $"I={command.ImageNumber}";
+        // A client that addressed the image by number needs both halves back: the number so it can
+        // match the reply to the command it sent, and the id the terminal chose so it can use the
+        // image afterwards. Only one of the two is known when the command failed early.
+        var identity = (replyId, command.ImageNumber) switch
+        {
+            (0, var number) => $"I={number}",
+            (var actual, 0) => $"i={actual}",
+            (var actual, var number) => $"i={actual},I={number}"
+        };
         var status = error switch
         {
             Graphics.KittyError.None => "OK",

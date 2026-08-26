@@ -90,6 +90,16 @@ internal readonly struct KittyCommand
     /// <summary>C — 1 leaves the cursor where it was.</summary>
     public bool KeepCursor { get; init; }
 
+    /// <summary>
+    /// X, Y — pixel offsets within the first cell, so a picture can start off the cell boundary.
+    /// </summary>
+    /// <remarks>
+    /// On a delete these letters mean nothing; the lower-case <c>x</c> and <c>y</c> carry the cell
+    /// coordinates there. The two are separate keys and never collide.
+    /// </remarks>
+    public int OffsetX { get; init; }
+    public int OffsetY { get; init; }
+
     /// <summary>z — draw order. Kept for the reply, not honoured.</summary>
     public int ZIndex { get; init; }
 
@@ -118,6 +128,7 @@ internal readonly struct KittyCommand
         int cropX = 0, cropY = 0, cropWidth = 0, cropHeight = 0;
         int cols = 0, rows = 0;
         bool keepCursor = false;
+        int offsetX = 0, offsetY = 0;
         int zIndex = 0;
         char deleteTarget = 'a';
         bool placeholder = false;
@@ -165,6 +176,8 @@ internal readonly struct KittyCommand
                 case 'c': cols = ReadInt(value, cols); break;
                 case 'r': rows = ReadInt(value, rows); break;
                 case 'C': keepCursor = ReadInt(value, 0) == 1; break;
+                case 'X': offsetX = ReadInt(value, offsetX); break;
+                case 'Y': offsetY = ReadInt(value, offsetY); break;
                 case 'z': zIndex = ReadInt(value, zIndex); break;
                 case 'd': deleteTarget = value[0]; break;
                 case 'U': placeholder = ReadInt(value, 0) == 1; break;
@@ -198,6 +211,8 @@ internal readonly struct KittyCommand
             Cols = cols,
             Rows = rows,
             KeepCursor = keepCursor,
+            OffsetX = offsetX,
+            OffsetY = offsetY,
             ZIndex = zIndex,
             DeleteTarget = deleteTarget,
             UnicodePlaceholder = placeholder

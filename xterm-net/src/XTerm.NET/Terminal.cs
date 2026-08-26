@@ -552,6 +552,100 @@ public class Terminal
         DropImages(_altBuffer, doomed);
     }
 
+    /// <summary>
+    /// Removes every appearance matching a test, from both buffers.
+    /// </summary>
+    /// <remarks>
+    /// Kitty's delete targets select placements by identity -- image id, placement id, z-index -- so
+    /// they need a test on the placement rather than on the pixels behind it. Deleting by image is
+    /// the special case where every placement of one picture goes at once.
+    /// </remarks>
+    internal void DropPlacements(Func<Graphics.ImagePlacement, bool> predicate)
+    {
+        DropPlacements(_normalBuffer, predicate);
+        DropPlacements(_altBuffer, predicate);
+    }
+
+    /// <summary>
+    /// Removes a known set of placements from both buffers, wherever they appear.
+    /// </summary>
+    /// <remarks>
+    /// The second half of a positional delete. A placement is found by one of its cells but must go
+    /// in its entirety -- deleting only the cells in the named row or column would leave a picture
+    /// with a hole through it.
+    /// </remarks>
+    internal void DropPlacements(HashSet<Graphics.ImagePlacement> doomed)
+    {
+        if (doomed.Count == 0)
+            return;
+
+        DropPlacements(placement => doomed.Contains(placement));
+    }
+
+    /// <summary>
+    /// Finds the placements whose cells satisfy a test, looking only at what is on screen.
+    /// </summary>
+    /// <remarks>
+    /// Kitty's cell, row and column delete targets are stated in screen coordinates, so the
+    /// scrollback is deliberately not searched: a picture scrolled out of view is not "at row 3"
+    /// however many rows above it happen to be.
+    /// </remarks>
+    /// <param name="cellMatches">Called with the column and the screen row, zero-based.</param>
+    internal HashSet<Graphics.ImagePlacement> CollectPlacementsOnScreen(Func<int, int, bool> cellMatches)
+    {
+        var found = new HashSet<Graphics.ImagePlacement>();
+        var buffer = Buffer;
+
+        for (int row = 0; row < Rows; row++)
+        {
+            var line = buffer.Lines[buffer.YBase + row];
+            if (line is null)
+                continue;
+
+            for (int col = 0; col < line.Length && col < Cols; col++)
+            {
+                var placement = line[col].Placement;
+                if (placement is not null && cellMatches(col, row))
+                    found.Add(placement);
+            }
+        }
+
+        return found;
+    }
+
+    private static void DropPlacements(Buffer.TerminalBuffer? buffer,
+                                       Func<Graphics.ImagePlacement, bool> predicate)
+    {
+        if (buffer is null)
+            return;
+
+        for (int i = 0; i < buffer.Lines.Length; i++)
+        {
+            var line = buffer.Lines[i];
+            if (line is null)
+                continue;
+
+            bool touched = false;
+            for (int x = 0; x < line.Length; x++)
+            {
+                var cell = line[x];
+                if (cell.Placement is null || !predicate(cell.Placement))
+                    continue;
+
+                cell.Placement = null;
+                cell.ImageTile = 0;
+                cell.Content = " ";
+                cell.Width = 1;
+                cell.CodePoint = 0x20;
+                line.SetCell(x, ref cell);
+                touched = true;
+            }
+
+            if (touched)
+                line.Cache = null;
+        }
+    }
+
     internal void EnforceImageBudget()
     {
         var budget = Options.MaxImageBytes;

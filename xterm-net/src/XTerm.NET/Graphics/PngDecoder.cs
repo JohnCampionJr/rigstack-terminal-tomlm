@@ -66,6 +66,7 @@ internal static class PngDecoder
             return false;
 
         int bitDepth = 0;
+        int interlace = 0;
         ColourType colourType = ColourType.Truecolour;
         byte[]? palette = null;
         byte[]? paletteAlpha = null;
@@ -93,16 +94,14 @@ internal static class PngDecoder
                 height = BinaryPrimitives.ReadInt32BigEndian(body[4..]);
                 bitDepth = body[8];
                 colourType = (ColourType)body[9];
-                var interlace = body[12];
+                interlace = body[12];
 
                 if (width <= 0 || height <= 0)
                     return false;
                 if ((long)width * height > maxPixels)
                     return false;
 
-                // Adam7. Nothing that talks to a terminal emits it, and decoding it wrong would be
-                // worse than saying no -- the caller turns this into an error reply.
-                if (interlace != 0)
+                if (interlace is not (0 or 1))
                     return false;
 
                 if (bitDepth is not (1 or 2 or 4 or 8 or 16))
@@ -144,14 +143,109 @@ internal static class PngDecoder
         // Rows are filtered against the row above, so the whole image is inflated at once rather
         // than streamed -- there is no way to finish one row without the one before it.
         var bitsPerPixel = samples * bitDepth;
-        var bytesPerRow = (width * bitsPerPixel + 7) / 8;
-        var raw = Inflate(idat, (long)(bytesPerRow + 1) * height);
-        if (raw.Length < (long)(bytesPerRow + 1) * height)
+        var bytesPerPixel = (bitsPerPixel + 7) / 8;
+
+        if (interlace == 0)
+        {
+            var bytesPerRow = (width * bitsPerPixel + 7) / 8;
+            var raw = Inflate(idat, (long)(bytesPerRow + 1) * height);
+            if (raw.Length < (long)(bytesPerRow + 1) * height)
+                return false;
+
+            Unfilter(raw, 0, width, height, bytesPerRow, bytesPerPixel);
+            pixels = ToBgra(raw, 0, width, height, bytesPerRow, bitDepth, colourType, palette, paletteAlpha);
+            return true;
+        }
+
+        return TryDecodeInterlaced(idat, width, height, bitsPerPixel, bytesPerPixel,
+                                   bitDepth, colourType, palette, paletteAlpha, out pixels);
+    }
+
+    /// <summary>
+    /// The seven Adam7 passes: where each starts, and how far apart its pixels are.
+    /// </summary>
+    /// <remarks>
+    /// Pass 1 takes every eighth pixel of every eighth row, and each pass afterwards fills in the
+    /// gaps the ones before it left, so the picture appears at increasing resolution as it loads.
+    /// Every pixel belongs to exactly one pass.
+    /// </remarks>
+    private static readonly (int X, int Y, int StepX, int StepY)[] Adam7 =
+    {
+        (0, 0, 8, 8),
+        (4, 0, 8, 8),
+        (0, 4, 4, 8),
+        (2, 0, 4, 4),
+        (0, 2, 2, 4),
+        (1, 0, 2, 2),
+        (0, 1, 1, 2)
+    };
+
+    /// <summary>
+    /// Decodes the seven Adam7 passes and scatters them into one image.
+    /// </summary>
+    /// <remarks>
+    /// <para>Each pass is a complete little image of its own: its own row filters, its own notion of
+    /// "the row above", and its own row width. That is why this cannot reuse the straight-through
+    /// path with a stride -- the filters would be reconstructed against the wrong neighbours.</para>
+    /// <para>A pass whose width or height works out to zero contributes no bytes at all, not even a
+    /// filter byte. Skipping it is required, not an optimisation: counting it would shift every
+    /// later pass by one byte and turn the rest of the picture into noise.</para>
+    /// </remarks>
+    private static bool TryDecodeInterlaced(MemoryStream idat, int width, int height,
+                                            int bitsPerPixel, int bytesPerPixel,
+                                            int bitDepth, ColourType colourType,
+                                            byte[]? palette, byte[]? paletteAlpha,
+                                            out byte[] pixels)
+    {
+        pixels = Array.Empty<byte>();
+
+        long expected = 0;
+        foreach (var pass in Adam7)
+        {
+            var passWidth = (width - pass.X + pass.StepX - 1) / pass.StepX;
+            var passHeight = (height - pass.Y + pass.StepY - 1) / pass.StepY;
+            if (passWidth <= 0 || passHeight <= 0)
+                continue;
+
+            expected += (long)((passWidth * bitsPerPixel + 7) / 8 + 1) * passHeight;
+        }
+
+        var raw = Inflate(idat, expected);
+        if (raw.Length < expected)
             return false;
 
-        Unfilter(raw, width, height, bytesPerRow, (bitsPerPixel + 7) / 8);
+        var output = new byte[(long)width * height * TerminalImage.BytesPerPixel];
+        var offset = 0;
 
-        pixels = ToBgra(raw, width, height, bytesPerRow, bitDepth, colourType, palette, paletteAlpha);
+        foreach (var pass in Adam7)
+        {
+            var passWidth = (width - pass.X + pass.StepX - 1) / pass.StepX;
+            var passHeight = (height - pass.Y + pass.StepY - 1) / pass.StepY;
+            if (passWidth <= 0 || passHeight <= 0)
+                continue;
+
+            var bytesPerRow = (passWidth * bitsPerPixel + 7) / 8;
+
+            Unfilter(raw, offset, passWidth, passHeight, bytesPerRow, bytesPerPixel);
+            var passPixels = ToBgra(raw, offset, passWidth, passHeight, bytesPerRow,
+                                    bitDepth, colourType, palette, paletteAlpha);
+
+            for (int y = 0; y < passHeight; y++)
+            {
+                var targetY = pass.Y + y * pass.StepY;
+                for (int x = 0; x < passWidth; x++)
+                {
+                    var targetX = pass.X + x * pass.StepX;
+                    var from = (y * passWidth + x) * TerminalImage.BytesPerPixel;
+                    var to = (targetY * width + targetX) * TerminalImage.BytesPerPixel;
+                    Array.Copy(passPixels, from, output, to, TerminalImage.BytesPerPixel);
+                }
+            }
+
+            offset += (bytesPerRow + 1) * passHeight;
+        }
+
+        pixels = output;
         return true;
     }
 
@@ -194,14 +288,15 @@ internal static class PngDecoder
     /// above, so this runs top to bottom and cannot be reordered. The filter byte is consumed here
     /// and left behind in the buffer; <see cref="ToBgra"/> skips it by stride.
     /// </remarks>
-    private static void Unfilter(byte[] raw, int width, int height, int bytesPerRow, int bytesPerPixel)
+    private static void Unfilter(byte[] raw, int offset, int width, int height,
+                                 int bytesPerRow, int bytesPerPixel)
     {
         var stride = bytesPerRow + 1;
 
         for (int y = 0; y < height; y++)
         {
-            var rowStart = y * stride + 1;
-            var filter = raw[y * stride];
+            var rowStart = offset + y * stride + 1;
+            var filter = raw[offset + y * stride];
             var aboveStart = rowStart - stride;
 
             for (int i = 0; i < bytesPerRow; i++)
@@ -243,7 +338,7 @@ internal static class PngDecoder
     /// screen that cannot show the difference, and carrying the extra byte through the whole
     /// graphics path to discard it at the end would buy nothing.
     /// </remarks>
-    private static byte[] ToBgra(byte[] raw, int width, int height, int bytesPerRow,
+    private static byte[] ToBgra(byte[] raw, int offset, int width, int height, int bytesPerRow,
                                  int bitDepth, ColourType colourType, byte[]? palette, byte[]? paletteAlpha)
     {
         var stride = bytesPerRow + 1;
@@ -252,7 +347,7 @@ internal static class PngDecoder
 
         for (int y = 0; y < height; y++)
         {
-            var rowStart = y * stride + 1;
+            var rowStart = offset + y * stride + 1;
             var target = y * width * TerminalImage.BytesPerPixel;
 
             for (int x = 0; x < width; x++)

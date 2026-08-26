@@ -11,9 +11,10 @@ namespace XTerm.Tests.Graphics;
 /// survives the round trip.</para>
 ///
 /// <para>Which tile a cell shows is worked out from where it sits relative to the top-left of the
-/// run. The protocol also allows row and column to be stated with combining marks from a fixed
-/// table of 297 characters; that is not implemented, and those marks are ignored — see
-/// <see cref="Diacritics_are_ignored_rather_than_misread"/>.</para>
+/// run. A client may instead say so outright, with combining marks from a fixed table of 297
+/// characters: the first gives the row, the second the column, the third the high byte of the image
+/// id. That is what lets a client write tiles in any order rather than as a rectangle in reading
+/// order.</para>
 /// </summary>
 public class KittyPlaceholderTests
 {
@@ -134,23 +135,141 @@ public class KittyPlaceholderTests
         Assert.Null(Cell(terminal, 0, 0).Placement);
     }
 
+    // ---- explicit tiles, stated with combining marks ----------------------------------------------
+
     /// <summary>
-    /// The combining marks that state a row and column explicitly are consumed and ignored rather
-    /// than misread. A contiguous rectangle written in order is unaffected, because the position
-    /// already says the same thing; a client placing a scattered subset of tiles is not supported.
+    /// The first entries of the protocol's mark table, whose INDEX is the value they stand for.
     /// </summary>
+    /// <remarks>
+    /// Hard-coded here so a test reads as the bytes a client would send, and cross-checked against
+    /// the shipped table by <see cref="The_marks_used_here_match_the_shipped_table"/> so the two
+    /// cannot drift apart.
+    /// </remarks>
+    private static readonly string[] Mark = { "\u0305", "\u030d", "\u030e", "\u0310", "\u0312" };
+
     [Fact]
-    public void Diacritics_are_ignored_rather_than_misread()
+    public void The_marks_used_here_match_the_shipped_table()
+    {
+        for (int i = 0; i < Mark.Length; i++)
+        {
+            Assert.True(XTerm.Graphics.PlaceholderDiacritics.TryGetValue(
+                char.ConvertToUtf32(Mark[i], 0), out var value));
+            Assert.Equal(i, value);
+        }
+    }
+
+    /// <summary>A mark after the placeholder states the tile row outright.</summary>
+    [Fact]
+    public void A_row_mark_states_the_tile_row()
     {
         var terminal = WithStoredImage(5);
 
-        // U+0305 is the first entry of the protocol's row/column table.
-        terminal.Write(SelectImageId(5) + Placeholder + "\u0305");
+        terminal.Write(SelectImageId(5) + Placeholder + Mark[1]);
+
+        var cell = Cell(terminal, 0, 0);
+        Assert.NotNull(cell.Placement);
+        Assert.Equal(1, cell.ImageRow);
+        Assert.Equal(0, cell.ImageCol);
+    }
+
+    /// <summary>
+    /// Row then column, which is the order the protocol fixes. This is the case position alone
+    /// cannot express: one cell showing a tile from elsewhere in the picture.
+    /// </summary>
+    [Fact]
+    public void A_row_and_column_pair_states_the_tile_outright()
+    {
+        var terminal = WithStoredImage(5);
+
+        terminal.Write(SelectImageId(5) + Placeholder + Mark[1] + Mark[1]);
+
+        var cell = Cell(terminal, 0, 0);
+        Assert.Equal(1, cell.ImageRow);
+        Assert.Equal(1, cell.ImageCol);
+    }
+
+    /// <summary>
+    /// Marks override the inferred position rather than adding to it, so a client can write tiles in
+    /// any order it likes.
+    /// </summary>
+    [Fact]
+    public void Explicit_tiles_beat_the_inferred_position()
+    {
+        var terminal = WithStoredImage(5);
+
+        // Second cell of the row, told to show the tile at row 1 column 0 rather than row 0 column 1.
+        terminal.Write(SelectImageId(5) + Placeholder + Placeholder + Mark[1] + Mark[0]);
+
+        var cell = Cell(terminal, 1, 0);
+        Assert.Equal(1, cell.ImageRow);
+        Assert.Equal(0, cell.ImageCol);
+    }
+
+    /// <summary>The marks are consumed, not drawn: nothing lands in the cell after the placeholder.</summary>
+    [Fact]
+    public void Marks_do_not_print_as_characters_of_their_own()
+    {
+        var terminal = WithStoredImage(5);
+
+        terminal.Write(SelectImageId(5) + Placeholder + Mark[1] + Mark[1]);
+
+        Assert.Null(Cell(terminal, 1, 0).Placement);
+        Assert.Equal(" ", Cell(terminal, 1, 0).Content);
+        Assert.Equal(1, terminal.Buffer.X);
+    }
+
+    /// <summary>
+    /// A combining character outside the table is not a tile value and must not be read as one.
+    /// </summary>
+    /// <remarks>
+    /// U+0301 is one of the accents kitty deliberately excluded when it froze the table, precisely
+    /// because it is in common typographic use. Were the table not consulted -- were any combining
+    /// mark taken as a row -- this would move the cell to a different tile. It is also zero width,
+    /// so it does not advance the cursor; what matters is that it neither changes the tile nor gets
+    /// appended to the image cell as text.
+    /// </remarks>
+    [Fact]
+    public void A_mark_outside_the_table_is_not_read_as_a_tile()
+    {
+        var terminal = WithStoredImage(5);
+
+        terminal.Write(SelectImageId(5) + Placeholder + "\u0301");
 
         var cell = Cell(terminal, 0, 0);
         Assert.NotNull(cell.Placement);
         Assert.Equal(0, cell.ImageRow);
+        Assert.Equal(0, cell.ImageCol);
         Assert.Equal(" ", cell.Content);
+    }
+
+    /// <summary>
+    /// An explicit tile outside the picture is a client error. The cell keeps what it had rather
+    /// than blanking, because the input comes from another process.
+    /// </summary>
+    [Fact]
+    public void An_out_of_range_tile_leaves_the_cell_alone()
+    {
+        var terminal = WithStoredImage(5);
+
+        terminal.Write(SelectImageId(5) + Placeholder + Mark[4]);   // row 4 of a two-row picture
+
+        var cell = Cell(terminal, 0, 0);
+        Assert.NotNull(cell.Placement);
+        Assert.Equal(0, cell.ImageRow);
+    }
+
+    /// <summary>
+    /// One placement for the whole run, so a host draws a strip per row instead of a blit per cell.
+    /// A fresh placement per cell would render identically and cost several times as much.
+    /// </summary>
+    [Fact]
+    public void Every_cell_of_a_run_shares_one_placement()
+    {
+        var terminal = WithStoredImage(5);
+
+        terminal.Write(SelectImageId(5) + Placeholder + Placeholder);
+
+        Assert.Same(Cell(terminal, 0, 0).Placement, Cell(terminal, 1, 0).Placement);
     }
 
     [Fact]

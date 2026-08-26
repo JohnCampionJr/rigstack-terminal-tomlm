@@ -34,9 +34,21 @@ internal sealed class ImageRegistry
     public IEnumerable<uint> Ids => _order;
 
     /// <summary>
+    /// A client's image *number* mapped to the id the terminal handed out for it.
+    /// </summary>
+    /// <remarks>
+    /// A number is not an id. A client that does not want to manage an id space sends
+    /// <c>I=&lt;number&gt;</c>, and the terminal picks an id and reports it back. Sending the same
+    /// number again makes a new image, and the number then refers to the newest -- which is why this
+    /// overwrites rather than refusing.
+    /// </remarks>
+    private readonly Dictionary<uint, uint> _idByNumber = new();
+
+    /// <summary>
     /// Stores an image under an id, replacing anything already there.
     /// </summary>
-    public void Store(uint id, TerminalImage image, long budget)
+    /// <param name="number">The client's image number, or 0 if it named none.</param>
+    public void Store(uint id, TerminalImage image, long budget, uint number = 0)
     {
         Remove(id);
 
@@ -44,10 +56,43 @@ internal sealed class ImageRegistry
         _nodes[id] = _order.AddLast(id);
         _bytes += image.ByteCount;
 
+        if (number != 0)
+            _idByNumber[number] = id;
+
         Trim(budget);
     }
 
     public bool TryGet(uint id, out TerminalImage image) => _byId.TryGetValue(id, out image!);
+
+    /// <summary>Resolves a client image number to the newest image stored under it.</summary>
+    public bool TryGetByNumber(uint number, out uint id, out TerminalImage image)
+    {
+        image = null!;
+        return _idByNumber.TryGetValue(number, out id) && TryGet(id, out image);
+    }
+
+    /// <summary>
+    /// Forgets an image found by its pixels rather than by its id.
+    /// </summary>
+    /// <remarks>
+    /// A positional delete finds placements, and a placement knows its image but not the id it was
+    /// stored under. Nothing indexes that direction, so this is a scan -- acceptable because a
+    /// registry holds tens of images, not thousands, and deletes are a user-scale event.
+    /// </remarks>
+    public bool RemoveImage(TerminalImage image)
+    {
+        uint? found = null;
+        foreach (var pair in _byId)
+        {
+            if (ReferenceEquals(pair.Value, image))
+            {
+                found = pair.Key;
+                break;
+            }
+        }
+
+        return found is { } id && Remove(id);
+    }
 
     /// <summary>Forgets an image. The pixels survive as long as some cell still shows them.</summary>
     public bool Remove(uint id)
@@ -64,6 +109,21 @@ internal sealed class ImageRegistry
             _nodes.Remove(id);
         }
 
+        // A number pointing at an id that no longer exists would resolve to nothing on the next
+        // lookup, which is correct but leaks an entry per removed image over a long session.
+        uint? staleNumber = null;
+        foreach (var pair in _idByNumber)
+        {
+            if (pair.Value == id)
+            {
+                staleNumber = pair.Key;
+                break;
+            }
+        }
+
+        if (staleNumber is { } number)
+            _idByNumber.Remove(number);
+
         return true;
     }
 
@@ -72,6 +132,7 @@ internal sealed class ImageRegistry
         _byId.Clear();
         _order.Clear();
         _nodes.Clear();
+        _idByNumber.Clear();
         _bytes = 0;
     }
 
