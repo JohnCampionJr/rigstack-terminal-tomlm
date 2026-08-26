@@ -3,8 +3,12 @@
 [![Build Status](https://github.com/tomlm/XTerm.NET/actions/workflows/BuildAndRunTests.yml/badge.svg)](https://github.com/tomlm/XTerm.NET/actions/workflows/BuildAndRunTests.yml) [![NuGet Version](https://img.shields.io/nuget/v/XTerm.NET.svg)](https://www.nuget.org/packages/XTerm.NET/) [![NuGet Downloads](https://img.shields.io/nuget/dt/XTerm.NET.svg)](https://www.nuget.org/packages/XTerm.NET/) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 A .NET terminal emulator library inspired by [xterm.js](https://github.com/xtermjs/xterm.js).
-XTerm.NET provides a headless terminal emulator that parses and processes VT100/ANSI escape sequences, 
-making it easy to host conosole applications in your .NET applications.
+XTerm.NET provides a headless terminal emulator that parses and processes VT100/ANSI escape sequences,
+making it easy to host console applications in your .NET applications.
+
+**Sixel graphics are supported.** Images arrive as ordinary cell content rather than as an overlay, so
+they are overwritten by text, cleared by `ED`/`EL`, scrolled with their lines, and freed when they fall
+out of the scrollback — see [Sixel Images](#sixel-images).
 
 ## Features
 
@@ -15,7 +19,8 @@ making it easy to host conosole applications in your .NET applications.
 - **Rich Event System** — Subscribe to terminal events like title changes, bell, resize, and window manipulation
 - **256 and True Color Support** — Full RGB and 256-color palette support
 - **Unicode Support** — Proper handling of wide characters and Unicode text
-- **Sixel Graphics** — Decodes Sixel images and places them in the buffer as ordinary cell content
+- **Sixel Graphics** — Decodes Sixel images (`ESC P … q`) and stores them on the cells they cover, so
+  `img2sixel`, `chafa`, `lsix` and `timg` work against a host that renders them
 
 ## Installation
 
