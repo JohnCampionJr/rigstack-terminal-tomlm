@@ -534,8 +534,8 @@ public class EscapeSequenceParser
         // Read the prologue before transitioning — Transition's entry action for a later state is
         // free to clear it.
         var identifier = _collect.ToString() + (char)code;
+        _collect.Clear();
         var paramsClone = _params.Clone();
-
         _dcsChunkLength = 0;
         _dcs.Clear();
         _dcsHooked = true;
