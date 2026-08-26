@@ -366,7 +366,14 @@ public class TerminalBuffer
             _lines.Push(new BufferLine(newCols, nullCell));
         }
 
+        // Growing the window pulls scrollback lines back into view, which is this clamp forcing
+        // YBase down. The CURSOR has to ride along: its position is YBase + Y, so every line YBase
+        // gives back must be added to Y, or the cursor slides UP the content by that much. A window
+        // dragged taller then has the shell's SIGWINCH redraws stamping prompts down through
+        // whatever the cursor slid over, one line per resize event.
+        var yBaseBefore = _yBase;
         _yBase = Math.Min(_yBase, Math.Max(0, _lines.Length - newRows));
+        _y += yBaseBefore - _yBase;
         _yDisp = Math.Clamp(_yDisp, 0, _yBase);
 
         if (_lines.Length > 0)
@@ -410,6 +417,24 @@ public class TerminalBuffer
         // the lower bound with it meant a negative cursor -- which SetCursorRaw exists to allow --
         // survived the resize and left the buffer reporting an out-of-bounds position.
         _x = Math.Clamp(_x, 0, Math.Max(0, newCols - 1));
+        // The mirror case. A cursor below the new bottom is NOT simply clamped into place -- its
+        // overflow is pushed into scrollback, so the cursor stays on the LINE it was on. Clamping
+        // alone moved the cursor onto earlier content: shrink a window with a prompt at row 22 down
+        // to ten rows and the cursor landed on absolute row 9, where the next write destroyed
+        // whatever lived there.
+        if (_y > newRows - 1)
+        {
+            var overflow = _y - (newRows - 1);
+            var room = Math.Max(0, _lines.Length - newRows - _yBase);
+            var shift = Math.Min(overflow, room);
+
+            var wasFollowing = _yDisp == _yBase;
+            _yBase += shift;
+            _y -= shift;
+            if (wasFollowing)
+                _yDisp = _yBase;
+        }
+
         _y = Math.Clamp(_y, 0, Math.Max(0, newRows - 1));
         SavedCursorState.X = Math.Clamp(SavedCursorState.X, 0, Math.Max(0, newCols - 1));
         SavedCursorState.Y = Math.Max(SavedCursorState.Y, 0);

@@ -131,4 +131,82 @@ public class ResizeEdgeCaseTests
 
         Assert.True(buffer.Lines.Length > 0, $"Lines.Length was {buffer.Lines.Length}");
     }
+
+    /// <summary>
+    /// A resize must not move the cursor off the line it is on. Its position is YBase + Y, and both
+    /// halves of a resize used to change one without the other.
+    /// </summary>
+    /// <remarks>
+    /// <para>The consequence is silent corruption rather than a crash, which is why it survived: the
+    /// cursor lands on earlier content and the next write destroys a line the application never
+    /// touched. A shell hides its own damage, because it redraws its prompt on every SIGWINCH and
+    /// repaints what it just overwrote. Anything that does NOT repaint -- a Sixel picture, a
+    /// full-screen TUI mid-frame -- keeps the evidence.</para>
+    /// <para>Both directions are tested, because they fail through different mechanisms and fixing
+    /// one leaves the other.</para>
+    /// </remarks>
+    [Fact]
+    public void ShrinkingRows_KeepsTheCursorOnItsLine()
+    {
+        var terminal = new Terminal(new TerminalOptions { Cols = 40, Rows = 24, Scrollback = 200 });
+        for (var i = 0; i < 20; i++)
+            terminal.Write($"line {i}\r\n");
+        terminal.Write("prompt$ ");
+
+        var contentRow = terminal.Buffer.YBase + terminal.Buffer.Y;
+
+        terminal.Resize(40, 8);
+
+        Assert.Equal(contentRow, terminal.Buffer.YBase + terminal.Buffer.Y);
+    }
+
+    [Fact]
+    public void GrowingRows_KeepsTheCursorOnItsLine()
+    {
+        var terminal = new Terminal(new TerminalOptions { Cols = 40, Rows = 24, Scrollback = 200 });
+        for (var i = 0; i < 20; i++)
+            terminal.Write($"line {i}\r\n");
+        terminal.Write("prompt$ ");
+
+        terminal.Resize(40, 8);
+        var contentRow = terminal.Buffer.YBase + terminal.Buffer.Y;
+
+        terminal.Resize(40, 24);
+
+        Assert.Equal(contentRow, terminal.Buffer.YBase + terminal.Buffer.Y);
+    }
+
+    /// <summary>
+    /// The live case: a drag is many resize events, and a shell writes between them. What the cursor
+    /// slides over is what gets destroyed, so the round trip is asserted on CONTENT and not only on
+    /// coordinates.
+    /// </summary>
+    [Fact]
+    public void ResizeLadderWithRedraws_LeavesEarlierLinesIntact()
+    {
+        var terminal = new Terminal(new TerminalOptions { Cols = 40, Rows = 24, Scrollback = 200 });
+        for (var i = 0; i < 20; i++)
+            terminal.Write($"line {i}\r\n");
+        terminal.Write("prompt$ ");
+
+        for (var rows = 20; rows >= 6; rows -= 4)
+        {
+            terminal.Resize(40, rows);
+            terminal.Write("\rprompt$ ");
+        }
+
+        for (var rows = 10; rows <= 24; rows += 4)
+        {
+            terminal.Resize(40, rows);
+            terminal.Write("\rprompt$ ");
+        }
+
+        // Every "line N" written before the drag must still read back exactly.
+        for (var i = 0; i < 20; i++)
+        {
+            var line = terminal.Buffer.Lines[i];
+            Assert.NotNull(line);
+            Assert.Equal($"line {i}", line!.TranslateToString(true).TrimEnd());
+        }
+    }
 }
