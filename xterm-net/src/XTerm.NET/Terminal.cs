@@ -466,19 +466,6 @@ public class Terminal
     }
 
     /// <summary>
-    /// Drops the oldest images once the buffer holds more image data than the budget allows.
-    /// </summary>
-    /// <remarks>
-    /// <para>Images normally need no managing: one is freed when the last cell showing it is
-    /// overwritten or scrolls out of the scrollback, because that was its last reference. This is
-    /// the backstop for the case that defeats it -- a deep scrollback full of pictures, every one
-    /// still referenced and every one still in memory.</para>
-    /// <para>Oldest first, by the identifier each image is stamped with when it is decoded, so
-    /// what disappears is the picture furthest back in the history rather than the one on screen.
-    /// Both buffers are swept: an image on the alternate screen costs the same memory as one on
-    /// the normal screen.</para>
-    /// </remarks>
-    /// <summary>
     /// Image bytes placed since the last sweep. See <see cref="NoteImagePlaced"/>.
     /// </summary>
     private long _imageBytesSinceSweep;
