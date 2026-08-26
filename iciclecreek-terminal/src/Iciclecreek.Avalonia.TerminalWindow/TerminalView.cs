@@ -4751,8 +4751,14 @@ namespace Iciclecreek.Terminal
             if (placement is null || run.CellCount <= 0 || charWidth <= 0 || charHeight <= 0)
                 return false;
 
-            if (!placement.TryGetTileSource(run.TileCol, run.TileRow, out var sourceX, out var sourceY,
-                                            out var tileWidth, out var tileHeight))
+            // One call per tile gives both the pixels and where in the cell they go. A placement can
+            // be shifted within its first cell by Kitty's X and Y keys, and then the destination is
+            // no longer derivable from the source size alone -- the leading tile is both narrower
+            // AND starts partway across.
+            if (!placement.TryGetTileLayout(run.TileCol, run.TileRow, out var sourceX, out var sourceY,
+                                            out var tileWidth, out var tileHeight,
+                                            out var cellOffsetX, out var cellOffsetY,
+                                            out var firstCellsWide, out var cellsHigh))
                 return false;
 
             // The run spans several tiles, so its right edge is where the last one ends rather than
@@ -4760,8 +4766,10 @@ namespace Iciclecreek.Terminal
             // all the same size, because the source is divided across the cell box and the rounding
             // has to land somewhere.
             var lastTile = run.TileCol + run.CellCount - 1;
-            if (!placement.TryGetTileSource(lastTile, run.TileRow, out var lastX, out _,
-                                            out var lastWidth, out _))
+            if (!placement.TryGetTileLayout(lastTile, run.TileRow, out var lastX, out _,
+                                            out var lastWidth, out _,
+                                            out var lastOffsetX, out _,
+                                            out var lastCellsWide, out _))
                 return false;
 
             var sourceWidth = lastX + lastWidth - sourceX;
@@ -4769,24 +4777,25 @@ namespace Iciclecreek.Terminal
             if (sourceWidth <= 0 || sourceHeight <= 0)
                 return false;
 
-            // How much of a cell each tile covers. A stretched tile always fills its cell whatever
-            // its source size; a natural one falls short at the edges and must be drawn short, or
-            // the picture smears.
-            placement.GetTileCoverage(tileWidth, tileHeight, out var firstCellsWide, out var cellsHigh);
-            placement.GetTileCoverage(lastWidth, tileHeight, out var lastCellsWide, out _);
-            var cellsWide = run.CellCount - 1 + lastCellsWide;
-            if (run.CellCount == 1)
-                cellsWide = firstCellsWide;
+            // Both edges in cells, measured from the run's first cell. With no offset the left edge
+            // is 0 and this is what it always was.
+            var left = cellOffsetX;
+            var right = run.CellCount == 1
+                ? cellOffsetX + firstCellsWide
+                : run.CellCount - 1 + lastOffsetX + lastCellsWide;
 
             // Snapped the same way every other coordinate in this renderer is, or the picture shears against the
             // grid by a fraction of a pixel per row.
-            var startX = Snap(run.StartX * charWidth, scale);
-            var endX = Snap((run.StartX + cellsWide) * charWidth, scale);
-            var endY = Snap((screenY + cellsHigh) * charHeight, scale);
+            var startX = Snap((run.StartX + left) * charWidth, scale);
+            var endX = Snap((run.StartX + right) * charWidth, scale);
 
-            destination = new Rect(startX, startYPos,
+            // Left as it was when there is no vertical offset, so the existing geometry is untouched.
+            var topY = cellOffsetY > 0 ? Snap(startYPos + cellOffsetY * charHeight, scale) : startYPos;
+            var endY = Snap((screenY + cellOffsetY + cellsHigh) * charHeight, scale);
+
+            destination = new Rect(startX, topY,
                                    Math.Max(0, endX - startX),
-                                   Math.Max(0, endY - startYPos));
+                                   Math.Max(0, endY - topY));
             if (destination.Width <= 0 || destination.Height <= 0)
             {
                 destination = default;

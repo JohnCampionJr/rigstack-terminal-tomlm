@@ -657,4 +657,62 @@ public class SixelRenderingTests
         }
         finally { window.Close(); }
     }
+
+    // ---- pixel offsets within the first cell ------------------------------------------------------
+
+    /// <summary>
+    /// Kitty's X and Y keys shift a picture inside its first cell. The destination has to move with
+    /// it, so the blit needs the tile's offset and not only its size.
+    /// </summary>
+    /// <remarks>
+    /// Cells are 2x3 source pixels here and 10x20 on screen, so one source pixel of offset is five
+    /// screen pixels across and one row of offset is a third of the cell down.
+    /// </remarks>
+    [AvaloniaTest]
+    public void An_x_offset_moves_the_blit_into_the_cell()
+    {
+        var image = EvenImage();
+        var shifted = new ImagePlacement(image, 0, 0, 0, 8, 6, 4, 2, ImageScaling.Natural,
+                                         zIndex: 0, offsetX: 1, offsetY: 0);
+
+        Assert.That(TerminalView.TryPlanImageBlit(
+            new TerminalView.CachedTextRun(null, 0, 4, null, shifted, 0, 0), 0, 0, 10, 20, 1.0,
+            out var source, out var destination), Is.True);
+
+        // Starts one source pixel in -- half a cell, so five screen pixels.
+        Assert.That(destination.X, Is.EqualTo(5));
+
+        // A pixel of the picture fell off the right of the box, so the strip is a pixel narrower.
+        Assert.That(source.Width, Is.EqualTo(7));
+        Assert.That(destination.Right, Is.EqualTo(40));
+    }
+
+    [AvaloniaTest]
+    public void A_y_offset_moves_the_blit_down_the_cell()
+    {
+        var image = EvenImage();
+        var shifted = new ImagePlacement(image, 0, 0, 0, 8, 6, 4, 2, ImageScaling.Natural,
+                                         zIndex: 0, offsetX: 0, offsetY: 1);
+
+        Assert.That(TerminalView.TryPlanImageBlit(
+            new TerminalView.CachedTextRun(null, 0, 4, null, shifted, 0, 0), 0, 0, 10, 20, 1.0,
+            out _, out var destination), Is.True);
+
+        // One source row of three, so a third of a twenty pixel cell.
+        Assert.That(destination.Y, Is.EqualTo(Math.Round(20 / 3.0)));
+        Assert.That(destination.Y, Is.GreaterThan(0));
+    }
+
+    /// <summary>Without an offset the destination is exactly where it always was.</summary>
+    [AvaloniaTest]
+    public void No_offset_leaves_the_blit_where_it_was()
+    {
+        var image = EvenImage();
+
+        Assert.That(TerminalView.TryPlanImageBlit(Run(image, 0, 4, 0, 0), 0, 0, 10, 20, 1.0,
+            out var source, out var destination), Is.True);
+
+        Assert.That(source, Is.EqualTo(new Rect(0, 0, 8, 3)));
+        Assert.That(destination, Is.EqualTo(new Rect(0, 0, 40, 20)));
+    }
 }
