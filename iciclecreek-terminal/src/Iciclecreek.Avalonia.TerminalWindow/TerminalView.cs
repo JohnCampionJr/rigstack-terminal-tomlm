@@ -4482,6 +4482,19 @@ namespace Iciclecreek.Terminal
             // Build and cache text runs for this line
             textRuns = new List<CachedTextRun>();
 
+            // Pictures BEHIND the text go down first, in a pass of their own. A cell showing one
+            // keeps its glyph -- that is what a negative z-index means -- so it has to go through
+            // the text machinery below as well, which it cannot do from inside a branch that
+            // consumes it. Runs are drawn in the order they are added, so listing the images here
+            // is what puts the text on top of them.
+            for (int x = 0; x < _terminal.Cols && x < line.Length;)
+            {
+                if (line[x].Placement is { ZIndex: < 0 })
+                    x = AppendImageRun(context, line, x, screenY, startYPos, rowHeight, scale, textRuns);
+                else
+                    x++;
+            }
+
             for (int x = 0; x < _terminal.Cols;)
             {
                 if (x >= line.Length)
@@ -4494,7 +4507,10 @@ namespace Iciclecreek.Terminal
                 // A cell showing part of a picture is a space as far as its content goes, so it would otherwise
                 // be swept into the text run beside it and never drawn. Take it first, and take as many adjacent
                 // tiles as belong to the same strip: one DrawImage per row of a picture rather than one per cell.
-                if (cell.Placement is not null)
+                //
+                // Only pictures in FRONT of the text. The ones behind it were drawn by the pass above and their
+                // cells still carry a glyph, so they fall through here and are treated as the text they are.
+                if (cell.Placement is { ZIndex: >= 0 })
                 {
                     x = AppendImageRun(context, line, x, screenY, startYPos, rowHeight, scale, textRuns);
                     continue;
@@ -4535,8 +4551,12 @@ namespace Iciclecreek.Terminal
                         // the run as blanks and the picture is never drawn — but only when the run happens to
                         // start on text, which is what makes it look like an intermittent fault rather than a
                         // missing case.
+                        // A picture BEHIND the text is not a reason to stop: those cells carry a real
+                        // glyph and were already drawn as images by the earlier pass. Breaking on
+                        // them would end the run on its own first cell, leaving x where it was and
+                        // the outer loop spinning.
                         if (currentCell.Width != 1 || currentCell.Attributes != cell.Attributes ||
-                            currentCell.Placement is not null)
+                            currentCell.Placement is { ZIndex: >= 0 })
                             break;
                         textBuilder.Append(currentCell.Content);
                         cellCount += currentCell.Width;

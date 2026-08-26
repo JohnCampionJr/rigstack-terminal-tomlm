@@ -715,4 +715,122 @@ public class SixelRenderingTests
         Assert.That(source, Is.EqualTo(new Rect(0, 0, 8, 3)));
         Assert.That(destination, Is.EqualTo(new Rect(0, 0, 40, 20)));
     }
+
+    // ---- pictures behind the text -----------------------------------------------------------------
+
+    /// <summary>Transmits a 4x6 picture under an id and places it at the cursor with a given depth.</summary>
+    private static void PlaceWithDepth(TerminalView view, int z)
+    {
+        view.Terminal.Options.CellWidthPixels = CellPixelWidth;
+        view.Terminal.Options.CellHeightPixels = CellPixelHeight;
+
+        var pixels = Convert.ToBase64String(new byte[4 * 6 * 4]);
+        view.Terminal.Write($"{Esc}_Ga=t,i=1,f=32,s=4,v=6,q=2;{pixels}{St}");
+        view.Terminal.Write(Esc + "[1;1H");
+        view.Terminal.Write($"{Esc}_Ga=p,i=1,z={z},C=1,q=2{St}");
+    }
+
+    /// <summary>
+    /// A picture at negative z is drawn AND its cells still carry text, so the row emits both an
+    /// image run and a text run -- the image first, because runs are drawn in the order they are
+    /// listed and the text belongs on top.
+    /// </summary>
+    [AvaloniaTest]
+    public void A_background_picture_is_drawn_under_its_text()
+    {
+        var (view, window) = Realised();
+        try
+        {
+            PlaceWithDepth(view, z: -1);
+            view.Terminal.Write(Esc + "[1;1HXY");
+
+            var runs = RunsForRow(view, 0).ToList();
+            var imageAt = runs.FindIndex(r => r.Placement is not null);
+
+            // The run covering column 0 specifically -- not merely "some text run", which the blanks
+            // further along the row would satisfy whether or not the glyphs survived.
+            var textAt = runs.FindIndex(r => r.Text is not null
+                                             && r.StartX <= 0 && r.StartX + r.CellCount > 0);
+
+            Assert.That(imageAt, Is.GreaterThanOrEqualTo(0), "the background picture was not drawn");
+            Assert.That(textAt, Is.GreaterThanOrEqualTo(0), "the text over the background was not drawn");
+            Assert.That(imageAt, Is.LessThan(textAt), "the text must be drawn after the picture");
+        }
+        finally { window.Close(); }
+    }
+
+    /// <summary>
+    /// A picture in front of the text replaces it, so the row has an image run and no text over it.
+    /// This is what every image did before z existed.
+    /// </summary>
+    [AvaloniaTest]
+    public void A_front_picture_leaves_no_text_over_it()
+    {
+        var (view, window) = Realised();
+        try
+        {
+            PlaceWithDepth(view, z: 0);
+            view.Terminal.Write(Esc + "[1;1HXY");
+
+            var runs = RunsForRow(view, 0);
+
+            // Typing replaced the tiles it landed on, so those cells are text and not picture.
+            Assert.That(runs.Any(r => r.Text is not null), Is.True);
+            Assert.That(view.Terminal.Buffer.Lines[view.Terminal.Buffer.ViewportY]![0].Placement,
+                        Is.Null, "typing over a front picture should have replaced it");
+        }
+        finally { window.Close(); }
+    }
+
+    /// <summary>
+    /// Text sitting on a background must not paint an opaque rectangle over it. A cell with no
+    /// background colour of its own fills nothing, which is what lets the picture show through.
+    /// </summary>
+    [AvaloniaTest]
+    public void Text_on_a_background_picture_paints_no_fill_over_it()
+    {
+        var (view, window) = Realised();
+        try
+        {
+            PlaceWithDepth(view, z: -1);
+            view.Terminal.Write(Esc + "[1;1HXY");
+
+            // Only the runs actually sitting on the picture; blanks past its right edge prove nothing.
+            var overPicture = RunsForRow(view, 0)
+                .Where(r => r.Text is not null && r.StartX < 2 && r.StartX + r.CellCount > 0)
+                .ToList();
+
+            Assert.That(overPicture, Is.Not.Empty, "no text run was drawn over the picture");
+            Assert.That(overPicture.All(r => r.Background is null), Is.True,
+                        "a text run over a background picture painted a fill and hid it");
+        }
+        finally { window.Close(); }
+    }
+
+    /// <summary>
+    /// A row whose text sits on a background must still terminate. The run builder used to stop at
+    /// any cell holding a picture, which on a background cell ends the run on its own first cell and
+    /// leaves the column index where it was -- a spin, not a wrong pixel.
+    /// </summary>
+    [AvaloniaTest]
+    public void A_row_of_text_over_a_background_completes()
+    {
+        var (view, window) = Realised();
+        try
+        {
+            PlaceWithDepth(view, z: -1);
+            view.Terminal.Write(Esc + "[1;1HXY");
+
+            var covered = new HashSet<int>();
+            foreach (var run in RunsForRow(view, 0).Where(r => r.Text is not null))
+                for (int i = 0; i < run.CellCount; i++)
+                    covered.Add(run.StartX + i);
+
+            // Both characters were emitted, so the builder advanced past the background cells rather
+            // than ending the run on the first of them and leaving the column index where it was.
+            Assert.That(covered.Contains(0), Is.True, "column 0 produced no text run");
+            Assert.That(covered.Contains(1), Is.True, "column 1 produced no text run");
+        }
+        finally { window.Close(); }
+    }
 }
