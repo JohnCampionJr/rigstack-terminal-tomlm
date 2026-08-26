@@ -206,9 +206,16 @@ namespace Iciclecreek.Terminal
             int StartX,
             int CellCount,
             IBrush? Background,
-            XT.Graphics.TerminalImage? Image = null,
+            XT.Graphics.ImagePlacement? Placement = null,
             int TileCol = 0,
-            int TileRow = 0);
+            int TileRow = 0)
+        {
+            /// <summary>
+            /// The pixels behind the placement, which is what a texture is cached against: two
+            /// appearances of one picture share them and should share one upload.
+            /// </summary>
+            public XT.Graphics.TerminalImage? Image => Placement?.Image;
+        }
 
         // One bitmap per image, built on first sight and reused for the life of the picture.
         //
@@ -4464,7 +4471,7 @@ namespace Iciclecreek.Terminal
                     if (run.Background is not null)
                         context.FillRectangle(run.Background, rect);
 
-                    if (run.Image is not null)
+                    if (run.Placement is not null)
                         DrawImageRun(context, run, screenY, startYPos, scale);
                     else if (run.Text is not null)
                         context.DrawText(run.Text, position);
@@ -4487,7 +4494,7 @@ namespace Iciclecreek.Terminal
                 // A cell showing part of a picture is a space as far as its content goes, so it would otherwise
                 // be swept into the text run beside it and never drawn. Take it first, and take as many adjacent
                 // tiles as belong to the same strip: one DrawImage per row of a picture rather than one per cell.
-                if (cell.Image is not null)
+                if (cell.Placement is not null)
                 {
                     x = AppendImageRun(context, line, x, screenY, startYPos, rowHeight, scale, textRuns);
                     continue;
@@ -4529,7 +4536,7 @@ namespace Iciclecreek.Terminal
                         // start on text, which is what makes it look like an intermittent fault rather than a
                         // missing case.
                         if (currentCell.Width != 1 || currentCell.Attributes != cell.Attributes ||
-                            currentCell.Image is not null)
+                            currentCell.Placement is not null)
                             break;
                         textBuilder.Append(currentCell.Content);
                         cellCount += currentCell.Width;
@@ -4608,7 +4615,7 @@ namespace Iciclecreek.Terminal
                                    double startYPos, double rowHeight, double scale, List<CachedTextRun> textRuns)
         {
             var first = line[x];
-            var image = first.Image!;
+            var placement = first.Placement!;
             var tileRow = first.ImageRow;
             var tileCol = first.ImageCol;
             var runStartX = x;
@@ -4617,7 +4624,12 @@ namespace Iciclecreek.Terminal
             while (x < line.Length && x < _terminal.Cols)
             {
                 var current = line[x];
-                if (!ReferenceEquals(current.Image, image) ||
+
+                // The PLACEMENT, not the image behind it. Kitty transmits a picture once and may
+                // show it several times, so two appearances of one image can sit side by side --
+                // and comparing images would run a single strip straight across the join between
+                // them, drawing the wrong pixels in both.
+                if (!ReferenceEquals(current.Placement, placement) ||
                     current.ImageRow != tileRow ||
                     current.ImageCol != tileCol + cellCount)
                     break;
@@ -4637,7 +4649,7 @@ namespace Iciclecreek.Terminal
             var background = first.GetBackgroundBrush(_palette, this.Background);
             var fill = first.GetBackgroundColor(_palette).HasValue ? background : null;
 
-            var run = new CachedTextRun(null, runStartX, cellCount, fill, image, tileCol, tileRow);
+            var run = new CachedTextRun(null, runStartX, cellCount, fill, placement, tileCol, tileRow);
             textRuns.Add(run);
 
             if (fill is not null)
@@ -4735,20 +4747,36 @@ namespace Iciclecreek.Terminal
             source = default;
             destination = default;
 
-            var image = run.Image;
-            if (image is null || run.CellCount <= 0 || charWidth <= 0 || charHeight <= 0)
+            var placement = run.Placement;
+            if (placement is null || run.CellCount <= 0 || charWidth <= 0 || charHeight <= 0)
                 return false;
 
-            if (!image.TryGetTileSource(run.TileCol, run.TileRow, out var sourceX, out var sourceY, out _, out var sourceHeight))
+            if (!placement.TryGetTileSource(run.TileCol, run.TileRow, out var sourceX, out var sourceY,
+                                            out var tileWidth, out var tileHeight))
                 return false;
 
-            // The run's width in source pixels, clipped at the right edge of the picture.
-            var sourceWidth = Math.Min(run.CellCount * image.CellWidth, image.PixelWidth - sourceX);
+            // The run spans several tiles, so its right edge is where the last one ends rather than
+            // a multiple of the first one's width -- under a stretched placement the tiles are not
+            // all the same size, because the source is divided across the cell box and the rounding
+            // has to land somewhere.
+            var lastTile = run.TileCol + run.CellCount - 1;
+            if (!placement.TryGetTileSource(lastTile, run.TileRow, out var lastX, out _,
+                                            out var lastWidth, out _))
+                return false;
+
+            var sourceWidth = lastX + lastWidth - sourceX;
+            var sourceHeight = tileHeight;
             if (sourceWidth <= 0 || sourceHeight <= 0)
                 return false;
 
-            var cellsWide = sourceWidth / (double)image.CellWidth;
-            var cellsHigh = sourceHeight / (double)image.CellHeight;
+            // How much of a cell each tile covers. A stretched tile always fills its cell whatever
+            // its source size; a natural one falls short at the edges and must be drawn short, or
+            // the picture smears.
+            placement.GetTileCoverage(tileWidth, tileHeight, out var firstCellsWide, out var cellsHigh);
+            placement.GetTileCoverage(lastWidth, tileHeight, out var lastCellsWide, out _);
+            var cellsWide = run.CellCount - 1 + lastCellsWide;
+            if (run.CellCount == 1)
+                cellsWide = firstCellsWide;
 
             // Snapped the same way every other coordinate in this renderer is, or the picture shears against the
             // grid by a fraction of a pixel per row.

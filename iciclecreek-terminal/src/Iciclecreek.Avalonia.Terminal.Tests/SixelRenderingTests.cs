@@ -174,6 +174,44 @@ public class SixelRenderingTests
         finally { window.Close(); }
     }
 
+    /// <summary>
+    /// Two appearances of the SAME picture, side by side, must stay two runs.
+    /// </summary>
+    /// <remarks>
+    /// <para>This could not happen with Sixel: every decode makes a fresh image and shows it once,
+    /// so comparing images was enough to keep neighbours apart. Kitty transmits a picture once and
+    /// places it as often as it likes, and then two adjacent appearances share an image object.</para>
+    /// <para>Coalescing on the image would run one strip across the join and blit the wrong pixels
+    /// into both halves -- the second placement's tiles would be read from wherever the first one's
+    /// numbering happened to continue.</para>
+    /// </remarks>
+    [AvaloniaTest]
+    public void Two_placements_of_one_image_are_not_coalesced()
+    {
+        var (view, window) = Realised();
+        try
+        {
+            view.Terminal.Options.CellWidthPixels = CellPixelWidth;
+            view.Terminal.Options.CellHeightPixels = CellPixelHeight;
+
+            // Transmit once under an id, then show it twice, adjacent, on the same row.
+            var pixels = Convert.ToBase64String(new byte[4 * 6 * 4]);
+            view.Terminal.Write($"{Esc}_Ga=t,i=1,f=32,s=4,v=6,q=2;{pixels}{St}");
+            view.Terminal.Write(Esc + "[1;1H");
+            view.Terminal.Write($"{Esc}_Ga=p,i=1,C=1,q=2{St}");
+            view.Terminal.Write(Esc + "[1;3H");
+            view.Terminal.Write($"{Esc}_Ga=p,i=1,C=1,q=2{St}");
+
+            var runs = ImageRuns(view, 0);
+
+            Assert.That(runs.Count, Is.EqualTo(2),
+                "two appearances of one picture were merged into a single strip");
+            Assert.That(runs[0].Image, Is.SameAs(runs[1].Image), "they do share the pixels");
+            Assert.That(runs[0].Placement, Is.Not.SameAs(runs[1].Placement), "but not the placement");
+            Assert.That(runs[1].TileCol, Is.Zero, "the second appearance starts at its own first tile");
+        }
+        finally { window.Close(); }
+    }
     /// <summary>Typing over part of a strip takes that cell back rather than drawing across the gap.</summary>
     [AvaloniaTest]
     public void Typing_over_a_tile_takes_that_cell_back()
@@ -258,8 +296,12 @@ public class SixelRenderingTests
 
     // ---- the blit arithmetic ----------------------------------------------------------------------
 
+    /// <summary>
+    /// A run over the whole picture at its natural size, which is what Sixel produces. These
+    /// assertions are the guard that placements did not move Sixel's geometry.
+    /// </summary>
     private static TerminalView.CachedTextRun Run(TerminalImage image, int startX, int cellCount, int tileCol, int tileRow)
-        => new(null, startX, cellCount, null, image, tileCol, tileRow);
+        => new(null, startX, cellCount, null, ImagePlacement.Natural(image), tileCol, tileRow);
 
     /// <summary>Pixels that divide evenly into cells: 8x6 over 2x3 cells is four by two tiles.</summary>
     private static TerminalImage EvenImage()
