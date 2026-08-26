@@ -230,6 +230,45 @@ public class DcsSequenceTests
         Assert.Equal(new[] { "first", "second" }, payloads);
     }
 
+    /// <summary>
+    /// A DCS must not leave its intermediates behind for the next sequence to pick up.
+    /// </summary>
+    /// <remarks>
+    /// The collect buffer is cleared when a CSI or DCS begins, and on the way out of a CSI -- but
+    /// nothing clears it on the way out of a DCS, and an ESC sequence does not clear it on the way
+    /// in. So a DECRQSS, whose intermediate is "$", left that "$" sitting in the buffer, and the
+    /// next "ESC ( B" reported its intermediates as "$(" instead of "(" -- designating a character
+    /// set the program never asked for, one sequence after the one that caused it.
+    /// </remarks>
+    [Fact]
+    public void A_dcs_does_not_leave_its_intermediates_for_the_next_sequence()
+    {
+        var parser = new EscapeSequenceParser();
+        string? finalChar = null;
+        string? collected = null;
+        parser.Esc += (_, e) => { finalChar = e.FinalChar; collected = e.Collected; };
+
+        // DECRQSS collects "$", then an ordinary charset designation follows.
+        parser.Parse(Esc + "P$qm" + St + Esc + "(B");
+
+        Assert.Equal("B", finalChar);
+        Assert.True(collected == "(",
+            $"the DCS left its intermediates behind: ESC ( B reported '{collected}' instead of '('");
+    }
+
+    /// <summary>The same for a CSI following a DCS, which shares the collect buffer.</summary>
+    [Fact]
+    public void A_csi_after_a_dcs_sees_only_its_own_intermediates()
+    {
+        var parser = new EscapeSequenceParser();
+        string? identifier = null;
+        parser.Csi += (_, e) => identifier = e.Identifier;
+
+        parser.Parse(Esc + "P$qm" + St + Esc + "[?25h");
+
+        Assert.Equal("?h", identifier);
+    }
+
     /// <summary>The regression this whole area exists to guard: the parser has to come back.</summary>
     [Fact]
     public void Text_after_a_dcs_sequence_still_prints()
