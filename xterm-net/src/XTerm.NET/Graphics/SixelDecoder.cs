@@ -73,6 +73,12 @@ internal sealed class SixelDecoder
     /// <param name="p1">Pixel aspect ratio. Superseded by the raster attribute and ignored.</param>
     /// <param name="p2">Background select. 1 leaves unset pixels transparent.</param>
     /// <param name="p3">Horizontal grid size. Unused by every implementation, including this one.</param>
+    /// <param name="cellWidth">Cell width in pixels, which decides how many columns the image covers.</param>
+    /// <param name="cellHeight">Cell height in pixels, which decides how many rows the image covers.</param>
+    /// <param name="maxPixels">
+    /// Ceiling on the decoded image. A payload declares no size until it has been drawn, so without
+    /// one a hostile or simply broken process can make the terminal allocate until it dies.
+    /// </param>
     /// <param name="backgroundBgra">Packed BGRA to use for unset pixels when <paramref name="p2"/> is not 1.</param>
     /// <param name="palette">
     /// The colour registers to draw from. Pass a fresh one for private registers (mode 1070 set,

@@ -110,6 +110,8 @@ public class Terminal
     /// The progress percentage last reported via OSC 9 ; 4, from 0 to 100.
     /// </summary>
     public int ProgressValue { get; internal set; }
+
+    /// <summary>
     /// The terminal's colours: the 256-entry palette plus foreground, background and cursor.
     /// </summary>
     /// <remarks>
@@ -184,6 +186,8 @@ public class Terminal
     /// Fired when a desktop notification is requested via OSC 9.
     /// </summary>
     public event EventHandler<TerminalEvents.NotificationEventArgs>? NotificationReceived;
+
+    /// <summary>
     /// Fired for every OSC sequence, including ones this terminal does not implement.
     /// </summary>
     /// <remarks>

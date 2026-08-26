@@ -71,6 +71,7 @@ internal sealed class SixelPalette
     /// <summary>
     /// Sets a register from hue/lightness/saturation, the other colour space Sixel allows.
     /// </summary>
+    /// <param name="index">The colour register to set.</param>
     /// <param name="hue">Degrees, 0-360.</param>
     /// <param name="lightness">Percent, 0-100.</param>
     /// <param name="saturation">Percent, 0-100.</param>
