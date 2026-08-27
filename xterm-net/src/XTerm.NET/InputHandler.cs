@@ -18,6 +18,16 @@ public class InputHandler
     private Buffer.TerminalBuffer _buffer;
     private AttributeData _curAttr;
     private readonly Dictionary<CharsetMode, Dictionary<char, string>?> _charsets;
+
+    /// <summary>
+    /// The table _currentCharset resolves to, cached.
+    ///
+    /// Print looked this up in the dictionary once per printed character to answer a question whose
+    /// answer only changes on SO, SI, a charset designation or a reset -- events that happen orders
+    /// of magnitude less often than printing does. Every write to _charsets or _currentCharset goes
+    /// through RefreshActiveCharset so the two cannot drift.
+    /// </summary>
+    private Dictionary<char, string>? _activeCharset;
     private CharsetMode _currentCharset;
 
     // Variation selector and combining character constants
@@ -63,7 +73,10 @@ public class InputHandler
         };
 
         _currentCharset = CharsetMode.G0; // G0 is active by default
+        RefreshActiveCharset();
     }
+
+    private void RefreshActiveCharset() => _activeCharset = _charsets.GetValueOrDefault(_currentCharset);
 
     /// <summary>
     /// Checks if a code point is a combining character that should be merged with the previous cell.
@@ -158,11 +171,12 @@ public class InputHandler
     /// </summary>
     public void Print(string data)
     {
-        // Check if this is a combining character that should be merged with the previous cell
-        if (!string.IsNullOrEmpty(data))
-        {
-            var codePoint = char.ConvertToUtf32(data, 0);
+        // Decoded once and reused below. Print used to call ConvertToUtf32 on the same string twice:
+        // here, and again when filling in the cell's CodePoint.
+        var codePoint = data.Length > 0 ? char.ConvertToUtf32(data, 0) : 0;
 
+        if (data.Length > 0)
+        {
             // A placeholder is a character that means "part of a picture goes here". It has to be
             // taken before the combining-character machinery below, which would otherwise try to
             // merge the diacritics that follow it into a text cell.
@@ -244,8 +258,7 @@ public class InputHandler
         var translatedData = data;
         if (data.Length == 1)
         {
-            var charset = _charsets.GetValueOrDefault(_currentCharset);
-            translatedData = Charsets.TranslateChar(data[0], charset);
+            translatedData = Charsets.TranslateChar(data[0], _activeCharset);
         }
 
         // Get character width
@@ -257,7 +270,12 @@ public class InputHandler
             Content = translatedData,
             Width = width,
             Attributes = _curAttr,
-            CodePoint = translatedData.Length > 0 ? char.ConvertToUtf32(translatedData, 0) : 0
+            // Reuse the codepoint decoded at the top unless translation actually produced a
+            // different string. With no charset mapping in play, TranslateChar hands back the very
+            // same cached instance it was given, so the common path never decodes twice.
+            CodePoint = ReferenceEquals(translatedData, data)
+                ? codePoint
+                : (translatedData.Length > 0 ? char.ConvertToUtf32(translatedData, 0) : 0)
         };
 
         // Insert mode handling
@@ -342,6 +360,125 @@ public class InputHandler
         // indicators pair up from the left, they do not accumulate.
         _regionalPending = null;
         return true;
+    }
+
+    /// <summary>
+    /// Prints a run of printable ASCII in one pass, instead of one character at a time.
+    ///
+    /// Per character, Print does work that is identical for every character in a run: decode the
+    /// codepoint, test it for combining, resolve the charset, resolve the width, build a cell, check
+    /// bounds, clear the line cache, advance the cursor. For a run of ordinary text all of that
+    /// collapses -- printable ASCII is single-width, never combining, and with no charset designated
+    /// it translates to itself -- so the run can be written as a span and the cursor moved once.
+    ///
+    /// Falls back to the per-character path whenever an assumption does not hold. Insert mode has to
+    /// shift the tail of the line for every character, and a designated charset means each one may
+    /// expand to different text; neither is expressible as a straight span write, and both are rare.
+    /// </summary>
+    /// <summary>
+    /// Whether runs of printable ASCII take the batched path. On by default.
+    ///
+    /// Turning it off routes every character through <see cref="Print"/> instead, which is the
+    /// reference behaviour the batched path has to reproduce. That makes the two differentially
+    /// testable against each other, and gives anyone who suspects the fast path a way to rule it out.
+    /// </summary>
+    public bool UseRunPrinting { get; set; } = true;
+
+    /// <summary>
+    /// The byte-span twin of <see cref="PrintAsciiRun"/>, for callers feeding UTF-8 directly.
+    ///
+    /// Printable ASCII bytes are their own codepoints, so this never decodes anything — which is the
+    /// point of the byte entry: the UTF-16 transcode that a string-based Write forces on the caller
+    /// buys nothing for the bytes that make up most terminal output.
+    /// </summary>
+    internal void PrintAsciiRun(ReadOnlySpan<byte> data)
+    {
+        if (!UseRunPrinting || _terminal.InsertMode || _activeCharset is not null)
+        {
+            foreach (var b in data)
+                Print(CodePointText.Get((char)b));
+            return;
+        }
+
+        while (!data.IsEmpty)
+        {
+            if (_buffer.X >= _terminal.Cols)
+            {
+                if (!_terminal.Options.Wraparound)
+                    return;
+
+                if (_buffer.Y == _buffer.ScrollBottom)
+                {
+                    _buffer.SetCursor(0, _buffer.Y);
+                    _buffer.ScrollUp(1, true);
+                }
+                else
+                {
+                    _buffer.SetCursor(0, _buffer.Y + 1);
+                }
+
+                _buffer.Lines[_buffer.Y + _buffer.YBase]!.IsWrapped = true;
+            }
+
+            var line = _buffer.Lines[_buffer.Y + _buffer.YBase];
+            if (line == null)
+                return;
+
+            var take = Math.Min(_terminal.Cols - _buffer.X, data.Length);
+            line.SetSingleWidthRun(_buffer.X, data[..take], _curAttr);
+            _buffer.SetCursorRaw(_buffer.X + take, _buffer.Y);
+
+            data = data[take..];
+        }
+    }
+
+    internal void PrintAsciiRun(string data, int start, int count)
+    {
+        if (!UseRunPrinting || _terminal.InsertMode || _activeCharset is not null)
+        {
+            for (var k = 0; k < count; k++)
+                Print(CodePointText.Get(data[start + k]));
+            return;
+        }
+
+        var pos = start;
+        var remaining = count;
+
+        while (remaining > 0)
+        {
+            // Autowrap, matching Print. The cursor is allowed to rest one past the last column, so
+            // the wrap is resolved here rather than when the previous character was written.
+            if (_buffer.X >= _terminal.Cols)
+            {
+                if (!_terminal.Options.Wraparound)
+                    return;   // printing past the edge is discarded, as in Print
+
+                if (_buffer.Y == _buffer.ScrollBottom)
+                {
+                    _buffer.SetCursor(0, _buffer.Y);
+                    _buffer.ScrollUp(1, true);
+                }
+                else
+                {
+                    _buffer.SetCursor(0, _buffer.Y + 1);
+                }
+
+                _buffer.Lines[_buffer.Y + _buffer.YBase]!.IsWrapped = true;
+            }
+
+            var line = _buffer.Lines[_buffer.Y + _buffer.YBase];
+            if (line == null)
+                return;
+
+            var take = Math.Min(_terminal.Cols - _buffer.X, remaining);
+            line.SetSingleWidthRun(_buffer.X, data.AsSpan(pos, take), _curAttr);
+
+            // SetCursorRaw, as Print uses, so X may land one past the last column pending a wrap.
+            _buffer.SetCursorRaw(_buffer.X + take, _buffer.Y);
+
+            pos += take;
+            remaining -= take;
+        }
     }
 
     /// <summary>
@@ -736,6 +873,7 @@ public class InputHandler
     {
         var charset = Charsets.GetCharset(charsetId);
         _charsets[mode] = charset;
+        RefreshActiveCharset();
     }
 
     /// <summary>
@@ -744,6 +882,7 @@ public class InputHandler
     public void ShiftOut()
     {
         _currentCharset = CharsetMode.G1;
+        RefreshActiveCharset();
     }
 
     /// <summary>
@@ -752,6 +891,7 @@ public class InputHandler
     public void ShiftIn()
     {
         _currentCharset = CharsetMode.G0;
+        RefreshActiveCharset();
     }
 
     /// <summary>
@@ -764,6 +904,7 @@ public class InputHandler
         _charsets[CharsetMode.G2] = Charsets.ASCII;
         _charsets[CharsetMode.G3] = Charsets.ASCII;
         _currentCharset = CharsetMode.G0;
+        RefreshActiveCharset();
     }
 
     #region DCS / Sixel
@@ -3723,13 +3864,51 @@ public class InputHandler
     private int GetStringCellWidth(string text)
     {
         ArgumentNullException.ThrowIfNull(text);
+
+        // Fast path for a single BMP character, which covers the overwhelming majority of terminal
+        // output -- ASCII, CJK, kana, hangul, box drawing.
+        //
+        // For ONE codepoint the adjustment tree below collapses, and it is worth being precise about
+        // why rather than trusting the shape of it:
+        //
+        //   - skin-tone modifiers and regional indicators live above the BMP, so a single UTF-16 code
+        //     unit cannot be either;
+        //   - the keycap and variation-selector branches are guarded on lastWidth being 1 or 2, and
+        //     lastWidth is still 0 on the first rune, so they fall through to the plain case;
+        //   - ZWJ and the object replacement character subtract lastWidth, which is 0, yielding 0.
+        //
+        // Which leaves: plain width for everything except those last two, and the control-character
+        // handling for negative widths.
+        if (text.Length == 1)
+        {
+            var c = text[0];
+
+            if (c >= 0x20 && c < 0x7F)
+                return 1;
+
+            if (!char.IsSurrogate(c))
+            {
+                if (c == Emoji.ZeroWidthJoiner || c == Emoji.ObjectReplacementCharacter)
+                    return 0;
+
+                var w = CellWidth.Get(c);
+                if (w >= 0)
+                    return w;
+
+                // Control characters, matching the tail of the loop below.
+                if (c == '\t') return 4;
+                if (c == '\n') return 1;
+                return 0;
+            }
+        }
+
         bool supportsComplexEmoji = true;
         ushort width = 0;
         ushort lastWidth = 0;
         int regionalRuneCount = 0;
         foreach (Rune rune in text.EnumerateRunes())
         {
-            int runeWidth = UnicodeCalculator.GetWidth(rune);
+            int runeWidth = CellWidth.Get(rune.Value);   // memoised; the library call is ~23 ns
             if (runeWidth >= 0)
             {
                 if (rune.Value == Emoji.ZeroWidthJoiner || rune.Value == Emoji.ObjectReplacementCharacter)
