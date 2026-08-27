@@ -133,9 +133,6 @@ public static class TerminalEvents
     }
 
     /// <summary>
-    /// Shell integration event - fired for each OSC 133 mark.
-    /// </summary>
-    /// <summary>
     /// An atomic update beginning or ending — DEC private mode 2026.
     /// </summary>
     /// <remarks>
@@ -154,6 +151,9 @@ public static class TerminalEvents
         public bool Active { get; }
     }
 
+    /// <summary>
+    /// Shell integration event - fired for each OSC 133 mark.
+    /// </summary>
     public class ShellIntegrationEventArgs : EventArgs
     {
         public ShellIntegrationEventArgs(ShellIntegrationMark mark, int? exitCode)
