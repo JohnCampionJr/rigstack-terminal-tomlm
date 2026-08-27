@@ -291,6 +291,17 @@ public class BufferLine : IEnumerable<BufferCell>
     /// </summary>
     public bool HasImages => _placements is { Count: > 0 };
 
+    /// <summary>
+    /// The distinct images this line shows.
+    /// </summary>
+    /// <remarks>
+    /// The list to walk when the question is "which pictures are on this line" — asking column by
+    /// column both costs more and answers wrongly, because a column covered by two overlapping runs
+    /// reports only the first, and an image seen through no other column would be missed entirely.
+    /// </remarks>
+    public IReadOnlyList<Graphics.TerminalImage> Images
+        => (IReadOnlyList<Graphics.TerminalImage>?)_images ?? Array.Empty<Graphics.TerminalImage>();
+
     /// <summary>The picture runs on this line, in the order they were placed.</summary>
     public IReadOnlyList<Graphics.LinePlacement> Placements
         => (IReadOnlyList<Graphics.LinePlacement>?)_placements ?? Array.Empty<Graphics.LinePlacement>();
@@ -344,6 +355,81 @@ public class BufferLine : IEnumerable<BufferCell>
 
         image = null!;
         return false;
+    }
+
+    /// <summary>
+    /// Drops the strong reference to any image this line no longer shows.
+    /// </summary>
+    /// <remarks>
+    /// <para>Ownership is derived from the runs, not tracked alongside them, so anything that
+    /// removes a run has to rebuild it. Otherwise a line keeps a picture alive that nothing on it
+    /// displays any more — and worse, the budget sweep walks runs to decide what is live, so such a
+    /// picture is invisible to it and can never be reclaimed.</para>
+    /// <para>Linear in runs times images, both of which are one or a handful.</para>
+    /// </remarks>
+    private void PruneImages()
+    {
+        if (_images is null)
+            return;
+
+        for (int i = _images.Count - 1; i >= 0; i--)
+        {
+            var id = _images[i].Id;
+            var stillShown = false;
+
+            if (_placements is not null)
+            {
+                foreach (var placement in _placements)
+                {
+                    if (placement.ImageId == id)
+                    {
+                        stillShown = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!stillShown)
+                _images.RemoveAt(i);
+        }
+
+        if (_images.Count == 0)
+            _images = null;
+    }
+
+    /// <summary>
+    /// Removes every run showing one of <paramref name="doomed"/>, leaving the rest alone.
+    /// </summary>
+    /// <returns>True if anything was removed, which is also the signal to repaint.</returns>
+    /// <remarks>
+    /// Selective on purpose. Clearing the whole line because one of its pictures was doomed would
+    /// take the others with it, which is more destructive than the per-cell code this replaced.
+    /// </remarks>
+    internal bool RemoveImages(HashSet<Graphics.TerminalImage> doomed)
+    {
+        if (_placements is null || _images is null)
+            return false;
+
+        var doomedIds = new HashSet<int>();
+        foreach (var image in _images)
+        {
+            if (doomed.Contains(image))
+                doomedIds.Add(image.Id);
+        }
+
+        if (doomedIds.Count == 0)
+            return false;
+
+        var removed = _placements.RemoveAll(p => doomedIds.Contains(p.ImageId)) > 0;
+        if (!removed)
+            return false;
+
+        if (_placements.Count == 0)
+            _placements = null;
+
+        PruneImages();
+        Cache = null;
+        return true;
     }
 
     /// <summary>Adds a run to this line and takes ownership of the image it shows.</summary>
@@ -405,10 +491,11 @@ public class BufferLine : IEnumerable<BufferCell>
         }
 
         if (_placements.Count == 0)
-        {
             _placements = null;
-            _images = null;
-        }
+
+        // A split can remove the last run for ONE image while runs for others remain, so this
+        // cannot wait for the list to empty.
+        PruneImages();
     }
 
     /// <summary>Splits runs across a whole written span.</summary>

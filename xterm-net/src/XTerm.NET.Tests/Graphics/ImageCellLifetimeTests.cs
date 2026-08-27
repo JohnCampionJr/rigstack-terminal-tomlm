@@ -1,3 +1,4 @@
+using System.Linq;
 using XTerm.Buffer;
 using XTerm.Graphics;
 using XTerm.Options;
@@ -272,6 +273,64 @@ public class ImageCellLifetimeTests
 
         Assert.NotNull(ImageAssertions.ImageAt(terminal, 0, 0));
         Assert.NotNull(ImageAssertions.ImageAt(terminal, 0, 4));
+    }
+
+    /// <summary>
+    /// Evicting one picture leaves another that shares its line.
+    /// </summary>
+    /// <remarks>
+    /// Caught in review. Dropping the whole line because one of its pictures was over budget took
+    /// the others with it — more destructive than the per-cell code this replaced, and it evicted
+    /// images the sweep had just decided to keep.
+    /// </remarks>
+    [Fact]
+    public void Evicting_one_image_leaves_another_on_the_same_line()
+    {
+        // Two 192-byte images; a 400 byte budget holds both, then a third forces one out.
+        var terminal = Fresh(o => o.MaxImageBytes = 400);
+
+        WriteSixel(terminal);
+        terminal.Write($"{Esc}[1;5H");
+        WriteSixel(terminal);
+
+        var line = terminal.Buffer.Lines[terminal.Buffer.YBase]!;
+        Assert.Equal(2, line.Images.Count);
+        var newer = line.Images[1];
+
+        // A third image pushes past the budget, dooming the oldest — which shares this line.
+        terminal.Write($"{Esc}[10;1H");
+        WriteSixel(terminal);
+
+        Assert.True(ReferenceEquals(newer, line.Images.SingleOrDefault()),
+            "the line's other picture should survive its neighbour being evicted");
+    }
+
+    /// <summary>
+    /// Printing over one picture releases it, while another on the same line stays.
+    /// </summary>
+    /// <remarks>
+    /// Caught in review. Ownership is derived from the runs, so anything that removes one has to
+    /// rebuild it — waiting for the run list to empty kept a picture alive that nothing displayed,
+    /// and hid it from the budget sweep, which decides what is live by walking runs.
+    /// </remarks>
+    [Fact]
+    public void Overwriting_one_picture_releases_only_that_one()
+    {
+        var terminal = Fresh();
+
+        WriteSixel(terminal);
+        terminal.Write($"{Esc}[1;5H");
+        WriteSixel(terminal);
+
+        var line = terminal.Buffer.Lines[terminal.Buffer.YBase]!;
+        Assert.Equal(2, line.Images.Count);
+        var survivor = line.Images[1];
+
+        // Print across the whole span of the first picture, which covers columns 0..1.
+        terminal.Write($"{Esc}[1;1HXX");
+
+        Assert.True(ReferenceEquals(survivor, line.Images.SingleOrDefault()),
+            "the overwritten picture should be released and the other kept");
     }
 
     /// <summary>

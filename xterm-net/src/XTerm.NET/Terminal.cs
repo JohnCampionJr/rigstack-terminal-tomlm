@@ -555,14 +555,11 @@ public class Terminal
                 var line = buffer.Lines[i];
                 if (line is null)
                     continue;
-                if (!line.HasImages)
-                    continue;
-
-                for (int x = 0; x < line.Length; x++)
-                {
-                    if (line.TryGetImageAt(x, out var image))
-                        live.Add(image);
-                }
+                // The line's own list, not a column scan. Scanning both costs more and undercounts:
+                // a column covered by two overlapping runs reports only the first, so the second
+                // could be doomed while still on screen.
+                foreach (var image in line.Images)
+                    live.Add(image);
             }
         }
     }
@@ -575,20 +572,10 @@ public class Terminal
             if (line is null || !line.HasImages)
                 continue;
 
-            var showsDoomed = false;
-            foreach (var placement in line.Placements)
-            {
-                if (line.TryGetImageAt(placement.Column, out var image) && doomed.Contains(image))
-                {
-                    showsDoomed = true;
-                    break;
-                }
-            }
-
-            // Dropping the line's runs is what releases the pixels. There is nothing in the cells to
-            // clean up, and no ownership left to recompute afterwards.
-            if (showsDoomed)
-                line.ClearImages();
+            // Only the doomed runs. Clearing the line because one of its pictures was over budget
+            // would take its other pictures with it, which is more destructive than the per-cell
+            // code this replaced -- and would evict images the sweep had just decided to keep.
+            line.RemoveImages(doomed);
         }
     }
 
