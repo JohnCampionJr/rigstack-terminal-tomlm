@@ -18,15 +18,32 @@ jobs:
       - name: Determine prerelease version
         id: versioning
         run: |
-          CSPROJ=$(find src -name "*.csproj" -not -name "*Test*" | head -1)
+          # The package project, named rather than searched for. This was
+          # `find src -name "*.csproj" -not -name "*Test*" | head -1`, which returns whatever the
+          # directory walk reaches first -- Cat150.Fork today. That project carries no <Version>,
+          # so the lookup fell through to a hardcoded 1.0.0 and every prerelease went out as
+          # 1.0.0-rc001. The package id came from the same wrong file, so the query for existing
+          # release candidates asked about a package that does not exist and the counter never
+          # advanced either. This repo publishes one package and every other step already names the
+          # solution outright, so there was never anything to discover.
+          CSPROJ=src/XTerm.NET/XTerm.NET.csproj
+
           BASE_VERSION=$(grep -oPm1 '(?<=<Version>)[^<]+' "$CSPROJ" | sed 's/-.*//' || true)
           if [ -z "$BASE_VERSION" ]; then
             BASE_VERSION=$(grep -oPm1 '(?<=<VersionPrefix>)[^<]+' "$CSPROJ" | sed 's/-.*//' || true)
           fi
+
+          # Fail rather than guess. A version pushed to nuget.org cannot be replaced or reused, so
+          # publishing under an invented number is the one outcome worse than a red build.
           if [ -z "$BASE_VERSION" ]; then
-            BASE_VERSION="1.0.0"
+            echo "::error::No <Version> or <VersionPrefix> found in $CSPROJ -- refusing to invent one."
+            exit 1
           fi
-          PKG_ID=$(grep -oPm1 '(?<=<PackageId>)[^<]+' "$CSPROJ" || basename "$CSPROJ" .csproj)
+
+          PKG_ID=$(grep -oPm1 '(?<=<PackageId>)[^<]+' "$CSPROJ" || true)
+          if [ -z "$PKG_ID" ]; then
+            PKG_ID=$(basename "$CSPROJ" .csproj)
+          fi
           PKG_LOWER=$(echo "$PKG_ID" | tr '[:upper:]' '[:lower:]')
           VERSIONS=$(curl -sS "https://api.nuget.org/v3-flatcontainer/${PKG_LOWER}/index.json" | jq -r '.versions[]' 2>/dev/null || echo "")
           ESCAPED_VERSION=$(echo "$BASE_VERSION" | sed 's/\./\\./g')
