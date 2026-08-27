@@ -23,6 +23,30 @@ public static class CiProbe
     private const int Cols = 240;
     private const int Rows = 67;
 
+    /// <summary>
+    /// Roughly what each corpus costs per character, relative to <c>unicode</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>The budget is divided by these, so every corpus is measured for about the same LENGTH
+    /// OF TIME rather than over the same number of characters. Equal characters sounds fairer and is
+    /// not: <c>flood</c> costs about 28x what <c>scroll-ascii</c> does, so an equal-character budget
+    /// measures the fast corpora for a twenty-eighth as long and hands them all the noise. Observed
+    /// on a GitHub runner, <c>scroll-ascii</c> came back with a ±16% spread against ±1-4% for
+    /// everything else, which put its gate at 49% -- no gate at all.</para>
+    /// <para>Constants, and deliberately not measured at run time: both sides of a comparison must
+    /// do identical work, and a figure derived from a warm-up would differ between them. Being wrong
+    /// only makes the run uneven, never incorrect -- every number is reported per character.</para>
+    /// </remarks>
+    private static readonly Dictionary<string, double> RelativeCost = new()
+    {
+        ["scroll-ascii"] = 0.11,
+        ["sgr-churn"] = 0.30,
+        ["truecolor"] = 0.32,
+        ["alt-redraw"] = 0.40,
+        ["unicode"] = 1.00,
+        ["flood"] = 2.96,
+    };
+
     public static int Run(string outputPath, long targetChars, long warmChars)
     {
         var results = new List<CorpusResult>();
@@ -56,13 +80,13 @@ public static class CiProbe
         var (chunks, chars) = Load(corpus);
         var terminal = new Terminal(new TerminalOptions { Cols = Cols, Rows = Rows });
 
-        // Passes are derived from a target CHARACTER count rather than fixed, so every corpus does
-        // roughly the same amount of work in roughly the same time -- a fixed pass count over
-        // corpora that differ tenfold in cost either measures the cheap ones for a few milliseconds
-        // or the expensive ones for a minute. Still fixed work: the corpus is generated from a fixed
-        // seed, so both sides of a comparison run exactly the same passes.
-        var passes = (int)Math.Max(1, targetChars / Math.Max(1, chars));
-        var warmup = (int)Math.Max(1, warmChars / Math.Max(1, chars));
+        // Passes come from a time budget divided by the corpus's known relative cost, so each is
+        // measured for about as long as the others. Still fixed work: the corpus is generated from a
+        // fixed seed and the cost is a constant, so both sides of a comparison run exactly the same
+        // number of passes over exactly the same bytes.
+        var cost = RelativeCost.TryGetValue(corpus, out var known) ? known : 1.0;
+        var passes = (int)Math.Max(1, targetChars / cost / Math.Max(1, chars));
+        var warmup = (int)Math.Max(1, warmChars / cost / Math.Max(1, chars));
 
         // Warm to let tiered compilation promote the hot methods. Measuring before that measures the
         // JIT, which is how warming for a fixed count rather than to convergence produced a number

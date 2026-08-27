@@ -13,8 +13,10 @@ on:
   workflow_dispatch:
     inputs:
       chars:
-        description: Characters per corpus per run. More is slower and quieter.
-        default: "150000000"
+        description: >-
+          Work budget per corpus per run, divided by that corpus's known relative cost so each is
+          measured for about the same length of time. More is slower and quieter.
+        default: "100000000"
       runs:
         description: Runs of each side.
         default: "3"
@@ -28,7 +30,7 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      CHARS: ${{ inputs.chars || '150000000' }}
+      CHARS: ${{ inputs.chars || '100000000' }}
       RUNS: ${{ inputs.runs || '3' }}
       OUT: src/XTerm.NET.Bench/bin/Release/net10.0
 

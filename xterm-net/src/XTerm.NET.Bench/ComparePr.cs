@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 
@@ -82,7 +83,7 @@ public static class ComparePr
             var timeBad = delta > gate;
             if (timeBad)
                 failures.Add($"`{name}` time {bTime:N2} → {hTime:N2} ns/char "
-                           + $"({delta:P1}, past its {gate:P1} gate, noise ±{noise:P1})");
+                           + $"({Pct(delta, 1)}, past its {Pct(gate, 1)} gate, noise ±{Pct(noise, 1)})");
 
             // Between the floor and the gate. Not a failure -- the run was too noisy to call it one
             // -- but it should not vanish either, because that band is where a real regression hides
@@ -91,20 +92,20 @@ public static class ComparePr
             var worthALook = !timeBad && delta > timeFloor;
             if (worthALook)
                 watch.Add($"`{name}` time {bTime:N2} → {hTime:N2} ns/char "
-                        + $"({delta:P1}, under its {gate:P1} gate but over the {timeFloor:P0} floor)");
+                        + $"({Pct(delta, 1)}, under its {Pct(gate, 1)} gate but over the {Pct(timeFloor, 0)} floor)");
 
             var mark = timeBad ? " ⚠️" : worthALook ? " 👀" : "";
             md.AppendLine($"| {name} "
                         + $"| {bAlloc:N2} → {hAlloc:N2} "
                         + $"| {bGen0:N2} → {hGen0:N2} "
                         + $"| {bTime:N2} → {hTime:N2} "
-                        + $"| {delta:+0.0%;-0.0%;0.0%}{mark} "
-                        + $"| ±{noise:P0} "
-                        + $"| {gate:P0} |");
+                        + $"| {Signed(delta)}{mark} "
+                        + $"| ±{Pct(noise, 0)} "
+                        + $"| {Pct(gate, 0)} |");
         }
 
         md.AppendLine();
-        md.AppendLine($"Each corpus is gated at `max({timeFloor:P0}, 3 × its own noise)`. A wide noise "
+        md.AppendLine($"Each corpus is gated at `max({Pct(timeFloor, 0)}, 3 × its own noise)`. A wide noise "
                     + "column means this runner was busy and the timing half of the table should be "
                     + "read as advisory; the allocation half is exact either way.");
         md.AppendLine();
@@ -150,6 +151,20 @@ public static class ComparePr
 
         return failures.Count > 0 ? 1 : 0;
     }
+
+    /// <summary>
+    /// Percentages formatted by hand, in the invariant culture.
+    /// </summary>
+    /// <remarks>
+    /// "P0" renders as "16 %" where there is no ICU -- which is exactly the case on the CI runner
+    /// this report is written for -- and as "16%" on a developer machine. A report that reads
+    /// differently depending on where it ran is a report nobody can diff.
+    /// </remarks>
+    private static string Pct(double value, int decimals) =>
+        (value * 100).ToString("N" + decimals, CultureInfo.InvariantCulture) + "%";
+
+    private static string Signed(double value) =>
+        (value >= 0 ? "+" : "") + Pct(value, 1);
 
     private static Report Read(string path) =>
         JsonSerializer.Deserialize<Report>(File.ReadAllText(path))

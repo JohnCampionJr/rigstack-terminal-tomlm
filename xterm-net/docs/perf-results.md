@@ -172,6 +172,14 @@ catch anything real — and the first row is also where `scroll-ascii` read 3.9 
 rather than crying wolf, and anything between the floor and the gate is reported as worth a look
 instead of vanishing.
 
+Each corpus is measured for about the same length of *time*, not over the same number of characters.
+Equal characters sounds fairer and is not: `flood` costs some 28× per character what `scroll-ascii`
+does, so an equal-character budget measures the fast corpora for a twenty-eighth as long and hands
+them all the noise. The first run on a GitHub runner showed exactly that — `scroll-ascii` came back
+at ±16% against ±1–4% for everything else, putting its gate at 49%, which is no gate at all. Dividing
+the budget by a fixed per-corpus cost brought every spread to ±1–3%, and cut the run to a third of
+the time.
+
 Checked against a regression rather than assumed to work: removing the `_placeholderCell` guard from
 `Print` — a real 12% found by hand while merging Kitty — was flagged at +11.2% against a 7.0% gate,
 with the other five corpora silent.
