@@ -1,7 +1,11 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net6.0</TargetFramework>
+    <!-- net10.0, up from net6.0. The byte parser's Ground-state scan uses IndexOfAnyExceptInRange,
+         which the runtime vectorises; it and SearchValues are .NET 8+. Writing the scan by hand
+         instead would work on net6.0 but give up exactly the SIMD this entry exists for.
+         Porta.Pty 2.0 made the same move for the same kind of reason. -->
+    <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <RootNamespace>XTerm</RootNamespace>
