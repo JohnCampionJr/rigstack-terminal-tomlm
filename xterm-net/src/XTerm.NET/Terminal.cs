@@ -586,12 +586,11 @@ public class Terminal
                 var line = buffer.Lines[i];
                 if (line is null)
                     continue;
-                for (int x = 0; x < line.Length; x++)
-                {
-                    var image = line[x].Image;
-                    if (image is not null)
-                        live.Add(image);
-                }
+                // The line's own list, not a column scan. Scanning both costs more and undercounts:
+                // a column covered by two overlapping runs reports only the first, so the second
+                // could be doomed while still on screen.
+                foreach (var image in line.Images)
+                    live.Add(image);
             }
         }
     }
@@ -601,27 +600,13 @@ public class Terminal
         for (int i = 0; i < buffer.Lines.Length; i++)
         {
             var line = buffer.Lines[i];
-            if (line is null)
+            if (line is null || !line.HasImages)
                 continue;
 
-            bool touched = false;
-            for (int x = 0; x < line.Length; x++)
-            {
-                var cell = line[x];
-                if (cell.Image is null || !doomed.Contains(cell.Image))
-                    continue;
-
-                cell.Image = null;
-                cell.ImageTile = 0;
-                cell.Content = " ";
-                cell.Width = 1;
-                cell.CodePoint = 0x20;
-                line.SetCell(x, ref cell);
-                touched = true;
-            }
-
-            if (touched)
-                line.Cache = null;
+            // Only the doomed runs. Clearing the line because one of its pictures was over budget
+            // would take its other pictures with it, which is more destructive than the per-cell
+            // code this replaced -- and would evict images the sweep had just decided to keep.
+            line.RemoveImages(doomed);
         }
     }
 
