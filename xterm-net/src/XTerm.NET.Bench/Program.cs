@@ -30,6 +30,19 @@ switch (mode)
         ByteEntryProbe.Run(double.Parse(ArgOr(args, "--seconds", "2")));
         return 0;
 
+    case "ci":
+        return CiProbe.Run(
+            outputPath: ArgOr(args, "--out", "perf.json"),
+            targetChars: long.Parse(ArgOr(args, "--chars", "300000000")),
+            warmChars: long.Parse(ArgOr(args, "--warm-chars", "60000000")));
+
+    case "compare":
+        return ComparePr.Run(
+            baseFiles: Files(args, "--base"),
+            headFiles: Files(args, "--head"),
+            outputPath: ArgOr(args, "--out", "perf-report.md"),
+            timeFloor: double.Parse(ArgOr(args, "--time-floor", "0.05")));
+
     case "layout":
         CellLayoutProbe.Run();
         return 0;
@@ -47,7 +60,9 @@ switch (mode)
         return 0;
 
     default:
-        Console.Error.WriteLine("Usage: <bench|soak|alloc> [--corpus <name>] [--seconds N]");
+        Console.Error.WriteLine("Usage: <bench|soak|alloc|ci|compare|layout|unicode|flood|width|bytes>");
+        Console.Error.WriteLine("  ci      --out FILE [--chars N] [--warm-chars N]");
+        Console.Error.WriteLine("  compare --base F [F...] --head F [F...] [--out FILE] [--time-floor F]");
         return 2;
 }
 
@@ -62,6 +77,18 @@ static (string[] Chunks, int Chars) Load(string corpus)
     for (var i = 0; i < text.Length; i += 4096)
         chunks.Add(text.Substring(i, Math.Min(4096, text.Length - i)));
     return (chunks.ToArray(), text.Length);
+}
+
+/// <summary>Every value after <paramref name="name"/> until the next --flag.</summary>
+static string[] Files(string[] args, string name)
+{
+    var i = Array.IndexOf(args, name);
+    if (i < 0) return Array.Empty<string>();
+
+    var files = new List<string>();
+    for (var k = i + 1; k < args.Length && !args[k].StartsWith("--"); k++)
+        files.Add(args[k]);
+    return files.ToArray();
 }
 
 static string ArgOr(string[] args, string name, string fallback)

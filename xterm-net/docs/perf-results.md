@@ -142,3 +142,55 @@ which is what the `flood`, `unicode`, `width` and `layout` probe modes exist for
   after this port was taken.
 - Kitty graphics and Sixel — absent. The parser recognises APC and DCS and discards
   the payload.
+
+## Keeping it
+
+Two things guard this in CI, held to deliberately different standards.
+
+**The struct layout is a unit test.** `BufferCell` holds no managed references and is 24 bytes.
+Neither is a measurement — they hold or they do not — so they run in the ordinary test job and cost
+nothing. The reference one is the load-bearing guard: a `string` field added back to the cell would
+undo the largest single win here at a stroke, and nothing else in the suite would notice.
+
+**Throughput is a comparison, not a threshold.** `PerfCompare.yml` builds the branch and the commit
+it forked from, then runs one harness against both, alternating. Allocation per character is gated
+exactly, because bytes allocated for a fixed amount of work is a *count*: it does not care what else
+the machine is doing. Time is gated against the spread the job just observed in itself.
+
+That last part is not a preference, it is what the calibration showed. The same build compared
+against itself, on a quiet laptop:
+
+| work per corpus | apparent Δ on scroll-ascii | spread |
+|---|---|---|
+| 60M chars | **+27%** | ±30% |
+| 300M chars | +0.2% | ±1% |
+
+A fixed threshold would have had to sit above 30% to survive the first row, which is far too loose to
+catch anything real — and the first row is also where `scroll-ascii` read 3.9 ns/char against the
+1.7 it actually runs at, because the work was too short to finish warming. So the gate is
+`max(5%, 3 × observed spread)`: a quiet machine earns a tight gate, a busy one raises its own bar
+rather than crying wolf, and anything between the floor and the gate is reported as worth a look
+instead of vanishing.
+
+Each corpus is measured for about the same length of *time*, not over the same number of characters.
+Equal characters sounds fairer and is not: `flood` costs some 28× per character what `scroll-ascii`
+does, so an equal-character budget measures the fast corpora for a twenty-eighth as long and hands
+them all the noise. The first run on a GitHub runner showed exactly that — `scroll-ascii` came back
+at ±16% against ±1–4% for everything else, putting its gate at 49%, which is no gate at all. Dividing
+the budget by a fixed per-corpus cost brought every spread to ±1–3%, and cut the run to a third of
+the time.
+
+Checked against a regression rather than assumed to work: removing the `_placeholderCell` guard from
+`Print` — a real 12% found by hand while merging Kitty — was flagged at +11.2% against a 7.0% gate,
+with the other five corpora silent.
+
+The harness deliberately touches only `Terminal`, `TerminalOptions` and `Write(string)`. That is what
+lets one build of it measure an older library by assembly substitution; anything newer would fail at
+run time and the job could then only ever compare a build against itself. It reports the module
+version id of what it loaded for the same reason — two runs of the same assembly would otherwise
+report a flawless result and mean nothing.
+
+```
+dotnet run --project src/XTerm.NET.Bench -c Release -- ci --out head.json
+dotnet run --project src/XTerm.NET.Bench -c Release -- compare --base a.json b.json --head c.json d.json
+```
