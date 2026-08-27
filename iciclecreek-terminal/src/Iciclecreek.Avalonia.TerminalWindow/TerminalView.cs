@@ -674,9 +674,19 @@ namespace Iciclecreek.Terminal
         /// writing <c>Environment.GetEnvironmentVariable(...)</c> would get a compile error rather than the
         /// framework. <c>ProcessStartInfo.EnvironmentVariables</c> is the established .NET name for exactly
         /// this concept.</para>
-        /// <para><c>TERM</c> does not need setting here: the PTY layer already gives the child
-        /// <c>TERM=xterm-256color</c> on both Windows and Unix.</para>
+        /// <para><c>TERM</c> is supplied automatically as <c>xterm-256color</c> when this dictionary does not
+        /// carry one, because nothing else does — the PTY layer does not set it, and on Windows there is
+        /// none in the environment to inherit. Put <c>TERM</c> in here to override that.</para>
         /// </remarks>
+        /// <summary>
+        /// The <c>TERM</c> given to a launched process when the caller supplies none.
+        /// </summary>
+        /// <remarks>
+        /// What this terminal actually behaves like: an xterm with 24-bit colour. Overridden by putting
+        /// <c>TERM</c> in <see cref="EnvironmentVariables"/>.
+        /// </remarks>
+        public const string DefaultTermType = "xterm-256color";
+
         public static readonly StyledProperty<IDictionary<string, string>?> EnvironmentVariablesProperty =
             AvaloniaProperty.Register<TerminalView, IDictionary<string, string>?>(
                 nameof(EnvironmentVariables),
@@ -3850,12 +3860,28 @@ namespace Iciclecreek.Terminal
                 };
 
                 // Merged by the PTY layer into the environment the child would otherwise inherit, so a caller
-                // adding one variable does not have to rebuild the rest. Left unset when null so the launch
-                // path is byte-for-byte what it was before this existed.
-                if (EnvironmentVariables != null)
-                {
-                    options.Environment = EnvironmentVariables;
-                }
+                // adding one variable does not have to rebuild the rest.
+                //
+                // TERM is set here because nothing else sets it. The PTY layer does not, and on Windows the
+                // environment has none to inherit, so the child was being launched with TERM absent entirely
+                // -- which every curses-based program then has to guess around. `ucs-detect` reported this
+                // terminal as "vtwin10", which is not something the terminal said: it is blessed's Windows
+                // fallback for "no TERM, assume a Win10 console", and it costs the program every capability
+                // it would otherwise have used.
+                //
+                // xterm-256color and not xterm-kitty. TERM is a claim about the WHOLE terminal, and
+                // xterm-kitty asserts the keyboard protocol, notifications, text sizing and clipboard as well
+                // as the graphics. The keyboard protocol matters most: it changes how applications SEND input,
+                // so claiming it without answering risks breaking key handling to win a format negotiation
+                // that already falls back correctly.
+                var environment = EnvironmentVariables is null
+                    ? new Dictionary<string, string>()
+                    : new Dictionary<string, string>(EnvironmentVariables);
+
+                if (!environment.ContainsKey("TERM"))
+                    environment["TERM"] = DefaultTermType;
+
+                options.Environment = environment;
 
 
                 // Add arguments if provided
