@@ -163,7 +163,12 @@ public enum CsiCommand
     /// Select Cursor Style (DECSCUSR, CSI Ps SP q).
     /// </summary>
     SelectCursorStyle,
-    
+
+    /// <summary>
+    /// Request Mode (DECRQM, CSI ? Ps $ p) — asks whether a mode is supported and what it is set to.
+    /// </summary>
+    RequestMode,
+
     /// <summary>
     /// Unknown or unsupported command.
     /// </summary>

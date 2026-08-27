@@ -204,6 +204,19 @@ public enum TerminalMode
     SixelPrivateColorRegisters = 1070,
 
     /// <summary>
+    /// Synchronized output: hold the display still until the application has finished drawing.
+    /// </summary>
+    /// <remarks>
+    /// <para>Set means "an atomic update has begun" and reset means "it is finished". A full-screen
+    /// application redraws in many writes, and a renderer that paints between them shows a frame
+    /// half old and half new -- the tearing you see when a TUI repaints under load.</para>
+    /// <para>The emulator only reports the state; holding the frame is the renderer's decision, and
+    /// so is the timeout that has to bound it. Without one, an application that sets this and then
+    /// crashes would freeze the display for good.</para>
+    /// </remarks>
+    SynchronizedOutput = 2026,
+
+    /// <summary>
     /// Win32 Input Mode.
     /// </summary>
     Win32InputMode = 9001,
