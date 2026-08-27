@@ -59,21 +59,26 @@ public struct BufferCell : IEquatable<BufferCell>
                 return;
             }
 
-            // One codepoint — one char, or a single surrogate pair — needs no cluster entry.
-            var isSingle = value.Length == 1
-                || (value.Length == 2 && char.IsHighSurrogate(value[0]) && char.IsLowSurrogate(value[1]));
+            var isPair = value.Length >= 2
+                && char.IsHighSurrogate(value[0]) && char.IsLowSurrogate(value[1]);
 
-            if (isSingle)
-            {
-                CodePoint = char.ConvertToUtf32(value, 0);
-                ClusterId = ClusterTable.None;
-                return;
-            }
+            // The leading codepoint, which callers use for width and for combining-character tests.
+            //
+            // A LONE surrogate is not a scalar value, so ConvertToUtf32 throws on one — and it does
+            // reach here, because the text comes from a hosted program that may emit any UTF-16 it
+            // likes, and this used to be a plain string field that stored whatever it was given.
+            // Recorded as U+FFFD, which is what it renders as anyway.
+            CodePoint = isPair ? char.ConvertToUtf32(value[0], value[1])
+                      : char.IsSurrogate(value[0]) ? 0xFFFD
+                      : value[0];
 
-            // Multi-codepoint: keep the leading codepoint, which callers use for width and for
-            // combining-character tests, and intern the whole sequence for display.
-            CodePoint = char.ConvertToUtf32(value, 0);
-            ClusterId = ClusterTable.Intern(value);
+            // One codepoint — one char, or a single surrogate pair — needs no cluster entry, since
+            // the text is recoverable from the codepoint. A lone surrogate is not recoverable from
+            // U+FFFD, so it interns like any other cluster and Content still returns what was set.
+            var isSingle = (value.Length == 1 && !char.IsSurrogate(value[0]))
+                || (value.Length == 2 && isPair);
+
+            ClusterId = isSingle ? ClusterTable.None : ClusterTable.Intern(value);
         }
     }
 

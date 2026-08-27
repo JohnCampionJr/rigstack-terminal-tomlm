@@ -381,9 +381,6 @@ public class Terminal
     }
 
     /// <summary>
-    /// Writes data to the terminal.
-    /// </summary>
-    /// <summary>
     /// Whether runs of printable ASCII are written in one batch rather than a character at a time.
     /// On by default; see <c>InputHandler.UseRunPrinting</c>.
     /// </summary>
@@ -393,6 +390,9 @@ public class Terminal
         set => _inputHandler.UseRunPrinting = value;
     }
 
+    /// <summary>
+    /// Writes data to the terminal.
+    /// </summary>
     public void Write(string data)
     {
         if (string.IsNullOrEmpty(data))

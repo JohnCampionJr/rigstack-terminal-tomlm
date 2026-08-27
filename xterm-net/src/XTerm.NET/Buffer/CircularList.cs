@@ -39,9 +39,6 @@ public class CircularList<T> where T : class
     }
 
     /// <summary>
-    /// Pushes a new item to the end of the list.
-    /// </summary>
-    /// <summary>
     /// The item the next <see cref="Push"/> would overwrite, when the list is at capacity.
     /// Returns false otherwise.
     ///
@@ -61,6 +58,9 @@ public class CircularList<T> where T : class
         return false;
     }
 
+    /// <summary>
+    /// Pushes a new item to the end of the list.
+    /// </summary>
     public void Push(T item)
     {
         if (_length == MaxLength)

@@ -616,9 +616,6 @@ public class BufferLine : IEnumerable<BufferCell>
     }
 
     /// <summary>
-    /// Clones the line.
-    /// </summary>
-    /// <summary>
     /// Refills this line in place, as if it had just been constructed with <paramref name="fillCell"/>.
     ///
     /// The cell array is reused rather than reallocated, which is the entire point: scrolling a full
@@ -643,6 +640,9 @@ public class BufferLine : IEnumerable<BufferCell>
         Cache = null;
     }
 
+    /// <summary>
+    /// Clones the line.
+    /// </summary>
     public BufferLine Clone()
     {
         var newLine = new BufferLine(_length);

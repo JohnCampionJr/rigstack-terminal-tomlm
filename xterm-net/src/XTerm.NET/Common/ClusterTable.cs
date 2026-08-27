@@ -41,9 +41,16 @@ internal static class ClusterTable
         var id = Interlocked.Increment(ref _next);
         ById[id] = text;
 
-        // A race here costs a wasted id, not a wrong answer: whichever writer wins, both ids resolve
-        // to equal strings, and the loser's entry is simply never handed out again.
-        return Ids.GetOrAdd(text, id);
+        // Two threads interning the same new text each allocate an id; only one can win GetOrAdd.
+        var winner = Ids.GetOrAdd(text, id);
+
+        // Take the loser's entry back out. Nobody can be holding it -- it was never returned to
+        // anyone -- and leaving it would keep a string alive for the life of the process for no
+        // reader. Rare, but a leak that never reclaims is still a leak.
+        if (winner != id)
+            ById.TryRemove(id, out _);
+
+        return winner;
     }
 
     /// <summary>Text for <paramref name="id"/>, or empty for <see cref="None"/> or an unknown id.</summary>

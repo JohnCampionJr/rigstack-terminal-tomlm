@@ -35,6 +35,38 @@ public class ByteWriteParityTests
         { "osc", "\u001b]0;a titletail" },
     };
 
+    /// <summary>
+    /// Half a codepoint held from the byte entry cannot be completed by UTF-16 input, so switching
+    /// entries abandons it -- and abandoning it must SAY so.
+    /// </summary>
+    /// <remarks>
+    /// Mixing the two entries mid-sequence is a caller error. It should still not make characters
+    /// disappear: a byte quietly dropped shortens the stream, which is corruption a caller cannot
+    /// see, while U+FFFD is the standard way of saying something was there and could not be read.
+    /// </remarks>
+    [Fact]
+    public void Bytes_held_across_a_switch_to_the_string_entry_become_a_replacement()
+    {
+        var terminal = NewTerminal();
+
+        terminal.Write(new byte[] { 0xE4, 0xB8 });   // two thirds of a three-byte codepoint
+        terminal.Write("ok");
+
+        Assert.Equal("\uFFFDok", FirstRow(terminal));
+    }
+
+    /// <summary>The mirror: a high surrogate held from the string entry, abandoned by byte input.</summary>
+    [Fact]
+    public void A_surrogate_held_across_a_switch_to_the_byte_entry_becomes_a_replacement()
+    {
+        var terminal = NewTerminal();
+
+        terminal.Write("\uD83D");                    // the high half of an emoji, alone
+        terminal.Write(new byte[] { (byte)'o', (byte)'k' });
+
+        Assert.Equal("\uFFFDok", FirstRow(terminal));
+    }
+
     [Theory]
     [MemberData(nameof(Cases))]
     public void Byte_and_string_writes_agree(string name, string input)
@@ -80,6 +112,14 @@ public class ByteWriteParityTests
     }
 
     private static Terminal NewTerminal() => new(new TerminalOptions { Cols = Cols, Rows = Rows });
+
+    /// <summary>The written part of the top row, trailing blanks trimmed.</summary>
+    private static string FirstRow(Terminal terminal)
+    {
+        var line = terminal.Buffer.Lines[terminal.Buffer.YBase]!;
+        var text = string.Concat(Enumerable.Range(0, Cols).Select(c => line[c].Content));
+        return text.TrimEnd('\0', ' ');
+    }
 
     private static string RunString(string input)
     {

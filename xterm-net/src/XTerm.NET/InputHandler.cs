@@ -366,19 +366,6 @@ public class InputHandler
     }
 
     /// <summary>
-    /// Prints a run of printable ASCII in one pass, instead of one character at a time.
-    ///
-    /// Per character, Print does work that is identical for every character in a run: decode the
-    /// codepoint, test it for combining, resolve the charset, resolve the width, build a cell, check
-    /// bounds, clear the line cache, advance the cursor. For a run of ordinary text all of that
-    /// collapses -- printable ASCII is single-width, never combining, and with no charset designated
-    /// it translates to itself -- so the run can be written as a span and the cursor moved once.
-    ///
-    /// Falls back to the per-character path whenever an assumption does not hold. Insert mode has to
-    /// shift the tail of the line for every character, and a designated charset means each one may
-    /// expand to different text; neither is expressible as a straight span write, and both are rare.
-    /// </summary>
-    /// <summary>
     /// Whether runs of printable ASCII take the batched path. On by default.
     ///
     /// Turning it off routes every character through <see cref="Print"/> instead, which is the
@@ -435,6 +422,19 @@ public class InputHandler
         }
     }
 
+    /// <summary>
+    /// Prints a run of printable ASCII in one pass, instead of one character at a time.
+    ///
+    /// Per character, Print does work that is identical for every character in a run: decode the
+    /// codepoint, test it for combining, resolve the charset, resolve the width, build a cell, check
+    /// bounds, clear the line cache, advance the cursor. For a run of ordinary text all of that
+    /// collapses -- printable ASCII is single-width, never combining, and with no charset designated
+    /// it translates to itself -- so the run can be written as a span and the cursor moved once.
+    ///
+    /// Falls back to the per-character path whenever an assumption does not hold. Insert mode has to
+    /// shift the tail of the line for every character, and a designated charset means each one may
+    /// expand to different text; neither is expressible as a straight span write, and both are rare.
+    /// </summary>
     internal void PrintAsciiRun(string data, int start, int count)
     {
         if (!UseRunPrinting || _terminal.InsertMode || _activeCharset is not null)

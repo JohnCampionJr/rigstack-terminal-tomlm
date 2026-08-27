@@ -187,11 +187,20 @@ public class EscapeSequenceParser
         // A previous call ended on a high surrogate with nothing after it. That is not malformed
         // input: a PTY read boundary falls wherever the read happens to end, so a surrogate pair
         // straddling two Write calls is ordinary. Resolve it against the start of this chunk.
+        // Bytes held from a byte-entry call cannot be completed by UTF-16 input, so they are
+        // abandoned here. Abandoning them SILENTLY would delete input; U+FFFD says something was
+        // there. Mixing the two entries mid-sequence is a caller error, but a caller error should
+        // not make characters vanish.
+        if (_pendingByteCount > 0)
+        {
+            _pendingByteCount = 0;
+            ParseChar(0xFFFD);
+        }
+
         if (_pendingHighSurrogate != '\0')
         {
             var pending = _pendingHighSurrogate;
             _pendingHighSurrogate = '\0';
-        _pendingByteCount = 0;
 
             if (length > 0 && char.IsLowSurrogate(data[0]))
             {
@@ -286,6 +295,14 @@ public class EscapeSequenceParser
     /// </summary>
     public void Parse(ReadOnlySpan<byte> data)
     {
+        // The mirror of the case at the top of Parse(string): a high surrogate held from a string
+        // call cannot be completed by UTF-8 input.
+        if (_pendingHighSurrogate != '\0')
+        {
+            _pendingHighSurrogate = '\0';
+            ParseChar(0xFFFD);
+        }
+
         // Resolve a sequence the previous chunk left incomplete. PTY reads split on byte boundaries,
         // so a multi-byte codepoint straddling two calls is ordinary input, not corruption.
         if (_pendingByteCount > 0)
@@ -307,6 +324,11 @@ public class EscapeSequenceParser
                 return;
             }
 
+            // consumed >= held always, so the held bytes can never be dropped here. Bytes are only
+            // ever stashed on NeedMoreData, which makes them a VALID PREFIX, and DecodeFromUtf8
+            // consumes the maximal invalid subsequence -- which contains that prefix. Checked
+            // exhaustively rather than argued: all 17,651 valid prefixes of one to three bytes,
+            // against every continuation byte, produced no case consuming fewer than were held.
             ParseChar(rune.Value);
             data = data[Math.Max(0, consumed - held)..];
         }
