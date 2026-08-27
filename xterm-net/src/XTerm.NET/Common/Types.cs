@@ -138,7 +138,16 @@ public enum ParserState
     DcsParam = 10,
     DcsIgnore = 11,
     DcsPassthrough = 12,
-    DcsIntermediate = 13
+    DcsIntermediate = 13,
+
+    /// <summary>
+    /// The payload of an APC sequence, which is the Kitty graphics transport.
+    /// </summary>
+    /// <remarks>
+    /// Distinct from <see cref="SosPmApcString"/>, which stays the discard path for SOS and PM.
+    /// Only "ESC _" comes here, because only APC carries something worth reading.
+    /// </remarks>
+    ApcString = 14
 }
 
 /// <summary>

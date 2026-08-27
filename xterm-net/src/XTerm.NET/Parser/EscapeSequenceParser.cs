@@ -37,6 +37,22 @@ public class EscapeSequenceParser
     /// <summary>Whether the payload is still being accumulated for the <see cref="Dcs"/> event.</summary>
     private bool _dcsAccumulating;
 
+    /// <summary>
+    /// The APC equivalent of <see cref="_dcsChunk"/>. A Kitty image arrives base64-encoded and can
+    /// run to megabytes, so it is streamed a chunk at a time and never accumulated whole.
+    /// </summary>
+    private readonly char[] _apcChunk = new char[512];
+    private int _apcChunkLength;
+
+    /// <summary>True between an <see cref="ApcHook"/> and its matching <see cref="ApcUnhook"/>.</summary>
+    private bool _apcHooked;
+
+    /// <summary>
+    /// The APC equivalent of <see cref="_dcsPendingUnhook"/>, and deliberately a separate field.
+    /// Sharing one would let a DCS and an APC cross-fire each other's unhook.
+    /// </summary>
+    private bool _apcPendingUnhook;
+
     // Parser events - Standard C# event pattern
     /// <summary>
     /// Fired when printable characters are parsed.
@@ -91,6 +107,27 @@ public class EscapeSequenceParser
     public event EventHandler<DcsUnhookEventArgs>? DcsUnhook;
 
     /// <summary>
+    /// Fired when an APC sequence begins, before any payload.
+    /// </summary>
+    /// <remarks>
+    /// APC has no parameter grammar in front of its payload the way CSI and DCS do -- everything
+    /// after the introducer is payload, and what it means is decided by its first character. So
+    /// this carries only the introducer, and a listener decides from the first chunk whether the
+    /// sequence is one it wants.
+    /// </remarks>
+    public event EventHandler<ApcHookEventArgs>? ApcHook;
+
+    /// <summary>
+    /// Fired for each chunk of an APC payload.
+    /// </summary>
+    public event EventHandler<ApcPutEventArgs>? ApcPut;
+
+    /// <summary>
+    /// Fired when an APC sequence ends, cleanly or otherwise.
+    /// </summary>
+    public event EventHandler<ApcUnhookEventArgs>? ApcUnhook;
+
+    /// <summary>
     /// How much of a DCS payload will be accumulated for the <see cref="Dcs"/> event. A Sixel
     /// image is unbounded and a screenful can run to megabytes; buffering that so a convenience
     /// event can hand it over as one string is how a terminal ends up holding a copy of every
@@ -130,6 +167,14 @@ public class EscapeSequenceParser
         {
             _dcsPendingUnhook = false;
             EndDcs(terminatedCleanly: code == 0x5C); // backslash
+        }
+
+        // The same one-character-late resolution for APC. Kept as its own flag rather than shared
+        // with the DCS one: a sequence of each interleaved would otherwise close the wrong payload.
+        if (_apcPendingUnhook)
+        {
+            _apcPendingUnhook = false;
+            EndApc(terminatedCleanly: code == 0x5C);
         }
 
         var currentState = _state;
@@ -188,9 +233,11 @@ public class EscapeSequenceParser
                     case 0x50: // P
                         Transition(ParserState.DcsEntry);
                         break;
-                    case 0x5E: // ^
-                    case 0x5F: // _
-                    case 0x58: // X
+                    case 0x5F: // _  APC -- the Kitty graphics transport, so its payload is read
+                        BeginApc();
+                        break;
+                    case 0x5E: // ^  PM
+                    case 0x58: // X  SOS
                         Transition(ParserState.SosPmApcString);
                         break;
                     case >= 0x20 and < 0x30:
@@ -286,8 +333,33 @@ public class EscapeSequenceParser
                 OscPut(code);
                 break;
 
+            case ParserState.ApcString:
+                // Mirrors DcsPassthrough exactly; see the reasoning there. APC is where Kitty
+                // graphics arrive, so unlike SOS and PM below, the payload is kept.
+                if (code == 0x9C) // ST
+                {
+                    EndApc(terminatedCleanly: true);
+                    Transition(ParserState.Ground);
+                }
+                else if (code == 0x1B) // ESC, possibly the first half of ESC \
+                {
+                    _apcPendingUnhook = true;
+                    Transition(ParserState.Escape);
+                }
+                else if (code == 0x18 || code == 0x1A) // CAN, SUB — an explicit abort
+                {
+                    EndApc(terminatedCleanly: false);
+                    Transition(ParserState.Ground);
+                }
+                else if (code == 0x7F) { /* DEL is not payload */ }
+                else
+                {
+                    ApcPutChar(code);
+                }
+                break;
+
             case ParserState.SosPmApcString:
-                // SOS/PM/APC are consumed whole and answered by nobody. What matters is LEAVING them —
+                // SOS and PM are consumed whole and answered by nobody. What matters is LEAVING them —
                 // and this state had no case here at all. ESC _ , ESC ^ and ESC X were entered and never
                 // exited, so the parser sat in that state discarding every byte that followed it. One
                 // kitty graphics query and the terminal stopped answering anything, permanently.
@@ -608,6 +680,85 @@ public class EscapeSequenceParser
     }
 
     /// <summary>
+    /// Opens an APC payload. Everything after the introducer belongs to it.
+    /// </summary>
+    private void BeginApc()
+    {
+        _apcChunkLength = 0;
+        _apcHooked = true;
+
+        Transition(ParserState.ApcString);
+        OnApcHook('_');
+    }
+
+    /// <summary>
+    /// Adds one character to the payload, flushing to <see cref="ApcPut"/> a chunk at a time.
+    /// </summary>
+    private void ApcPutChar(int code)
+    {
+        if (code > 0xFFFF)
+        {
+            // Kitty payloads are base64 and never leave ASCII, but the parser is rune-based and
+            // half a surrogate pair in the stream would be worse than spending two slots.
+            foreach (var c in char.ConvertFromUtf32(code))
+                ApcPutChar(c);
+            return;
+        }
+
+        _apcChunk[_apcChunkLength++] = (char)code;
+        if (_apcChunkLength == _apcChunk.Length)
+            FlushApcChunk();
+    }
+
+    private void FlushApcChunk()
+    {
+        if (_apcChunkLength == 0)
+            return;
+
+        var length = _apcChunkLength;
+        _apcChunkLength = 0;
+        OnApcPut(new ReadOnlyMemory<char>(_apcChunk, 0, length));
+    }
+
+    /// <summary>
+    /// Closes an open APC payload. Safe to call when none is open, which is what lets it be used
+    /// from <see cref="Reset"/> and from every abort path without a guard at each call site.
+    /// </summary>
+    private void EndApc(bool terminatedCleanly)
+    {
+        if (!_apcHooked)
+            return;
+
+        _apcHooked = false;
+        FlushApcChunk();
+        OnApcUnhook(terminatedCleanly);
+    }
+
+    /// <summary>
+    /// Raises the ApcHook event.
+    /// </summary>
+    protected virtual void OnApcHook(char introducer)
+    {
+        ApcHook?.Invoke(this, new ApcHookEventArgs(introducer));
+    }
+
+    /// <summary>
+    /// Raises the ApcPut event.
+    /// </summary>
+    protected virtual void OnApcPut(ReadOnlyMemory<char> data)
+    {
+        ApcPut?.Invoke(this, new ApcPutEventArgs(data));
+    }
+
+    /// <summary>
+    /// Raises the ApcUnhook event.
+    /// </summary>
+    protected virtual void OnApcUnhook(bool terminatedCleanly)
+    {
+        ApcUnhook?.Invoke(this, new ApcUnhookEventArgs(terminatedCleanly));
+    }
+
+    /// <summary>
     /// Raises the DcsHook event.
     /// </summary>
     protected virtual void OnDcsHook(string identifier, Params parameters)
@@ -660,6 +811,7 @@ public class EscapeSequenceParser
         // A reset mid-image abandons it. Say so, rather than leaving a decoder open forever
         // waiting for a payload that will never arrive.
         EndDcs(terminatedCleanly: false);
+        EndApc(terminatedCleanly: false);
 
         _state = ParserState.Ground;
         _params.Reset();
@@ -669,5 +821,7 @@ public class EscapeSequenceParser
         _dcsChunkLength = 0;
         _dcsPendingUnhook = false;
         _dcsAccumulating = false;
+        _apcChunkLength = 0;
+        _apcPendingUnhook = false;
     }
 }

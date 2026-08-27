@@ -164,6 +164,62 @@ public class DcsPutEventArgs : EventArgs
 }
 
 /// <summary>
+/// Event arguments raised when an APC sequence begins, before any payload.
+/// </summary>
+/// <remarks>
+/// APC has no parameter grammar in front of its payload -- everything after the introducer is
+/// payload -- so unlike <see cref="DcsHookEventArgs"/> there is no identifier to report. What the
+/// sequence means is decided by its first payload character: 'G' is Kitty graphics.
+/// </remarks>
+public class ApcHookEventArgs : EventArgs
+{
+    /// <summary>
+    /// The character that introduced the sequence, which is always '_' for APC. Present so a
+    /// handler reading these events on their own can tell what it is looking at.
+    /// </summary>
+    public char Introducer { get; }
+
+    public ApcHookEventArgs(char introducer)
+    {
+        Introducer = introducer;
+    }
+}
+
+/// <summary>
+/// Event arguments for a chunk of an APC payload.
+/// </summary>
+public class ApcPutEventArgs : EventArgs
+{
+    /// <summary>
+    /// A slice of the payload. Only valid for the duration of the event -- a handler that needs to
+    /// keep it must copy it.
+    /// </summary>
+    public ReadOnlyMemory<char> Data { get; }
+
+    public ApcPutEventArgs(ReadOnlyMemory<char> data)
+    {
+        Data = data;
+    }
+}
+
+/// <summary>
+/// Event arguments raised when an APC sequence ends.
+/// </summary>
+public class ApcUnhookEventArgs : EventArgs
+{
+    /// <summary>
+    /// True when the sequence ended at a string terminator, false when it was abandoned. Half a
+    /// Kitty transmission is not worth decoding, so handlers use this to tell the two apart.
+    /// </summary>
+    public bool TerminatedCleanly { get; }
+
+    public ApcUnhookEventArgs(bool terminatedCleanly)
+    {
+        TerminatedCleanly = terminatedCleanly;
+    }
+}
+
+/// <summary>
 /// Event arguments raised when a DCS sequence ends.
 /// </summary>
 public class DcsUnhookEventArgs : EventArgs
