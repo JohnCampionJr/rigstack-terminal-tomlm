@@ -425,3 +425,270 @@ Passed: 847
 Failed: 0
 Skipped: 0
 ```
+
+# Kitty graphics protocol
+
+## Summary
+
+The Kitty graphics protocol (`ESC _ G <control> ; <base64> ESC \`) is decoded and placed in the
+buffer alongside Sixel. `icat`, `chafa -f kitty`, `timg -pk`, `yazi` and `image.nvim` draw pictures
+against a host that renders tiles.
+
+Kitty was unreachable for the same reason Sixel had been. `EscapeSequenceParser` collapsed SOS, PM
+and APC into one state that hunted for the terminator and discarded every byte, so the payload never
+reached anything that could decode it. APC now has a real streaming path -- `ApcHook`/`ApcPut`/
+`ApcUnhook` -- mirroring the DCS one, routed from `ESC _` only; `ESC ^` and `ESC X` keep the discard
+path they should have.
+
+Scope in: transmit (`a=t`), transmit-and-display (`a=T`), place (`a=p`), delete (`a=d`), query
+(`a=q`); chunked payloads; RGB, RGBA and PNG; zlib; cropping; cell-box scaling; cursor policy; quiet
+levels; and U+10EEEE Unicode placeholders. Out at the time: animation, z-index and overlapping
+placements — all three since done, and covered further down.
+
+## Placements, because a picture can now appear twice
+
+Sixel decodes a picture and shows it once, so a cell could reference the `TerminalImage` directly.
+Kitty transmits once under an id and places as often as it likes, so "which image" no longer answers
+"which pixels, and where". Cells reference an `ImagePlacement` instead -- an image, the source
+rectangle it takes, and the cell box it fills -- and `BufferCell.Image` stays as a computed
+`Placement?.Image` so existing readers compile untouched. Still two references per cell, so the
+struct does not grow.
+
+This immediately surfaced a real bug in the host renderer. `AppendImageRun` continued a run on
+`ReferenceEquals(current.Image, image)`, which is safe with one decode per placement and wrong the
+moment two appearances of one picture abut horizontally: they coalesce into a single strip and blit
+the wrong pixels into both halves. The predicate now compares the placement.
+
+## Two tile geometries, which are not the same formula
+
+`TryGetTileSource` has two modes, and collapsing them would have quietly resampled every existing
+Sixel image:
+
+- **Natural** -- fixed cell pitch, edge tiles clipped. Sixel always, and Kitty with no `c`/`r`.
+- **Stretched** -- the source rectangle divided proportionally across the cell box, which is what
+  `c`/`r` mean.
+
+A 1160px-wide image at a 14px cell needs 83 cells, and 83 x 14 = 1162. The two forms therefore
+disagree on *every* tile, not merely the last one: tile 0 is 14px wide naturally and 13px
+proportionally. Sixel constructs itself in natural mode, and
+`ImagePlacementTests.A_natural_placement_lays_tiles_exactly_where_the_image_does` pins the
+equivalence so the migration cannot drift.
+
+Stretched tile boundaries are computed from the tile index at both edges (`left` from `tileCol`,
+`right` from `tileCol + 1`) rather than as origin-plus-width, so adjacent tiles meet exactly with no
+seam or overlap from rounding.
+
+## Decisions worth recording
+
+- **File, temp-file and shared-memory transmission are refused, not implemented.** `t=f`/`t=t`/`t=s`
+  would have the terminal open a path named by the program it hosts, and a host generally holds more
+  privilege than its guest. They are answered with `ENOTSUP` rather than ignored, so a client falls
+  back instead of waiting. `t=d` is the only medium accepted.
+- **Base64 is accumulated as text and decoded once at `m=0`.** Decoding per chunk is only safe if
+  every chunk is a multiple of four characters, which the protocol does not promise.
+- **`a=q` places nothing.** It is the detection path, and `StringSequenceTests`
+  `Text_after_a_string_sequence_still_prints` was already the guard: it writes
+  `ESC_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA` and asserts row 0 is exactly `"OK"`. `AAAA` decodes to three
+  zero bytes -- a perfectly valid 1x1 RGB image -- so a naive decode-and-place breaks it.
+- **A separate `_apcPendingUnhook` flag.** The DCS path resolves a mid-payload `ESC` one character
+  late, since `ESC \` terminates and anything else abandons. Sharing that flag with APC would let a
+  DCS and an APC sequence interleaved cross-fire each other's unhook and close the wrong payload.
+- **A registry, because a Kitty image can be live with zero placements.** "Which images exist" was
+  answered by scanning cells, which cannot express a picture transmitted but not yet shown. Stored
+  images are held in insertion order under their own `MaxImageRegistryBytes` budget and evicted
+  oldest first.
+- **Crop rectangles are clamped, not rejected.** They come from another process; a `w` that runs off
+  the right edge should show the part that exists rather than nothing at all.
+- **Interlaced PNG is decoded.** This began as a refusal -- Adam7 is rare from these tools, and a
+  wrong picture is worse than a reported failure -- but the passes turned out to be worth doing
+  properly rather than declining. See the Adam7 note further down for what makes them awkward.
+- **Nothing in the decoders throws.** As with Sixel: `PngDecoder.TryDecode` wraps its whole body, and
+  `KittyCommand.Parse` cannot fail -- unknown keys are ignored, per spec. Note that a continuation
+  chunk carries only `m=1`, so the action defaults to transmit only when no action key was seen at
+  all; otherwise a chunk would read as a fresh transmission.
+- **Placeholder ids ride in the foreground colour, which fits.** `AttributeData` packs colour into 25
+  bits, so a 24-bit image id round-trips intact. Only a *direct* colour is read as an id -- a palette
+  index stays a colour, so red text does not summon image number one. The row/column combining marks
+  are consumed and ignored, which is correct for the contiguous rectangles these clients emit.
+- **A diacritic after a placeholder must not join the image cell.** `TryAppendToPreviousCell` would
+  otherwise append it to a cell holding a picture; a test caught it, and image cells now refuse
+  combining marks.
+
+## Files changed
+
+- `src/XTerm.NET/Parser/EscapeSequenceParser.cs` -- APC streaming state, separate pending-unhook flag
+- `src/XTerm.NET/Common/Types.cs` -- `ParserState.ApcString`
+- `src/XTerm.NET/Events/ParserEvents.cs` -- `ApcHookEventArgs`, `ApcPutEventArgs`, `ApcUnhookEventArgs`
+- `src/XTerm.NET/Graphics/ImagePlacement.cs` -- placement, both tile geometries, tile coverage
+- `src/XTerm.NET/Graphics/PngDecoder.cs` -- chunk walk, zlib, five scanline filters, colour types 0/2/3/4/6
+- `src/XTerm.NET/Graphics/KittyCommand.cs` -- control-data parsing, non-allocating
+- `src/XTerm.NET/Graphics/KittyTransmission.cs` -- chunk reassembly, zlib, raw and PNG decode
+- `src/XTerm.NET/Graphics/ImageRegistry.cs` -- id-keyed store with oldest-first eviction
+- `src/XTerm.NET/Buffer/BufferCell.cs` -- `Placement` storage, `Image` computed, equality by placement
+- `src/XTerm.NET/InputHandler.cs` -- APC dispatch, kitty actions, replies, U+10EEEE placeholders
+- `src/XTerm.NET/Terminal.cs` -- APC wiring, `DropImage`, nullable-buffer fixes
+- `src/XTerm.NET/Options/TerminalOptions.cs` -- `KittyGraphicsEnabled`, `MaxImageRegistryBytes`
+- `src/XTerm.NET/Assembly.cs` -- `InternalsVisibleTo` for the decoder tests
+- `src/XTerm.NET.Tests/Parser/ApcSequenceTests.cs`
+- `src/XTerm.NET.Tests/Graphics/ImagePlacementTests.cs`
+- `src/XTerm.NET.Tests/Graphics/PngDecoderTests.cs`
+- `src/XTerm.NET.Tests/Graphics/KittyGraphicsTests.cs`
+- `src/XTerm.NET.Tests/Graphics/KittyPlaceholderTests.cs`
+
+## Validation
+
+```powershell
+dotnet test src/XTerm.NET.slnx
+```
+
+```text
+Passed: 938
+Failed: 0
+Skipped: 0
+```
+
+End to end, through a real ConPTY into a `Terminal`:
+
+```text
+> chafa --format kitty --size 4x2 test.png
+  apc[0]  control="a=T,f=32,s=40,v=40,c=4,r=2,m=1,q=2"  payload=none
+  apc[1]  control="m=1"                                 payload=680 chars
+  ...
+  apc[14] control="m=0"                                 payload=none
+  15 APC sequences, 8536 base64 chars of payload
+  placement: 40x40px image, source (0,0) 40x40 -> 4 cols x 2 rows, Stretched
+  rows 0-1 hold 4 tiles each; nothing scrolled
+```
+
+One invocation covers chunking, `f=32`, `c`/`r` scaling, `q=2`, a control-only opening sequence and
+an empty terminating one. A 30x14 run reassembles 617 sequences and 418 KB of base64 into one
+280x280 image across 28x14 cells.
+# Kitty graphics: the rest of the protocol
+
+## Summary
+
+The Kitty graphics support added earlier covered transmit, place, delete, query and Unicode
+placeholders. This completes it: the full delete matrix, image numbers, placeholder tile diacritics,
+pixel offsets, interlaced PNG, draw order, and animation.
+
+## What each piece needed
+
+**The delete matrix.** Only `d=a` and `d=i` existed; the rest were refused for want of a way to find
+placements. Positional targets now find one through a cell and remove all of it -- deleting just the
+cells in the named row would leave a picture with a hole through it. The scrollback is deliberately
+not searched: a picture scrolled out of view is not "at row 3" however many rows above it happen to
+be. Two keys change meaning on a delete -- `x` and `y` are screen cells rather than a crop origin,
+and one-based where the buffer is zero-based -- and both conversions are pinned by tests that go red
+when either is dropped.
+
+**Image numbers.** `I=<number>` lets a client avoid managing an id space; the terminal picks the id
+and reports both halves back so the client can match the reply and then use the image.
+
+**Placeholder diacritics.** The marks stating a tile's row and column were consumed and ignored,
+which only works for a rectangle written in reading order. They are decoded now. The table is
+kitty's own `rowcolumn-diacritics.txt` taken verbatim: it was frozen against Unicode 6.0.0, and
+regenerating it against a newer Unicode would silently renumber every tile. Fixed while there: a
+placeholder run built a fresh placement per cell, which rendered identically and cost a blit per
+cell instead of one per strip.
+
+**Pixel offsets and Adam7.** `X`/`Y` shift a picture inside its first cell and, per the spec, are
+"not added to the number of rows/columns" -- so the box is unchanged and the overflow is clipped.
+That case cannot be expressed by a tile's size alone, since the leading tile is both narrower and
+shifted, so `TryGetTileLayout` returns the source rectangle and the destination offset together.
+
+The tile arithmetic became one uniform intersection -- the cell against the picture's span within
+the box, mapped back onto the source -- covering both scalings, cropping and the offsets. Scaling
+numerator and denominator by the same amount leaves the floor unchanged, so it reproduces the
+previous results exactly, which the 1160x870-over-14x15 guard confirms tile for tile.
+
+Adam7 is decoded rather than refused. Each pass is filtered against its own neighbours, so it cannot
+be read as one strided image, and an empty pass contributes no bytes at all -- counting one would
+shift every later pass and turn the rest of the picture into noise.
+
+**Draw order.** A cell keeps every placement covering it, ordered by z-index and, at equal z, by
+which was placed later. A NEGATIVE z means behind the TEXT, and there the cell keeps the glyph too --
+which needed the one exception to the rule that printing rebuilds a cell from scratch. Erasing still
+clears the lot; a picture showing through a cleared screen would be a leak.
+
+**`d=a` took the text with the pictures.** Deleting every placement reached the cells through the
+helper a resize uses, which blanks them. That is right for a picture in FRONT of the text, whose
+character was only ever the placeholder space it wrote when it landed, and wrong for a background
+one, whose character is whatever the user typed onto it. Every other delete target already got this
+right, so the two disagreed. The rule now lives on `BufferCell.RemoveImages` and all three paths --
+`d=a`, delete-by-placement and delete-by-image -- go through it. Invisible until something is drawn
+behind text, which is how it survived: every other image cell holds a space, and blanking a space
+changes nothing. Found by the walkthrough script, not by a test.
+
+**Overlap.** Covering a picture no longer destroys it, and this needed no mechanism at all once
+pictures became runs held by the line. Two pictures over the same columns are two runs; covering one
+has no way to modify it. A translucent picture blends over what it covers because what it covers is
+still there, and deleting the front one reveals the back one whole because the back one was never
+touched. The second was a bug rather than a missing feature, and it bit opaque pictures too.
+
+What the runs did need is an identity. A placement spanning eight rows is eight structs on eight
+lines, and a delete finds it through one cell of one of them -- so `LinePlacement.Serial` is what
+makes "the picture at this cell" mean all of it. That is the terminal's own identity and not Kitty's
+`p=`, which is the client's, may be zero, and may repeat.
+
+**Animation.** Frames, composition and control, both client-driven and terminal-driven.
+
+## Decisions worth recording
+
+- **The emulator still owns no timer.** It is driven entirely by `Write`, and starting a thread
+  inside a library that has none -- to repaint a host that already has a render loop -- would be the
+  wrong place for it. `Terminal.AdvanceAnimations(delta)` takes the elapsed time and returns whether
+  anything moved. It also makes the timing exactly testable: no sleeping, no tolerance windows, no
+  flake.
+- **Advancing loops rather than stepping once.** Several gaps can fall inside one slice when the
+  gaps are short or a repaint was late. Stepping once per call would silently make an animation run
+  at the host's frame rate instead of its own.
+- **An image's own pixels never change.** They are documented immutable and a host may have uploaded
+  them; the root frame starts as a reference to them and is copied away the moment a client edits
+  it. What moves is `CurrentPixels`, with `FrameSerial` changing alongside so a cached texture can
+  be spotted as stale without comparing pixels.
+- **Animated images are tracked in their own weakly-held list.** The host asks whether anything is
+  moving on every frame, so the answer has to cost nothing for a terminal showing text -- scanning
+  both buffers and the registry is the length of the scrollback, sixty times a second. Weak, or the
+  list would keep every animation's pixels alive for the life of the terminal.
+- **v unspecified means loop forever.** Reading it as "no loops" stops every animation after a
+  single pass, which is what the first run of the loop test caught.
+- **Y is read twice, as an int and as a uint.** It carries a pixel offset on a display command and a
+  32-bit RGBA background on a frame. Opaque red is 4278190335, which does not fit a signed int:
+  reading it as one saturates and silently turns the colour into something else.
+- **Frame composition refuses what it cannot answer.** A missing frame is ENOENT, a rectangle off
+  the edge EINVAL, and so is one frame onto itself with overlapping rectangles -- the result would
+  depend on the copy order, so there is no right answer to give.
+
+## Files changed
+
+- `src/XTerm.NET/Graphics/ImageAnimation.cs` -- frames, state, the clock, and the blend
+- `src/XTerm.NET/Graphics/PlaceholderDiacritics.cs` -- kitty's 297-mark table, verbatim
+- `src/XTerm.NET/Graphics/TerminalImage.cs` -- `Animation`, `CurrentPixels`, `FrameSerial`
+- `src/XTerm.NET/Graphics/ImagePlacement.cs` -- `ZIndex`, `Sequence`, offsets, `TryGetTileLayout`
+- `src/XTerm.NET/Graphics/CellImageLayer.cs` -- the overlap chain and its ordering rule
+- `src/XTerm.NET/Buffer/BufferCell.cs` -- `Below`, and the stack operations over it
+- `src/XTerm.NET/Graphics/PngDecoder.cs` -- Adam7
+- `src/XTerm.NET/Graphics/KittyCommand.cs` -- frame, animate and compose actions and their keys
+- `src/XTerm.NET/Graphics/ImageRegistry.cs` -- image numbers, removal by image
+- `src/XTerm.NET/InputHandler.cs` -- the delete matrix, diacritics, z-index, frames and composition
+- `src/XTerm.NET/Terminal.cs` -- placement selection, `AdvanceAnimations`, `HasRunningAnimations`
+- `src/XTerm.NET.Tests/Graphics/KittyDeleteTests.cs`
+- `src/XTerm.NET.Tests/Graphics/KittyZIndexTests.cs`
+- `src/XTerm.NET.Tests/Graphics/KittyAnimationTests.cs`
+
+## Validation
+
+```powershell
+dotnet test src/XTerm.NET.slnx
+```
+
+```text
+Passed: 1016
+Failed: 0
+Skipped: 0
+```
+
+Every guard added here was checked by breaking the code it guards and confirming the test goes red
+with a useful message. Three tests did not, and were rewritten rather than kept: a column delete
+over a two-column picture that swallowed an off-by-one, a gapless-frame test whose timing landed on
+the right frame either way, and a bitmap-cache test that never looked again after the refresh.

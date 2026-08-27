@@ -170,9 +170,10 @@ public class BufferLine : IEnumerable<BufferCell>
             _cells[i] = fillCell;
         }
 
-        // Erasing takes any picture in the span with it, the same as printing over one does.
+        // Erasing takes any picture in the span with it -- overlays included, unlike printing.
         if (_placements is not null)
-            SplitPlacementsOver(startCol, Math.Max(0, Math.Min(endCol, _length) - startCol));
+            SplitPlacementsOver(startCol, Math.Max(0, Math.Min(endCol, _length) - startCol),
+                                includeOverlays: true);
 
         Cache = null;
     }
@@ -456,6 +457,32 @@ public class BufferLine : IEnumerable<BufferCell>
     }
 
     /// <summary>
+    /// Removes every run matching a test, and releases any image no longer shown by this line.
+    /// </summary>
+    /// <remarks>
+    /// What Kitty's delete matrix removes things through. Deleting by image goes through
+    /// <see cref="RemoveImages"/> instead, which is the same operation stated the other way round;
+    /// this one answers "which RUNS", which is what selecting by placement id, z-index or position
+    /// needs.
+    /// </remarks>
+    /// <returns>True if anything went, which is also the signal that the line needs repainting.</returns>
+    internal bool RemovePlacements(Func<Graphics.LinePlacement, bool> predicate)
+    {
+        if (_placements is null)
+            return false;
+
+        if (_placements.RemoveAll(p => predicate(p)) == 0)
+            return false;
+
+        if (_placements.Count == 0)
+            _placements = null;
+
+        PruneImages();
+        Cache = null;
+        return true;
+    }
+
+    /// <summary>
     /// Splits any Sixel run covering <paramref name="column"/> around the text just written there.
     /// </summary>
     /// <remarks>
@@ -468,7 +495,7 @@ public class BufferLine : IEnumerable<BufferCell>
     /// <para>Guarded on a null field at every call site, so a line without pictures — which is
     /// nearly every line — pays a single test.</para>
     /// </remarks>
-    internal void SplitPlacementsAt(int column)
+    internal void SplitPlacementsAt(int column, bool includeOverlays = false)
     {
         if (_placements is null)
             return;
@@ -476,7 +503,13 @@ public class BufferLine : IEnumerable<BufferCell>
         for (int i = _placements.Count - 1; i >= 0; i--)
         {
             var placement = _placements[i];
-            if (placement.Kind != Graphics.PlacementKind.Sixel || !placement.Covers(column))
+            if (!placement.Covers(column))
+                continue;
+
+            // Printing only splits a Sixel, because only a Sixel is content. ERASING splits both:
+            // a cleared cell is blank, and a picture still showing through one would be a leak
+            // whichever protocol put it there.
+            if (!includeOverlays && placement.Kind != Graphics.PlacementKind.Sixel)
                 continue;
 
             _placements.RemoveAt(i);
@@ -499,13 +532,13 @@ public class BufferLine : IEnumerable<BufferCell>
     }
 
     /// <summary>Splits runs across a whole written span.</summary>
-    internal void SplitPlacementsOver(int column, int count)
+    internal void SplitPlacementsOver(int column, int count, bool includeOverlays = false)
     {
         if (_placements is null)
             return;
 
         for (int i = 0; i < count; i++)
-            SplitPlacementsAt(column + i);
+            SplitPlacementsAt(column + i, includeOverlays);
     }
 
     /// <summary>
