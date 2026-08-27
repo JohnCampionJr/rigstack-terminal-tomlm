@@ -315,7 +315,27 @@ public class InputHandler
 
         // Use MoveCursor to allow X to be one past the last column (pending wrap)
         _buffer.SetCursorRaw(_buffer.X + width, _buffer.Y);
+
+        RememberForRepeat(cell.CodePoint, cell.ClusterId);
     }
+
+    /// <summary>
+    /// Records the character just printed, and where it left the cursor, for <c>REP</c>.
+    /// </summary>
+    /// <remarks>
+    /// The cursor position is half the record. REP repeats the <em>preceding</em> graphic character,
+    /// so it only means anything while the cursor is still where that character left it -- once
+    /// something has moved it, there is no preceding character to speak of and REP does nothing.
+    /// Storing the position is what lets that be answered without having to invalidate this from
+    /// every cursor movement in the file, which is the version of this that rots.
+    /// </remarks>
+    private void RememberForRepeat(int codePoint, int clusterId)
+    {
+        _lastPrinted = (_buffer.Y + _buffer.YBase, _buffer.X, codePoint, clusterId);
+    }
+
+    /// <summary>The character last printed, and the cursor position it left behind. See <see cref="RememberForRepeat"/>.</summary>
+    private (int Row, int CursorCol, int CodePoint, int ClusterId)? _lastPrinted;
 
     /// <summary>
     /// Joins a second regional indicator to the one already at <paramref name="cellX"/>, making the pair a
@@ -418,6 +438,10 @@ public class InputHandler
             line.SetSingleWidthRun(_buffer.X, data[..take], _curAttr);
             _buffer.SetCursorRaw(_buffer.X + take, _buffer.Y);
 
+            // This path bypasses Print, so it has to keep REP's record itself -- otherwise the same
+            // input would repeat or not depending on which writer took it.
+            RememberForRepeat(data[take - 1], ClusterTable.None);
+
             data = data[take..];
         }
     }
@@ -478,6 +502,9 @@ public class InputHandler
 
             // SetCursorRaw, as Print uses, so X may land one past the last column pending a wrap.
             _buffer.SetCursorRaw(_buffer.X + take, _buffer.Y);
+
+            // As above: bypassing Print means keeping REP's record here as well.
+            RememberForRepeat(data[pos + take - 1], ClusterTable.None);
 
             pos += take;
             remaining -= take;
@@ -596,6 +623,11 @@ public class InputHandler
 
         line.SetCell(prevX, ref updatedCell);
 
+        // The preceding character is now the COMBINED one. Nothing moved the cursor, so REP still
+        // applies -- and repeating the base letter without its marks would be a different character
+        // from the one on screen.
+        _lastPrinted = (_buffer.Y + _buffer.YBase, _buffer.X, updatedCell.CodePoint, updatedCell.ClusterId);
+
         // Handle width changes
         if (newWidth != prevCell.Width)
         {
@@ -649,6 +681,10 @@ public class InputHandler
 
         switch (command)
         {
+            case CsiCommand.RepeatPrecedingCharacter:
+                RepeatPrecedingCharacter(parameters);
+                break;
+
             case CsiCommand.InsertChars:
                 InsertChars(parameters);
                 break;
@@ -2604,6 +2640,47 @@ public class InputHandler
                 line.Fill(emptyCell);
                 break;
         }
+    }
+
+    /// <summary>
+    /// REP (<c>CSI Pn b</c>) — repeat the preceding graphic character <c>Pn</c> times.
+    /// </summary>
+    /// <remarks>
+    /// <para>Some programs use it to compress runs of one character, so a terminal without it draws
+    /// a single character where a line of them belongs.</para>
+    /// <para>"Preceding" is meant literally: it repeats the last character printed, and only while
+    /// the cursor is still where printing it left the cursor. Anything that moved the cursor in
+    /// between — a control character, a cursor sequence, a scroll — means there is no preceding
+    /// character any more and this does nothing, which is what xterm does and is the only reading
+    /// that does not quietly invent a character out of whatever happens to be nearby.</para>
+    /// <para>The count is clamped to one screenful. It arrives from the hosted program, so
+    /// <c>CSI 2000000000 b</c> is a hang otherwise; and past a screenful the result is
+    /// indistinguishable anyway, since every repeat beyond that scrolls the earlier ones away.</para>
+    /// </remarks>
+    private void RepeatPrecedingCharacter(Params parameters)
+    {
+        if (_lastPrinted is not { } last)
+            return;
+
+        if (last.Row != _buffer.Y + _buffer.YBase || last.CursorCol != _buffer.X)
+            return;
+
+        // Math.Max as every other count in this file does it: a literal zero means one.
+        var requested = Math.Max(parameters.GetParam(0, 1), 1);
+        var count = Math.Min(requested, Math.Max(1, _terminal.Cols * _terminal.Rows));
+
+        var text = last.ClusterId != ClusterTable.None
+            ? ClusterTable.Get(last.ClusterId)
+            : CodePointText.Get(last.CodePoint);
+
+        if (string.IsNullOrEmpty(text))
+            return;
+
+        // Through Print rather than straight into the buffer: the repeated character wraps, scrolls
+        // and takes the current attributes exactly as it did the first time, and Print keeps the
+        // record above current so each repeat is itself the preceding character for the next.
+        for (var i = 0; i < count; i++)
+            Print(text);
     }
 
     private void InsertLines(Params parameters)
