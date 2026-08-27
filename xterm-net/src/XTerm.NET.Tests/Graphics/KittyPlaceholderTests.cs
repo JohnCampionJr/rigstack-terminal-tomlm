@@ -94,6 +94,46 @@ public class KittyPlaceholderTests
         }
     }
 
+    /// <summary>
+    /// The same picture shown twice is two rectangles, not one enormous one.
+    /// </summary>
+    /// <remarks>
+    /// A cell only continues the run before it while it falls inside the picture. Without that
+    /// bound, a second rectangle anywhere below the first kept the first one's origin, worked out
+    /// its tile as the distance from it, found that outside the image, and printed the placeholder
+    /// as a visible character -- so the second picture simply did not appear. It is the ordinary
+    /// case: a client showing one image in two places, or redrawing a thumbnail further down.
+    /// </remarks>
+    [Fact]
+    public void The_same_image_shown_lower_down_starts_a_new_rectangle()
+    {
+        var terminal = WithStoredImage(5);
+
+        terminal.Write(SelectImageId(5));
+        terminal.Write(Placeholder + Placeholder);
+        terminal.Write($"{Esc}[2;1H" + Placeholder + Placeholder);
+
+        terminal.Write($"{Esc}[6;1H" + Placeholder + Placeholder);
+
+        Assert.True(ImageAssertions.IsImageAt(terminal, 0, 5), "the second rectangle drew nothing");
+        Assert.Equal((0, 0), ImageAssertions.TileAt(terminal, 0, 5));
+        Assert.Equal((1, 0), ImageAssertions.TileAt(terminal, 1, 5));
+    }
+
+    /// <summary>The same, sideways: a second copy along the row is also its own rectangle.</summary>
+    [Fact]
+    public void The_same_image_shown_further_along_the_row_starts_a_new_rectangle()
+    {
+        var terminal = WithStoredImage(5);
+
+        terminal.Write(SelectImageId(5) + Placeholder + Placeholder);
+        terminal.Write($"{Esc}[1;5H" + Placeholder + Placeholder);
+
+        Assert.True(ImageAssertions.IsImageAt(terminal, 4, 0), "the second rectangle drew nothing");
+        Assert.Equal((0, 0), ImageAssertions.TileAt(terminal, 4, 0));
+        Assert.Equal((1, 0), ImageAssertions.TileAt(terminal, 5, 0));
+    }
+
     /// <summary>All the cells of one run show the same picture, so a host uploads it once.</summary>
     [Fact]
     public void Every_cell_of_a_run_shares_one_image()
