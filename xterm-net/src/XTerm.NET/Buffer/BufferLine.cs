@@ -10,6 +10,23 @@ namespace XTerm.Buffer;
 public class BufferLine : IEnumerable<BufferCell>
 {
     private BufferCell[] _cells;
+
+    /// <summary>
+    /// The picture runs shown on this line, or null — which is every line, in almost every session.
+    /// </summary>
+    /// <remarks>
+    /// This is where a picture LIVES. Cells carry no image data at all, so nothing about a picture
+    /// is destroyed by anything that truncates or overwrites cells, and a resize needs to do nothing
+    /// to images whatsoever: the renderer draws as much of each run as the current width allows.
+    /// </remarks>
+    private List<Graphics.LinePlacement>? _placements;
+
+    /// <summary>
+    /// The images those runs refer to, held strongly so they stay alive exactly as long as this line
+    /// does — so a picture scrolled off the end of the scrollback dies with the last line showing it,
+    /// with no eviction pass and nothing to keep in step with a buffer that scrolls.
+    /// </summary>
+    private List<Graphics.TerminalImage>? _images;
     private int _length;
     private bool _isWrapped;
     private LineAttribute _lineAttribute;
@@ -91,6 +108,13 @@ public class BufferLine : IEnumerable<BufferCell>
         if (index >= 0 && index < _length)
         {
             _cells[index] = cell;
+
+            // Printing over a Sixel picture replaces that part of it. With tiles in cells this
+            // happened for free; with runs it is explicit. One field test on the overwhelmingly
+            // common line, which has no pictures at all.
+            if (_placements is not null)
+                SplitPlacementsAt(index);
+
             Cache = null;
         }
     }
@@ -145,6 +169,11 @@ public class BufferLine : IEnumerable<BufferCell>
         {
             _cells[i] = fillCell;
         }
+
+        // Erasing takes any picture in the span with it, the same as printing over one does.
+        if (_placements is not null)
+            SplitPlacementsOver(startCol, Math.Max(0, Math.Min(endCol, _length) - startCol));
+
         Cache = null;
     }
 
@@ -246,40 +275,150 @@ public class BufferLine : IEnumerable<BufferCell>
     /// <returns>True if the line held any, which is also the signal that it needs repainting.</returns>
     public bool ClearImages()
     {
-        bool found = false;
-        for (int i = 0; i < _length; i++)
-        {
-            if (_cells[i].Image is null)
-                continue;
+        if (_placements is null && _images is null)
+            return false;
 
-            _cells[i].Image = null;
-            _cells[i].ImageTile = 0;
-            _cells[i].Content = " ";
-            _cells[i].Width = 1;
-            _cells[i].CodePoint = 0x20;
-            found = true;
-        }
-
-        if (found)
-            Cache = null;
-        return found;
+        // Nothing to clean up in the cells — they never held anything. Releasing the strong
+        // references is what actually frees the pixels.
+        _placements = null;
+        _images = null;
+        Cache = null;
+        return true;
     }
 
     /// <summary>
-    /// Whether any cell on this line shows part of an image. Cheap enough for a renderer to ask
-    /// once per row rather than testing every cell it draws.
+    /// Whether this line shows any part of a picture. One field test — a renderer can ask per row.
     /// </summary>
-    public bool HasImages
+    public bool HasImages => _placements is { Count: > 0 };
+
+    /// <summary>The picture runs on this line, in the order they were placed.</summary>
+    public IReadOnlyList<Graphics.LinePlacement> Placements
+        => (IReadOnlyList<Graphics.LinePlacement>?)_placements ?? Array.Empty<Graphics.LinePlacement>();
+
+    /// <summary>
+    /// The run covering <paramref name="column"/>, if any.
+    /// </summary>
+    /// <remarks>
+    /// This is what replaces asking a CELL about its image. A cell is a struct with no idea which
+    /// line or column it came from, so it cannot answer for a run anchored to both — the question
+    /// can only be asked here. Linear over the runs, of which a line has one or a handful.
+    /// </remarks>
+    public bool TryGetPlacementAt(int column, out Graphics.LinePlacement placement)
     {
-        get
+        if (_placements is not null)
         {
-            for (int i = 0; i < _length; i++)
+            for (int i = 0; i < _placements.Count; i++)
             {
-                if (_cells[i].Image is not null)
+                if (_placements[i].Covers(column))
+                {
+                    placement = _placements[i];
                     return true;
+                }
             }
-            return false;
         }
+
+        placement = default;
+        return false;
+    }
+
+    /// <summary>
+    /// The image shown at <paramref name="column"/>, if any.
+    /// </summary>
+    /// <remarks>
+    /// Resolved from the line's own strong references, so a caller gets the picture without knowing
+    /// that ids exist and without touching a weak table it might race.
+    /// </remarks>
+    public bool TryGetImageAt(int column, out Graphics.TerminalImage image)
+    {
+        if (TryGetPlacementAt(column, out var placement) && _images is not null)
+        {
+            foreach (var held in _images)
+            {
+                if (held.Id == placement.ImageId)
+                {
+                    image = held;
+                    return true;
+                }
+            }
+        }
+
+        image = null!;
+        return false;
+    }
+
+    /// <summary>Adds a run to this line and takes ownership of the image it shows.</summary>
+    internal void AddPlacement(Graphics.LinePlacement placement, Graphics.TerminalImage image)
+    {
+        if (placement.Cols <= 0)
+            return;
+
+        _placements ??= new List<Graphics.LinePlacement>(1);
+        _placements.Add(placement);
+
+        _images ??= new List<Graphics.TerminalImage>(1);
+        foreach (var held in _images)
+        {
+            if (ReferenceEquals(held, image))
+            {
+                Cache = null;
+                return;
+            }
+        }
+
+        _images.Add(image);
+        Cache = null;
+    }
+
+    /// <summary>
+    /// Splits any Sixel run covering <paramref name="column"/> around the text just written there.
+    /// </summary>
+    /// <remarks>
+    /// <para>Sixel semantics: printing replaces that part of the picture. With tiles in cells this
+    /// happened for free, because the write overwrote the cell; with runs it has to be done on
+    /// purpose. The run becomes the fragments either side, each with its source rectangle narrowed
+    /// to match, so the rest of the picture survives a character landing in the middle of it.</para>
+    /// <para>Kitty runs are left alone — there the z-index decides what is on top, and text never
+    /// modifies a placement.</para>
+    /// <para>Guarded on a null field at every call site, so a line without pictures — which is
+    /// nearly every line — pays a single test.</para>
+    /// </remarks>
+    internal void SplitPlacementsAt(int column)
+    {
+        if (_placements is null)
+            return;
+
+        for (int i = _placements.Count - 1; i >= 0; i--)
+        {
+            var placement = _placements[i];
+            if (placement.Kind != Graphics.PlacementKind.Sixel || !placement.Covers(column))
+                continue;
+
+            _placements.RemoveAt(i);
+
+            var before = placement.TruncatedBefore(column);
+            if (before.Cols > 0)
+                _placements.Insert(i, before);
+
+            var after = placement.TruncatedAfter(column);
+            if (after.Cols > 0)
+                _placements.Insert(before.Cols > 0 ? i + 1 : i, after);
+        }
+
+        if (_placements.Count == 0)
+        {
+            _placements = null;
+            _images = null;
+        }
+    }
+
+    /// <summary>Splits runs across a whole written span.</summary>
+    internal void SplitPlacementsOver(int column, int count)
+    {
+        if (_placements is null)
+            return;
+
+        for (int i = 0; i < count; i++)
+            SplitPlacementsAt(column + i);
     }
 
     /// <summary>
@@ -303,6 +442,13 @@ public class BufferLine : IEnumerable<BufferCell>
         var newLine = new BufferLine(_length);
         newLine._isWrapped = _isWrapped;
         newLine._lineAttribute = _lineAttribute;
+
+        // The runs are the picture, so a clone that skipped them would silently lose it.
+        if (_placements is not null)
+        {
+            newLine._placements = new List<Graphics.LinePlacement>(_placements);
+            newLine._images = _images is null ? null : new List<Graphics.TerminalImage>(_images);
+        }
         for (int i = 0; i < _length; i++)
         {
             newLine._cells[i] = _cells[i];

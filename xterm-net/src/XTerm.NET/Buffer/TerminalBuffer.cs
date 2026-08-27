@@ -332,14 +332,26 @@ public class TerminalBuffer
     /// </summary>
     public void Resize(int newCols, int newRows)
     {
-        // Images do not survive a change of width. Reflow re-wraps a logical line by copying
-        // ranges of cells between lines, and the tiles would be carried along individually and
-        // reassemble as a shuffled mosaic -- each piece of the picture intact, in the wrong place.
-        // Dropping them is what the user sees anyway when a terminal is made narrower, and it is
-        // honest about it. A change of height alone moves whole lines and leaves images be.
+        // Only a wrap chain drops its pictures now. Reflow re-wraps a logical line by copying
+        // ranges of cells between lines, and a run anchored to a column would end up describing
+        // content that is no longer there.
+        //
+        // Every other width change is free. A run keeps its NATURAL width and the renderer draws as
+        // much of it as the line allows, so narrowing shows less of a picture and widening shows
+        // more — with nothing destroyed and nothing to restore. Dropping every image on any width
+        // change, as this did, lost pictures on the most common resize there is.
         if (newCols != _cols)
         {
-            ClearImages();
+            for (int i = 0; i < _lines.Length; i++)
+            {
+                var line = _lines[i];
+                if (line is null || !line.HasImages)
+                    continue;
+
+                var next = i + 1 < _lines.Length ? _lines[i + 1] : null;
+                if (line.IsWrapped || next is { IsWrapped: true })
+                    line.ClearImages();
+            }
         }
 
         var nullCell = BufferCell.Space;

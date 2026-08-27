@@ -555,10 +555,12 @@ public class Terminal
                 var line = buffer.Lines[i];
                 if (line is null)
                     continue;
+                if (!line.HasImages)
+                    continue;
+
                 for (int x = 0; x < line.Length; x++)
                 {
-                    var image = line[x].Image;
-                    if (image is not null)
+                    if (line.TryGetImageAt(x, out var image))
                         live.Add(image);
                 }
             }
@@ -570,27 +572,23 @@ public class Terminal
         for (int i = 0; i < buffer.Lines.Length; i++)
         {
             var line = buffer.Lines[i];
-            if (line is null)
+            if (line is null || !line.HasImages)
                 continue;
 
-            bool touched = false;
-            for (int x = 0; x < line.Length; x++)
+            var showsDoomed = false;
+            foreach (var placement in line.Placements)
             {
-                var cell = line[x];
-                if (cell.Image is null || !doomed.Contains(cell.Image))
-                    continue;
-
-                cell.Image = null;
-                cell.ImageTile = 0;
-                cell.Content = " ";
-                cell.Width = 1;
-                cell.CodePoint = 0x20;
-                line.SetCell(x, ref cell);
-                touched = true;
+                if (line.TryGetImageAt(placement.Column, out var image) && doomed.Contains(image))
+                {
+                    showsDoomed = true;
+                    break;
+                }
             }
 
-            if (touched)
-                line.Cache = null;
+            // Dropping the line's runs is what releases the pixels. There is nothing in the cells to
+            // clean up, and no ownership left to recompute afterwards.
+            if (showsDoomed)
+                line.ClearImages();
         }
     }
 

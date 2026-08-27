@@ -44,21 +44,25 @@ public class SixelPlacementTests
         var terminal = Fresh();
         WriteSixel(terminal);
 
-        var image = Cell(terminal, 0, 0).Image;
+        var image = ImageAssertions.ImageAt(terminal, 0, 0);
         Assert.NotNull(image);
         Assert.Equal(2, image!.Cols);
         Assert.Equal(4, image.Rows);
 
+        // One run per line, each covering the picture's full width and carrying its own slice of
+        // the source — which is what the per-cell tile grid said, expressed once per row instead of
+        // once per cell.
         for (int row = 0; row < 4; row++)
         {
-            for (int col = 0; col < 2; col++)
-            {
-                var cell = Cell(terminal, col, row);
-                Assert.True(ReferenceEquals(cell.Image, image),
-                    $"cell ({col},{row}) should show part of the image");
-                Assert.Equal(col, cell.ImageCol);
-                Assert.Equal(row, cell.ImageRow);
-            }
+            var placement = ImageAssertions.PlacementAt(terminal, 0, row);
+            Assert.NotNull(placement);
+            Assert.True(ReferenceEquals(ImageAssertions.ImageAt(terminal, 0, row), image),
+                $"row {row} should show part of the image");
+
+            Assert.Equal(0, placement!.Value.Column);
+            Assert.Equal(2, placement.Value.Cols);
+            Assert.Equal(0, placement.Value.SrcX);
+            Assert.Equal(row * terminal.Options.CellHeightPixels, placement.Value.SrcY);
         }
     }
 
@@ -68,8 +72,8 @@ public class SixelPlacementTests
         var terminal = Fresh();
         WriteSixel(terminal);
 
-        Assert.Null(Cell(terminal, 2, 0).Image);
-        Assert.Null(Cell(terminal, 0, 4).Image);
+        Assert.Null(ImageAssertions.ImageAt(terminal, 2, 0));
+        Assert.Null(ImageAssertions.ImageAt(terminal, 0, 4));
     }
 
     [Fact]
@@ -79,9 +83,9 @@ public class SixelPlacementTests
         terminal.Write($"{Esc}[3;6H"); // row 3, column 6, one-based
         WriteSixel(terminal);
 
-        Assert.True(ReferenceEquals(Cell(terminal, 5, 2).Image, Cell(terminal, 6, 2).Image));
-        Assert.NotNull(Cell(terminal, 5, 2).Image);
-        Assert.Null(Cell(terminal, 4, 2).Image);
+        Assert.True(ReferenceEquals(ImageAssertions.ImageAt(terminal, 5, 2), ImageAssertions.ImageAt(terminal, 6, 2)));
+        Assert.NotNull(ImageAssertions.ImageAt(terminal, 5, 2));
+        Assert.Null(ImageAssertions.ImageAt(terminal, 4, 2));
     }
 
     [Fact]
@@ -129,8 +133,8 @@ public class SixelPlacementTests
         terminal.Write($"{Esc}[3;6H");
         WriteSixel(terminal);
 
-        Assert.NotNull(Cell(terminal, 0, 0).Image);
-        Assert.Null(Cell(terminal, 5, 2).Image);
+        Assert.NotNull(ImageAssertions.ImageAt(terminal, 0, 0));
+        Assert.Null(ImageAssertions.ImageAt(terminal, 5, 2));
         Assert.Equal(5, terminal.Buffer.X);
         Assert.Equal(2, terminal.Buffer.Y);
     }
@@ -144,7 +148,7 @@ public class SixelPlacementTests
         terminal.Write($"{Esc}[3;6H");
         WriteSixel(terminal);
 
-        Assert.NotNull(Cell(terminal, 5, 2).Image);
+        Assert.NotNull(ImageAssertions.ImageAt(terminal, 5, 2));
     }
 
     /// <summary>
@@ -160,9 +164,9 @@ public class SixelPlacementTests
         // Four image rows plus the cursor's own row need five: the screen scrolled until they fit.
         for (int row = 0; row < 4; row++)
         {
-            var cell = Cell(terminal, 0, row);
-            Assert.NotNull(cell.Image);
-            Assert.Equal(row, cell.ImageRow);
+            var placement = ImageAssertions.PlacementAt(terminal, 0, row);
+            Assert.NotNull(placement);
+            Assert.Equal(row * terminal.Options.CellHeightPixels, placement!.Value.SrcY);
         }
 
         Assert.Equal(0, terminal.Buffer.X);
@@ -177,8 +181,8 @@ public class SixelPlacementTests
 
         // Three rows of screen, four of image, and the cursor still needs a row of its own below
         // it -- so the picture scrolled up until its last two rows and the cursor fit.
-        Assert.Equal(2, Cell(terminal, 0, 0).ImageRow);
-        Assert.Equal(3, Cell(terminal, 0, 1).ImageRow);
+        Assert.Equal(2 * terminal.Options.CellHeightPixels, ImageAssertions.PlacementAt(terminal, 0, 0)!.Value.SrcY);
+        Assert.Equal(3 * terminal.Options.CellHeightPixels, ImageAssertions.PlacementAt(terminal, 0, 1)!.Value.SrcY);
         Assert.Equal(2, terminal.Buffer.Y);
     }
 
@@ -190,8 +194,8 @@ public class SixelPlacementTests
         WriteSixel(terminal);
 
         // Pinned at the top, so the first rows are the ones that survive.
-        Assert.Equal(0, Cell(terminal, 0, 0).ImageRow);
-        Assert.Equal(2, Cell(terminal, 0, 2).ImageRow);
+        Assert.Equal(0 * terminal.Options.CellHeightPixels, ImageAssertions.PlacementAt(terminal, 0, 0)!.Value.SrcY);
+        Assert.Equal(2 * terminal.Options.CellHeightPixels, ImageAssertions.PlacementAt(terminal, 0, 2)!.Value.SrcY);
     }
 
     [Fact]
@@ -201,8 +205,8 @@ public class SixelPlacementTests
         terminal.Write($"{Esc}[1;6H"); // one column from the right edge
         WriteSixel(terminal);
 
-        Assert.NotNull(Cell(terminal, 5, 0).Image);
-        Assert.Equal(0, Cell(terminal, 5, 0).ImageCol);
+        Assert.NotNull(ImageAssertions.ImageAt(terminal, 5, 0));
+        Assert.Equal(0 * terminal.Options.CellWidthPixels, ImageAssertions.PlacementAt(terminal, 5, 0)!.Value.SrcX);
     }
 
     /// <summary>
@@ -245,8 +249,8 @@ public class SixelPlacementTests
         WriteSixel(terminal);
         WriteSixel(terminal);
 
-        var first = Cell(terminal, 0, 0).Image;
-        var second = Cell(terminal, 0, 4).Image;
+        var first = ImageAssertions.ImageAt(terminal, 0, 0);
+        var second = ImageAssertions.ImageAt(terminal, 0, 4);
 
         Assert.NotNull(first);
         Assert.NotNull(second);
