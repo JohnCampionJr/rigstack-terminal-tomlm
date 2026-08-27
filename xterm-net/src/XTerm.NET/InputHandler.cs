@@ -854,18 +854,22 @@ public class InputHandler
             if (line is null)
                 break;
 
-            for (int tileCol = 0; tileCol < image.Cols; tileCol++)
+            // One run per line instead of a cell per tile. The line takes ownership of the image,
+            // and Cols is the picture's NATURAL width — deliberately NOT clipped to the terminal, so
+            // a window widened later reveals more of the picture rather than having lost it.
+            if (image.TryGetTileSource(0, tileRow, out _, out var srcY, out _, out var srcHeight))
             {
-                var col = startCol + tileCol;
-                if (col >= _terminal.Cols)
-                    break;
-
-                var cell = new BufferCell(" ", 1, _curAttr)
-                {
-                    Image = image,
-                    ImageTile = BufferCell.PackTile(tileCol, tileRow)
-                };
-                line.SetCell(col, ref cell);
+                line.AddPlacement(
+                    new Graphics.LinePlacement(
+                        image.Id,
+                        startCol,
+                        image.Cols,
+                        srcX: 0,
+                        srcY: srcY,
+                        srcWidth: image.PixelWidth,
+                        srcHeight: srcHeight,
+                        kind: Graphics.PlacementKind.Sixel),
+                    image);
             }
 
             lastRowDrawn = row;

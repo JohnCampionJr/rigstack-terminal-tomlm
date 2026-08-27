@@ -332,14 +332,26 @@ public class TerminalBuffer
     /// </summary>
     public void Resize(int newCols, int newRows)
     {
-        // Images do not survive a change of width. Reflow re-wraps a logical line by copying
-        // ranges of cells between lines, and the tiles would be carried along individually and
-        // reassemble as a shuffled mosaic -- each piece of the picture intact, in the wrong place.
-        // Dropping them is what the user sees anyway when a terminal is made narrower, and it is
-        // honest about it. A change of height alone moves whole lines and leaves images be.
+        // Only a wrap chain drops its pictures now. Reflow re-wraps a logical line by copying
+        // ranges of cells between lines, and a run anchored to a column would end up describing
+        // content that is no longer there.
+        //
+        // Every other width change is free. A run keeps its NATURAL width and the renderer draws as
+        // much of it as the line allows, so narrowing shows less of a picture and widening shows
+        // more — with nothing destroyed and nothing to restore. Dropping every image on any width
+        // change, as this did, lost pictures on the most common resize there is.
         if (newCols != _cols)
         {
-            ClearImages();
+            for (int i = 0; i < _lines.Length; i++)
+            {
+                var line = _lines[i];
+                if (line is null || !line.HasImages)
+                    continue;
+
+                var next = i + 1 < _lines.Length ? _lines[i + 1] : null;
+                if (line.IsWrapped || next is { IsWrapped: true })
+                    line.ClearImages();
+            }
         }
 
         var nullCell = BufferCell.Space;
@@ -366,7 +378,14 @@ public class TerminalBuffer
             _lines.Push(new BufferLine(newCols, nullCell));
         }
 
+        // Growing the window pulls scrollback lines back into view, which is this clamp forcing
+        // YBase down. The CURSOR has to ride along: its position is YBase + Y, so every line YBase
+        // gives back must be added to Y, or the cursor slides UP the content by that much. A window
+        // dragged taller then has the shell's SIGWINCH redraws stamping prompts down through
+        // whatever the cursor slid over, one line per resize event.
+        var yBaseBefore = _yBase;
         _yBase = Math.Min(_yBase, Math.Max(0, _lines.Length - newRows));
+        _y += yBaseBefore - _yBase;
         _yDisp = Math.Clamp(_yDisp, 0, _yBase);
 
         if (_lines.Length > 0)
@@ -410,7 +429,40 @@ public class TerminalBuffer
         // the lower bound with it meant a negative cursor -- which SetCursorRaw exists to allow --
         // survived the resize and left the buffer reporting an out-of-bounds position.
         _x = Math.Clamp(_x, 0, Math.Max(0, newCols - 1));
-        _y = Math.Clamp(_y, 0, Math.Max(0, newRows - 1));
+        // The mirror case. A cursor below the new bottom is NOT simply clamped into place -- its
+        // overflow is pushed into scrollback, so the cursor stays on the LINE it was on. Clamping
+        // alone moved the cursor onto earlier content: shrink a window with a prompt at row 22 down
+        // to ten rows and the cursor landed on absolute row 9, where the next write destroyed
+        // whatever lived there.
+        // Floored, because newRows can be zero: a bare "newRows - 1" is -1 there, which makes the
+        // test true for any cursor and inflates the overflow by one, scrolling the buffer during a
+        // resize that has no viewport at all.
+        var newBottom = Math.Max(0, newRows - 1);
+
+        // The screen is the last `rows` lines of the buffer, so a shrink has to move the difference
+        // into scrollback. Shifting only enough to bring the cursor on screen left lines stranded
+        // BELOW the screen, where scrolling cannot reach them -- the viewport tops out at _yBase.
+        // So shift as far toward the tail as there is room for, stopping at the cursor: the cursor
+        // must not end up above the screen, and keeping it on its line is what this is all for.
+        if (_y > newBottom)
+        {
+            var overflow = _y - newBottom;
+            var room = Math.Max(0, _lines.Length - newRows - _yBase);
+            var wasFollowing = _yDisp == _yBase;
+
+            // At least enough to bring the cursor back on screen. But when the viewport was
+            // following the tail, take all the room there is -- bounded by the cursor, which must
+            // not end up above the screen. Shifting the bare minimum left lines stranded BELOW the
+            // screen, where scrolling cannot reach them, because the viewport tops out at _yBase.
+            var shift = Math.Min(room, wasFollowing ? _y : overflow);
+
+            _yBase += shift;
+            _y -= shift;
+            if (wasFollowing)
+                _yDisp = _yBase;
+        }
+
+        _y = Math.Clamp(_y, 0, newBottom);
         SavedCursorState.X = Math.Clamp(SavedCursorState.X, 0, Math.Max(0, newCols - 1));
         SavedCursorState.Y = Math.Max(SavedCursorState.Y, 0);
 

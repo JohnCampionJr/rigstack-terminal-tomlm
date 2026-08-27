@@ -1,3 +1,4 @@
+using System.Linq;
 using XTerm.Buffer;
 using XTerm.Graphics;
 using XTerm.Options;
@@ -48,10 +49,12 @@ public class ImageCellLifetimeTests
             var line = terminal.Buffer.Lines[i];
             if (line is null)
                 continue;
-            for (int x = 0; x < line.Length; x++)
+            // Counted from the runs and clamped to the line's width, so this reports what is
+            // VISIBLE — anything wider is hidden by the window, not destroyed.
+            foreach (var placement in line.Placements)
             {
-                if (line[x].Image is not null)
-                    count++;
+                var end = Math.Min(placement.EndColumn, line.Length);
+                count += Math.Max(0, end - placement.Column);
             }
         }
         return count;
@@ -65,13 +68,12 @@ public class ImageCellLifetimeTests
 
         terminal.Write($"{Esc}[1;1HX");
 
-        var cell = Cell(terminal, 0, 0);
-        Assert.Null(cell.Image);
-        Assert.Equal("X", cell.Content);
+        Assert.Null(ImageAssertions.ImageAt(terminal, 0, 0));
+        Assert.Equal("X", Cell(terminal, 0, 0).Content);
 
         // and only that cell
-        Assert.NotNull(Cell(terminal, 1, 0).Image);
-        Assert.NotNull(Cell(terminal, 0, 1).Image);
+        Assert.NotNull(ImageAssertions.ImageAt(terminal, 1, 0));
+        Assert.NotNull(ImageAssertions.ImageAt(terminal, 0, 1));
     }
 
     [Fact]
@@ -82,9 +84,9 @@ public class ImageCellLifetimeTests
 
         terminal.Write($"{Esc}[1;1H{Esc}[K");
 
-        Assert.Null(Cell(terminal, 0, 0).Image);
-        Assert.Null(Cell(terminal, 1, 0).Image);
-        Assert.NotNull(Cell(terminal, 0, 1).Image);
+        Assert.Null(ImageAssertions.ImageAt(terminal, 0, 0));
+        Assert.Null(ImageAssertions.ImageAt(terminal, 1, 0));
+        Assert.NotNull(ImageAssertions.ImageAt(terminal, 0, 1));
     }
 
     [Fact]
@@ -106,8 +108,8 @@ public class ImageCellLifetimeTests
 
         terminal.Write($"{Esc}[1;1H{Esc}[1X");
 
-        Assert.Null(Cell(terminal, 0, 0).Image);
-        Assert.NotNull(Cell(terminal, 1, 0).Image);
+        Assert.Null(ImageAssertions.ImageAt(terminal, 0, 0));
+        Assert.NotNull(ImageAssertions.ImageAt(terminal, 1, 0));
     }
 
     [Fact]
@@ -126,7 +128,7 @@ public class ImageCellLifetimeTests
     {
         var terminal = Fresh();
         WriteSixel(terminal);
-        var image = Cell(terminal, 0, 0).Image;
+        var image = ImageAssertions.ImageAt(terminal, 0, 0);
         Assert.NotNull(image);
 
         // The absolute line the top of the image went onto. Scrolling moves the viewport over the
@@ -139,13 +141,14 @@ public class ImageCellLifetimeTests
         Assert.Equal(2, terminal.Buffer.YBase - topLine);
 
         // Nothing copied the tiles anywhere: the same line object still holds them, unchanged.
-        var moved = terminal.Buffer.Lines[topLine]![0];
-        Assert.True(ReferenceEquals(moved.Image, image),
-            "the tile did not travel with its line");
-        Assert.Equal(0, moved.ImageRow);
+        var moved = terminal.Buffer.Lines[topLine]!;
+        Assert.True(moved.TryGetImageAt(0, out var movedImage) && ReferenceEquals(movedImage, image),
+            "the run did not travel with its line");
+        Assert.True(moved.TryGetPlacementAt(0, out var movedPlacement));
+        Assert.Equal(0, movedPlacement.SrcY);
 
         // Which puts the top of the picture two rows higher on screen than it was.
-        Assert.True(ReferenceEquals(Cell(terminal, 0, -2).Image, image));
+        Assert.True(ReferenceEquals(ImageAssertions.ImageAt(terminal, 0, -2), image));
         Assert.Equal(8, ImageCellCount(terminal));
     }
 
@@ -168,19 +171,48 @@ public class ImageCellLifetimeTests
     }
 
     /// <summary>
-    /// Reflow re-wraps a logical line by copying ranges of cells between lines, so tiles carried
-    /// through it would reassemble as a shuffled mosaic -- every piece intact, in the wrong place.
+    /// A change of width keeps the pictures.
     /// </summary>
+    /// <remarks>
+    /// <para>This test used to assert the opposite, and the reasoning it carried — reflow re-wraps a
+    /// logical line by copying ranges of cells, so tiles carried through would reassemble as a
+    /// shuffled mosaic — was right about reflow and wrong about the blast radius. It applied to lines
+    /// that actually re-wrap, and the code dropped every picture in the buffer on any width change at
+    /// all, including widening a window, which is the most common resize there is.</para>
+    /// <para>With a picture held as a run on its line rather than tiles in cells, there is nothing to
+    /// shuffle: the renderer draws as much of the run as the width allows. Narrowing shows less,
+    /// widening shows more, and the wrap-chain case is still dropped, on its own, below.</para>
+    /// </remarks>
     [Fact]
-    public void A_change_of_width_drops_the_images()
+    public void A_change_of_width_keeps_the_images()
     {
         var terminal = Fresh();
         WriteSixel(terminal);
         Assert.Equal(8, ImageCellCount(terminal));
 
         terminal.Resize(15, 10);
+        Assert.Equal(8, ImageCellCount(terminal));
 
-        Assert.Equal(0, ImageCellCount(terminal));
+        terminal.Resize(40, 10);
+        Assert.Equal(8, ImageCellCount(terminal));
+    }
+
+    /// <summary>
+    /// Narrowing past a picture hides the overhang rather than destroying it, and widening brings it
+    /// back — because a run keeps its natural width and only the drawing is clipped.
+    /// </summary>
+    [Fact]
+    public void Narrowing_past_a_picture_hides_it_and_widening_restores_it()
+    {
+        var terminal = Fresh();
+        WriteSixel(terminal);
+        Assert.Equal(8, ImageCellCount(terminal));
+
+        terminal.Resize(1, 10);          // the picture is two columns wide
+        Assert.Equal(4, ImageCellCount(terminal));
+
+        terminal.Resize(20, 10);
+        Assert.Equal(8, ImageCellCount(terminal));
     }
 
     /// <summary>A change of height moves whole lines, so there is nothing to be confused about.</summary>
@@ -219,15 +251,15 @@ public class ImageCellLifetimeTests
         var terminal = Fresh(o => o.MaxImageBytes = 200);
 
         WriteSixel(terminal);
-        var first = Cell(terminal, 0, 0).Image;
+        var first = ImageAssertions.ImageAt(terminal, 0, 0);
         Assert.NotNull(first);
 
         WriteSixel(terminal);
-        var second = Cell(terminal, 0, 4).Image;
+        var second = ImageAssertions.ImageAt(terminal, 0, 4);
         Assert.NotNull(second);
 
-        Assert.Null(Cell(terminal, 0, 0).Image);
-        Assert.True(ReferenceEquals(Cell(terminal, 0, 4).Image, second),
+        Assert.Null(ImageAssertions.ImageAt(terminal, 0, 0));
+        Assert.True(ReferenceEquals(ImageAssertions.ImageAt(terminal, 0, 4), second),
             "the newest image should be the one that survives");
     }
 
@@ -239,34 +271,107 @@ public class ImageCellLifetimeTests
         WriteSixel(terminal);
         WriteSixel(terminal);
 
-        Assert.NotNull(Cell(terminal, 0, 0).Image);
-        Assert.NotNull(Cell(terminal, 0, 4).Image);
+        Assert.NotNull(ImageAssertions.ImageAt(terminal, 0, 0));
+        Assert.NotNull(ImageAssertions.ImageAt(terminal, 0, 4));
     }
 
     /// <summary>
-    /// Two cells showing different pieces of the same picture are not interchangeable, however
-    /// alike their text is. Renderers coalesce adjacent cells into one run by comparing them.
+    /// Evicting one picture leaves another that shares its line.
     /// </summary>
+    /// <remarks>
+    /// Caught in review. Dropping the whole line because one of its pictures was over budget took
+    /// the others with it — more destructive than the per-cell code this replaced, and it evicted
+    /// images the sweep had just decided to keep.
+    /// </remarks>
     [Fact]
-    public void Cells_showing_different_tiles_are_not_equal()
+    public void Evicting_one_image_leaves_another_on_the_same_line()
     {
-        var terminal = Fresh();
+        // Two 192-byte images; a 400 byte budget holds both, then a third forces one out.
+        var terminal = Fresh(o => o.MaxImageBytes = 400);
+
+        WriteSixel(terminal);
+        terminal.Write($"{Esc}[1;5H");
         WriteSixel(terminal);
 
-        var left = Cell(terminal, 0, 0);
-        var right = Cell(terminal, 1, 0);
+        var line = terminal.Buffer.Lines[terminal.Buffer.YBase]!;
+        Assert.Equal(2, line.Images.Count);
+        var newer = line.Images[1];
 
-        Assert.Equal(left.Content, right.Content);
-        Assert.NotEqual(left, right);
+        // A third image pushes past the budget, dooming the oldest — which shares this line.
+        terminal.Write($"{Esc}[10;1H");
+        WriteSixel(terminal);
+
+        Assert.True(ReferenceEquals(newer, line.Images.SingleOrDefault()),
+            "the line's other picture should survive its neighbour being evicted");
     }
 
+    /// <summary>
+    /// Printing over one picture releases it, while another on the same line stays.
+    /// </summary>
+    /// <remarks>
+    /// Caught in review. Ownership is derived from the runs, so anything that removes one has to
+    /// rebuild it — waiting for the run list to empty kept a picture alive that nothing displayed,
+    /// and hid it from the budget sweep, which decides what is live by walking runs.
+    /// </remarks>
     [Fact]
-    public void An_image_cell_is_not_equal_to_a_plain_space()
+    public void Overwriting_one_picture_releases_only_that_one()
+    {
+        var terminal = Fresh();
+
+        WriteSixel(terminal);
+        terminal.Write($"{Esc}[1;5H");
+        WriteSixel(terminal);
+
+        var line = terminal.Buffer.Lines[terminal.Buffer.YBase]!;
+        Assert.Equal(2, line.Images.Count);
+        var survivor = line.Images[1];
+
+        // Print across the whole span of the first picture, which covers columns 0..1.
+        terminal.Write($"{Esc}[1;1HXX");
+
+        Assert.True(ReferenceEquals(survivor, line.Images.SingleOrDefault()),
+            "the overwritten picture should be released and the other kept");
+    }
+
+    /// <summary>
+    /// A cell under a picture is an ordinary space, and that is now correct rather than a bug.
+    /// </summary>
+    /// <remarks>
+    /// This inverts what these tests used to assert. When a cell carried an image reference and a
+    /// tile coordinate, two cells showing different pieces of a picture HAD to compare unequal,
+    /// because renderers coalesce adjacent cells into one run by comparing them and merging two
+    /// different tiles would have drawn the wrong thing. With pictures held as runs on the line,
+    /// nothing about a picture is drawn from cells — so cells beneath one should coalesce exactly
+    /// like the spaces they are, and the distinction has no work left to do.
+    /// </remarks>
+    [Fact]
+    public void A_cell_under_a_picture_is_an_ordinary_space()
     {
         var terminal = Fresh();
         WriteSixel(terminal);
 
-        Assert.NotEqual(BufferCell.Space, Cell(terminal, 0, 0));
+        Assert.Equal(BufferCell.Space, Cell(terminal, 0, 0));
+        Assert.Equal(Cell(terminal, 0, 0), Cell(terminal, 1, 0));
+
+        // And the picture is still there — held by the line, which is the whole point.
+        Assert.NotNull(ImageAssertions.ImageAt(terminal, 0, 0));
+    }
+
+    /// <summary>
+    /// What must stay distinguishable is the RUNS: each line shows its own slice of the picture.
+    /// </summary>
+    [Fact]
+    public void Runs_on_different_lines_carry_different_slices()
+    {
+        var terminal = Fresh();
+        WriteSixel(terminal);
+
+        var first = ImageAssertions.PlacementAt(terminal, 0, 0);
+        var second = ImageAssertions.PlacementAt(terminal, 0, 1);
+
+        Assert.NotNull(first);
+        Assert.NotNull(second);
+        Assert.NotEqual(first!.Value.SrcY, second!.Value.SrcY);
     }
 
     [Fact]
