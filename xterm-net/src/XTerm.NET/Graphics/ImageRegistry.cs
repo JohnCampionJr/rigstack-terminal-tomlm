@@ -33,6 +33,9 @@ internal sealed class ImageRegistry
     /// <summary>The ids currently held, oldest first.</summary>
     public IEnumerable<uint> Ids => _order;
 
+    /// <summary>The images currently held.</summary>
+    public IEnumerable<TerminalImage> Images => _byId.Values;
+
     /// <summary>
     /// A client's image *number* mapped to the id the terminal handed out for it.
     /// </summary>

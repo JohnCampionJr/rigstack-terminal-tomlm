@@ -22,8 +22,8 @@ when they fall out of the scrollback — see [Images](#images).
 - **Sixel Graphics** — Decodes Sixel images (`ESC P … q`) and stores them on the cells they cover, so
   `img2sixel`, `chafa`, `lsix` and `timg` work against a host that renders them
 - **Kitty Graphics** — Decodes the Kitty protocol (`ESC _ G …`), including chunked transmission, PNG,
-  transmit-once/place-many by image id, and U+10EEEE Unicode placeholders, so `icat`, `chafa -f kitty`,
-  `timg -pk`, `yazi` and `image.nvim` work the same way
+  transmit-once/place-many by image id, animation, and U+10EEEE Unicode placeholders, so `icat`,
+  `chafa -f kitty`, `timg -pk`, `yazi` and `image.nvim` work the same way
 
 ## Installation
 
@@ -391,13 +391,32 @@ placeholders**, where the image id travels in the cell's foreground colour. That
 `ranger` and `image.nvim` draw. The combining marks that state an explicit tile row and column are
 decoded, so a client may write tiles in any order rather than as a rectangle in reading order.
 
+**Animation** is supported: frame transmission (`a=f`), animation control (`a=a`) and frame
+composition (`a=c`). Frames may carry only the rectangle that changed, composed onto a previous
+frame or onto a flat colour, blended or replaced. Both driving styles work — the client can make a
+frame current itself, or set gaps and hand the timing to the terminal.
+
+The emulator owns no timer. It is driven entirely by `Write`, and starting a thread inside a library
+that has none, to repaint a host that already has a render loop, would be the wrong place for it.
+So a host drives the clock:
+
+```csharp
+// From your render loop, with however long the last frame took.
+if (terminal.AdvanceAnimations(elapsed))
+    InvalidateVisual();
+```
+
+`HasRunningAnimations()` says whether a clock is needed at all, so a terminal showing nothing but
+text runs no timer. Draw `image.CurrentPixels` rather than `image.Pixels` — the latter stays the
+root frame and never changes, which is what makes it safe to hold and hand to another thread. Cache
+your texture against the image as before, and re-upload when `image.FrameSerial` changes.
+
 Not supported, and refused with a proper error reply rather than ignored:
 
 - **File, temp-file and shared-memory transmission (`t=f`, `t=t`, `t=s`)** are refused with `ENOTSUP`
   by design. The terminal would be opening a path chosen by the program it hosts, and the host
   usually holds more privilege than that program does. Direct transmission (`t=d`) is the only medium
   accepted.
-- **Animation** (`a=f`, `a=a`).
 
 **Draw order (`z=`)** is honoured, with one documented limit. A cell holds one placement, so ordering
 between two *pictures* is expressed by which of them the cell keeps: a placement never displaces one

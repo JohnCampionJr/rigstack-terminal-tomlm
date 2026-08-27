@@ -561,3 +561,112 @@ End to end, through a real ConPTY into a `Terminal`:
 One invocation covers chunking, `f=32`, `c`/`r` scaling, `q=2`, a control-only opening sequence and
 an empty terminating one. A 30x14 run reassembles 617 sequences and 418 KB of base64 into one
 280x280 image across 28x14 cells.
+# Kitty graphics: the rest of the protocol
+
+## Summary
+
+The Kitty graphics support added earlier covered transmit, place, delete, query and Unicode
+placeholders. This completes it: the full delete matrix, image numbers, placeholder tile diacritics,
+pixel offsets, interlaced PNG, draw order, and animation.
+
+## What each piece needed
+
+**The delete matrix.** Only `d=a` and `d=i` existed; the rest were refused for want of a way to find
+placements. Positional targets now find one through a cell and remove all of it -- deleting just the
+cells in the named row would leave a picture with a hole through it. The scrollback is deliberately
+not searched: a picture scrolled out of view is not "at row 3" however many rows above it happen to
+be. Two keys change meaning on a delete -- `x` and `y` are screen cells rather than a crop origin,
+and one-based where the buffer is zero-based -- and both conversions are pinned by tests that go red
+when either is dropped.
+
+**Image numbers.** `I=<number>` lets a client avoid managing an id space; the terminal picks the id
+and reports both halves back so the client can match the reply and then use the image.
+
+**Placeholder diacritics.** The marks stating a tile's row and column were consumed and ignored,
+which only works for a rectangle written in reading order. They are decoded now. The table is
+kitty's own `rowcolumn-diacritics.txt` taken verbatim: it was frozen against Unicode 6.0.0, and
+regenerating it against a newer Unicode would silently renumber every tile. Fixed while there: a
+placeholder run built a fresh placement per cell, which rendered identically and cost a blit per
+cell instead of one per strip.
+
+**Pixel offsets and Adam7.** `X`/`Y` shift a picture inside its first cell and, per the spec, are
+"not added to the number of rows/columns" -- so the box is unchanged and the overflow is clipped.
+That case cannot be expressed by a tile's size alone, since the leading tile is both narrower and
+shifted, so `TryGetTileLayout` returns the source rectangle and the destination offset together.
+
+The tile arithmetic became one uniform intersection -- the cell against the picture's span within
+the box, mapped back onto the source -- covering both scalings, cropping and the offsets. Scaling
+numerator and denominator by the same amount leaves the floor unchanged, so it reproduces the
+previous results exactly, which the 1160x870-over-14x15 guard confirms tile for tile.
+
+Adam7 is decoded rather than refused. Each pass is filtered against its own neighbours, so it cannot
+be read as one strided image, and an empty pass contributes no bytes at all -- counting one would
+shift every later pass and turn the rest of the picture into noise.
+
+**Draw order.** A cell holds one placement, so ordering between two pictures is which of them the
+cell keeps: a placement never displaces one with a higher z-index, and at equal z the newer wins.
+Exact for opaque pictures, losing only the blend where a translucent one overlaps another. A
+NEGATIVE z means behind the TEXT, and there the cell keeps both -- which needed the one exception to
+the rule that printing rebuilds a cell from scratch. Erasing still clears both; a picture showing
+through a cleared screen would be a leak.
+
+**Animation.** Frames, composition and control, both client-driven and terminal-driven.
+
+## Decisions worth recording
+
+- **The emulator still owns no timer.** It is driven entirely by `Write`, and starting a thread
+  inside a library that has none -- to repaint a host that already has a render loop -- would be the
+  wrong place for it. `Terminal.AdvanceAnimations(delta)` takes the elapsed time and returns whether
+  anything moved. It also makes the timing exactly testable: no sleeping, no tolerance windows, no
+  flake.
+- **Advancing loops rather than stepping once.** Several gaps can fall inside one slice when the
+  gaps are short or a repaint was late. Stepping once per call would silently make an animation run
+  at the host's frame rate instead of its own.
+- **An image's own pixels never change.** They are documented immutable and a host may have uploaded
+  them; the root frame starts as a reference to them and is copied away the moment a client edits
+  it. What moves is `CurrentPixels`, with `FrameSerial` changing alongside so a cached texture can
+  be spotted as stale without comparing pixels.
+- **Animated images are tracked in their own weakly-held list.** The host asks whether anything is
+  moving on every frame, so the answer has to cost nothing for a terminal showing text -- scanning
+  both buffers and the registry is the length of the scrollback, sixty times a second. Weak, or the
+  list would keep every animation's pixels alive for the life of the terminal.
+- **v unspecified means loop forever.** Reading it as "no loops" stops every animation after a
+  single pass, which is what the first run of the loop test caught.
+- **Y is read twice, as an int and as a uint.** It carries a pixel offset on a display command and a
+  32-bit RGBA background on a frame. Opaque red is 4278190335, which does not fit a signed int:
+  reading it as one saturates and silently turns the colour into something else.
+- **Frame composition refuses what it cannot answer.** A missing frame is ENOENT, a rectangle off
+  the edge EINVAL, and so is one frame onto itself with overlapping rectangles -- the result would
+  depend on the copy order, so there is no right answer to give.
+
+## Files changed
+
+- `src/XTerm.NET/Graphics/ImageAnimation.cs` -- frames, state, the clock, and the blend
+- `src/XTerm.NET/Graphics/PlaceholderDiacritics.cs` -- kitty's 297-mark table, verbatim
+- `src/XTerm.NET/Graphics/TerminalImage.cs` -- `Animation`, `CurrentPixels`, `FrameSerial`
+- `src/XTerm.NET/Graphics/ImagePlacement.cs` -- `ZIndex`, offsets, `TryGetTileLayout`
+- `src/XTerm.NET/Graphics/PngDecoder.cs` -- Adam7
+- `src/XTerm.NET/Graphics/KittyCommand.cs` -- frame, animate and compose actions and their keys
+- `src/XTerm.NET/Graphics/ImageRegistry.cs` -- image numbers, removal by image
+- `src/XTerm.NET/InputHandler.cs` -- the delete matrix, diacritics, z-index, frames and composition
+- `src/XTerm.NET/Terminal.cs` -- placement selection, `AdvanceAnimations`, `HasRunningAnimations`
+- `src/XTerm.NET.Tests/Graphics/KittyDeleteTests.cs`
+- `src/XTerm.NET.Tests/Graphics/KittyZIndexTests.cs`
+- `src/XTerm.NET.Tests/Graphics/KittyAnimationTests.cs`
+
+## Validation
+
+```powershell
+dotnet test src/XTerm.NET.slnx
+```
+
+```text
+Passed: 1016
+Failed: 0
+Skipped: 0
+```
+
+Every guard added here was checked by breaking the code it guards and confirming the test goes red
+with a useful message. Three tests did not, and were rewritten rather than kept: a column delete
+over a two-column picture that swallowed an off-by-one, a gapless-frame test whose timing landed on
+the right frame either way, and a bitmap-cache test that never looked again after the refresh.

@@ -18,7 +18,16 @@ internal enum KittyAction
     /// <summary>a=q — validate and reply, changing nothing. This is how support is detected.</summary>
     Query,
 
-    /// <summary>Something this terminal does not implement, such as animation.</summary>
+    /// <summary>a=f — take pixels and make them a frame of an existing image.</summary>
+    Frame,
+
+    /// <summary>a=a — start, stop or step an animation.</summary>
+    Animate,
+
+    /// <summary>a=c — copy a rectangle from one frame of an image onto another.</summary>
+    Compose,
+
+    /// <summary>Something this terminal does not implement.</summary>
     Unsupported
 }
 
@@ -100,6 +109,45 @@ internal readonly struct KittyCommand
     public int OffsetX { get; init; }
     public int OffsetY { get; init; }
 
+    /// <summary>
+    /// Y read as an unsigned 32-bit value, which is what a frame's background colour needs.
+    /// </summary>
+    /// <remarks>
+    /// The same key as <see cref="OffsetY"/>, kept twice rather than converted at the point of use.
+    /// An opaque red background is 4278190335, which does not fit a signed int -- reading it as one
+    /// saturates at 2147483647 and silently turns the colour into something else.
+    /// </remarks>
+    public uint FrameBackground { get; init; }
+
+    /// <summary>
+    /// C — the composition mode when composing frames: 1 overwrites, anything else alpha blends.
+    /// </summary>
+    /// <remarks>
+    /// The same key that carries the cursor policy on a display command. Which one is meant follows
+    /// from the action, as it does for several of these letters.
+    /// </remarks>
+    public int ComposeMode { get; init; }
+
+    /// <summary>
+    /// The keys below are read from letters that mean something else on other actions. They are
+    /// named for the animation meaning so that the code using them reads as the protocol does.
+    /// </summary>
+    /// <remarks>
+    /// s and v carry the pixel width and height of a transmission, and the animation state and loop
+    /// count of an <c>a=a</c>. c and r carry a frame number on the animation actions and nothing at
+    /// all on the others. The overloading is the protocol's, not this type's.
+    /// </remarks>
+    public int AnimationStateValue => Width;
+
+    /// <summary>v — the loop count on an animation control command.</summary>
+    public int LoopCount => Height;
+
+    /// <summary>c — the base or destination frame number.</summary>
+    public int BaseFrame => Cols;
+
+    /// <summary>r — the frame being edited, or the source frame of a composition.</summary>
+    public int EditFrame => Rows;
+
     /// <summary>z — draw order. Kept for the reply, not honoured.</summary>
     public int ZIndex { get; init; }
 
@@ -129,6 +177,8 @@ internal readonly struct KittyCommand
         int cols = 0, rows = 0;
         bool keepCursor = false;
         int offsetX = 0, offsetY = 0;
+        uint frameBackground = 0;
+        int composeMode = 0;
         int zIndex = 0;
         char deleteTarget = 'a';
         bool placeholder = false;
@@ -155,7 +205,10 @@ internal readonly struct KittyCommand
                         'p' => KittyAction.Put,
                         'd' => KittyAction.Delete,
                         'q' => KittyAction.Query,
-                        _ => KittyAction.Unsupported   // 'f' and 'a', which are animation
+                        'f' => KittyAction.Frame,
+                        'a' => KittyAction.Animate,
+                        'c' => KittyAction.Compose,
+                        _ => KittyAction.Unsupported
                     };
                     break;
 
@@ -175,9 +228,15 @@ internal readonly struct KittyCommand
                 case 'h': cropHeight = ReadInt(value, cropHeight); break;
                 case 'c': cols = ReadInt(value, cols); break;
                 case 'r': rows = ReadInt(value, rows); break;
-                case 'C': keepCursor = ReadInt(value, 0) == 1; break;
+                case 'C':
+                    composeMode = ReadInt(value, composeMode);
+                    keepCursor = composeMode == 1;
+                    break;
                 case 'X': offsetX = ReadInt(value, offsetX); break;
-                case 'Y': offsetY = ReadInt(value, offsetY); break;
+                case 'Y':
+                    offsetY = ReadInt(value, offsetY);
+                    frameBackground = ReadUInt(value, frameBackground);
+                    break;
                 case 'z': zIndex = ReadInt(value, zIndex); break;
                 case 'd': deleteTarget = value[0]; break;
                 case 'U': placeholder = ReadInt(value, 0) == 1; break;
@@ -213,6 +272,8 @@ internal readonly struct KittyCommand
             KeepCursor = keepCursor,
             OffsetX = offsetX,
             OffsetY = offsetY,
+            FrameBackground = frameBackground,
+            ComposeMode = composeMode,
             ZIndex = zIndex,
             DeleteTarget = deleteTarget,
             UnicodePlaceholder = placeholder
@@ -245,6 +306,30 @@ internal readonly struct KittyCommand
         }
 
         return (int)(negative ? -value : value);
+    }
+
+    /// <summary>
+    /// Reads an unsigned decimal integer, keeping the fallback when the text is not one.
+    /// </summary>
+    /// <remarks>
+    /// Separate from the signed reader because a frame background is a 32-bit RGBA value and the
+    /// top half of that range does not fit a signed int.
+    /// </remarks>
+    private static uint ReadUInt(ReadOnlySpan<char> text, uint fallback)
+    {
+        ulong value = 0;
+
+        foreach (var c in text)
+        {
+            if (c is < '0' or > '9')
+                return fallback;
+
+            value = value * 10 + (ulong)(c - '0');
+            if (value > uint.MaxValue)
+                return uint.MaxValue;
+        }
+
+        return (uint)value;
     }
 
     /// <summary>Splits on a separator without allocating.</summary>

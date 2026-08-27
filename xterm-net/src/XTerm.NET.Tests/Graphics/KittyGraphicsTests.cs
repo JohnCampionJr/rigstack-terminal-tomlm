@@ -351,13 +351,29 @@ public class KittyGraphicsTests
         Assert.Null(Cell(terminal, 0, 0).Placement);
     }
 
+    /// <summary>
+    /// Animating an image that was never transmitted is ENOENT rather than ENOTSUP: the action is
+    /// supported, the picture is what is missing. See <c>KittyAnimationTests</c> for the rest.
+    /// </summary>
     [Fact]
-    public void Animation_is_refused_rather_than_ignored()
+    public void Animating_an_unknown_image_says_so()
     {
         var terminal = Fresh();
         var replies = Replies(terminal);
 
         terminal.Write(Apc("a=a,i=5"));
+
+        Assert.Contains(replies, r => r.Contains("ENOENT"));
+    }
+
+    /// <summary>An action letter from no revision of the protocol is still refused outright.</summary>
+    [Fact]
+    public void An_unknown_action_is_refused_rather_than_ignored()
+    {
+        var terminal = Fresh();
+        var replies = Replies(terminal);
+
+        terminal.Write(Apc("a=w,i=5"));
 
         Assert.Contains(replies, r => r.Contains("ENOTSUP"));
     }

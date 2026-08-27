@@ -646,6 +646,59 @@ public class Terminal
         }
     }
 
+    /// <summary>
+    /// Moves every animated image on by a slice of real time.
+    /// </summary>
+    /// <remarks>
+    /// <para>The emulator owns no timer. It is driven entirely by <c>Write</c>, and starting a
+    /// thread inside a library that has none -- to repaint a host that already has a render loop --
+    /// would be the wrong place for it. So the host calls this with however long its last frame
+    /// took, and is told whether anything moved.</para>
+    /// <para>Both buffers and the registry, because an image can be transmitted and animated before
+    /// it is ever placed, and one on the alternate screen keeps running while the normal screen is
+    /// in front.</para>
+    /// </remarks>
+    /// <returns>True when some frame changed, so the host should repaint.</returns>
+    public bool AdvanceAnimations(TimeSpan delta)
+    {
+        if (delta <= TimeSpan.Zero)
+            return false;
+
+        var moved = false;
+
+        foreach (var image in CollectAnimatedImages())
+            moved |= image.Animation!.Advance(delta);
+
+        return moved;
+    }
+
+    /// <summary>Whether anything on screen or in the registry is currently animating.</summary>
+    /// <remarks>
+    /// A host uses this to decide whether it needs a repaint clock at all, rather than ticking
+    /// forever for a terminal showing nothing but text.
+    /// </remarks>
+    public bool HasRunningAnimations()
+    {
+        foreach (var image in CollectAnimatedImages())
+        {
+            if (image.Animation!.State != Graphics.AnimationState.Stopped)
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Every image that has frames.
+    /// </summary>
+    /// <remarks>
+    /// Kept as its own list rather than found by scanning the buffers, because a host asks whether
+    /// anything is animating on every frame and the answer for a terminal showing plain text has to
+    /// cost nothing. It also reaches images that were transmitted and animated but never placed,
+    /// which no amount of scanning cells would find.
+    /// </remarks>
+    private IEnumerable<Graphics.TerminalImage> CollectAnimatedImages() => _inputHandler.AnimatedImages;
+
     internal void EnforceImageBudget()
     {
         var budget = Options.MaxImageBytes;

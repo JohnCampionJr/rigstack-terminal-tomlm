@@ -64,7 +64,40 @@ public sealed class TerminalImage
     public int Rows { get; }
 
     /// <summary>Size of the pixel buffer, for accounting against an image memory budget.</summary>
-    public int ByteCount => _pixels.Length;
+    public int ByteCount => _pixels.Length + (int)Math.Min(int.MaxValue, Animation?.ByteCount ?? 0);
+
+    /// <summary>The backing array, so an animation can share the root frame without copying it.</summary>
+    internal byte[] PixelArray => _pixels;
+
+    /// <summary>
+    /// The frames of this image, once a client has made it an animation, or null while it is a
+    /// still picture.
+    /// </summary>
+    /// <remarks>
+    /// An image starts as one frame and becomes an animation only when frames are added to it, so
+    /// nothing is allocated for the overwhelmingly common case of a picture that never moves.
+    /// </remarks>
+    public ImageAnimation? Animation { get; private set; }
+
+    /// <summary>Creates the animation on first use, or returns the one already there.</summary>
+    internal ImageAnimation EnsureAnimation() => Animation ??= new ImageAnimation(this);
+
+    /// <summary>
+    /// The pixels a renderer should draw right now: the current animation frame, or the image
+    /// itself when there is no animation.
+    /// </summary>
+    /// <remarks>
+    /// A host should blit these and cache against <see cref="FrameSerial"/>, which changes whenever
+    /// they do. <see cref="Pixels"/> stays the root frame and never changes, so it remains safe to
+    /// hold and to hand to another thread.
+    /// </remarks>
+    public ReadOnlyMemory<byte> CurrentPixels => Animation?.CurrentPixels ?? _pixels;
+
+    /// <summary>
+    /// Changes whenever <see cref="CurrentPixels"/> does, so a cached texture can be spotted as
+    /// stale without comparing the pixels.
+    /// </summary>
+    public int FrameSerial => Animation?.Serial ?? 0;
 
     public TerminalImage(byte[] pixels, int pixelWidth, int pixelHeight, int cellWidth, int cellHeight)
     {

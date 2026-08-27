@@ -852,6 +852,45 @@ public class InputHandler
     private readonly Graphics.ImageRegistry _kittyImages = new();
 
     /// <summary>
+    /// Every image that has been given frames, held weakly.
+    /// </summary>
+    /// <remarks>
+    /// <para>The animation clock is asked whether anything is moving on every host frame, so the
+    /// answer has to be cheap. Scanning both buffers and the registry is not: it is the length of
+    /// the scrollback, sixty times a second, to discover that a terminal showing text is showing
+    /// text.</para>
+    /// <para>Weak references because a strong set would keep every animation's pixels alive for the
+    /// life of the terminal, defeating the whole point of letting the last cell holding a picture
+    /// take it away. Dead entries are pruned as they are found.</para>
+    /// </remarks>
+    private readonly List<WeakReference<Graphics.TerminalImage>> _animatedImages = new();
+
+    internal IEnumerable<Graphics.TerminalImage> AnimatedImages
+    {
+        get
+        {
+            for (int i = _animatedImages.Count - 1; i >= 0; i--)
+            {
+                if (_animatedImages[i].TryGetTarget(out var image))
+                    yield return image;
+                else
+                    _animatedImages.RemoveAt(i);
+            }
+        }
+    }
+
+    private void NoteAnimated(Graphics.TerminalImage image)
+    {
+        foreach (var known in AnimatedImages)
+        {
+            if (ReferenceEquals(known, image))
+                return;
+        }
+
+        _animatedImages.Add(new WeakReference<Graphics.TerminalImage>(image));
+    }
+
+    /// <summary>
     /// Ceiling on the base64 held for one image, so a client that never sends its last chunk
     /// cannot make the terminal grow without limit.
     /// </summary>
@@ -1152,9 +1191,23 @@ public class InputHandler
                 DeleteKittyImages(command);
                 break;
 
+            // A frame carries pixels like a transmission does, chunking and all, so it goes through
+            // the same accumulator and is told apart at the end by its action.
+            case Graphics.KittyAction.Frame:
+                BeginKittyTransmission(command, payload);
+                break;
+
+            case Graphics.KittyAction.Animate:
+                ControlKittyAnimation(command);
+                break;
+
+            case Graphics.KittyAction.Compose:
+                ComposeKittyFrames(command);
+                break;
+
             default:
-                // Animation, and anything else a later revision adds. Saying so is better than
-                // silence: a client that asked can fall back rather than wait.
+                // Anything a later revision adds. Saying so is better than silence: a client that
+                // asked can fall back rather than wait.
                 ReplyToKitty(command, Graphics.KittyError.Unsupported);
                 break;
         }
@@ -1206,6 +1259,15 @@ public class InputHandler
             return;
         }
 
+        // A frame belongs to a picture that already exists, so it becomes an entry in that image's
+        // frame list rather than an image of its own. Taken before the image below is built, which
+        // would be an allocation the size of the picture with nothing to use it.
+        if (command.Action == Graphics.KittyAction.Frame)
+        {
+            AddKittyFrame(command, pixels, width, height);
+            return;
+        }
+
         var image = new Graphics.TerminalImage(
             pixels, width, height,
             Math.Max(1, _terminal.Options.CellWidthPixels),
@@ -1228,6 +1290,224 @@ public class InputHandler
 
         ReplyToKitty(command, Graphics.KittyError.None, id);
     }
+
+    /// <summary>
+    /// Turns transmitted pixels into a frame of an image that already exists.
+    /// </summary>
+    /// <remarks>
+    /// <para>A frame is built by composing the arriving rectangle onto a canvas. The canvas is
+    /// another frame when the client names one with <c>c=</c>, the frame itself when it is editing
+    /// one with <c>r=</c>, and otherwise a flat colour -- black and fully transparent unless
+    /// <c>Y=</c> says otherwise. That is what lets an animation send only the pixels that changed.</para>
+    /// <para>The rectangle's position comes from <c>x</c> and <c>y</c> and its size from the
+    /// transmitted <c>s</c> and <c>v</c>, so a frame carrying the whole picture is just the case
+    /// where the rectangle happens to be the full size.</para>
+    /// </remarks>
+    private void AddKittyFrame(Graphics.KittyCommand command, byte[] pixels, int width, int height)
+    {
+        if (!TryResolveKittyImage(command, out var id, out var image))
+        {
+            ReplyToKitty(command, Graphics.KittyError.NotFound);
+            return;
+        }
+
+        var animation = image.EnsureAnimation();
+        NoteAnimated(image);
+        var frameBytes = (long)image.PixelWidth * image.PixelHeight * Graphics.TerminalImage.BytesPerPixel;
+
+        byte[] canvas;
+        int frameNumber;
+
+        if (command.EditFrame > 0)
+        {
+            // Editing an existing frame: the canvas is that frame, and the result replaces it.
+            if (!animation.TryGetFrame(command.EditFrame, out _))
+            {
+                ReplyToKitty(command, Graphics.KittyError.NotFound);
+                return;
+            }
+
+            canvas = animation.GetWritableFrame(command.EditFrame);
+            frameNumber = command.EditFrame;
+        }
+        else
+        {
+            canvas = new byte[frameBytes];
+
+            if (command.BaseFrame > 0)
+            {
+                if (!animation.TryGetFrame(command.BaseFrame, out var baseFrame))
+                {
+                    ReplyToKitty(command, Graphics.KittyError.NotFound);
+                    return;
+                }
+
+                baseFrame.Pixels.Span.CopyTo(canvas);
+            }
+            else
+            {
+                FillCanvas(canvas, command.FrameBackground);
+            }
+
+            // A new frame's gap defaults to the protocol's figure rather than to nothing, or an
+            // animation built without explicit gaps would run as fast as the host repaints.
+            var gap = command.ZIndex != 0 ? command.ZIndex : Graphics.ImageAnimation.DefaultGapMilliseconds;
+            frameNumber = animation.AddFrame(canvas, gap);
+        }
+
+        // X=1 overwrites, anything else blends. The same key carries a pixel offset on a display
+        // command; which is meant follows from the action.
+        var replace = command.OffsetX == 1;
+
+        Graphics.ImageAnimation.Blend(
+            canvas, image.PixelWidth, image.PixelHeight,
+            pixels, width,
+            sourceX: 0, sourceY: 0,
+            destinationX: command.CropX, destinationY: command.CropY,
+            width: width, height: height,
+            replace: replace);
+
+        if (command.EditFrame > 0 && command.ZIndex != 0)
+            animation.SetGap(frameNumber, command.ZIndex);
+
+        _terminal.NoteImagePlaced(image);
+        ReplyToKitty(command, Graphics.KittyError.None, id);
+    }
+
+    /// <summary>Fills a new frame's canvas with a 32-bit RGBA colour.</summary>
+    /// <remarks>
+    /// The protocol states the colour as RGBA; the buffer is BGRA, so the two outer channels swap.
+    /// Getting this backwards produces a picture that looks right until something is transparent.
+    /// </remarks>
+    private static void FillCanvas(byte[] canvas, uint rgba)
+    {
+        if (rgba == 0)
+            return;   // already black and fully transparent
+
+        var r = (byte)(rgba >> 24);
+        var g = (byte)(rgba >> 16);
+        var b = (byte)(rgba >> 8);
+        var a = (byte)rgba;
+
+        for (int i = 0; i + 3 < canvas.Length; i += Graphics.TerminalImage.BytesPerPixel)
+        {
+            canvas[i] = b;
+            canvas[i + 1] = g;
+            canvas[i + 2] = r;
+            canvas[i + 3] = a;
+        }
+    }
+
+    /// <summary>
+    /// Starts, stops or steps an animation, and sets frame gaps.
+    /// </summary>
+    /// <remarks>
+    /// A client may drive the animation itself by making frames current one at a time, or hand the
+    /// timing to the terminal by setting gaps and letting it run. Both arrive here; the difference
+    /// is only which keys are present.
+    /// </remarks>
+    private void ControlKittyAnimation(Graphics.KittyCommand command)
+    {
+        if (!TryResolveKittyImage(command, out var id, out var image))
+        {
+            ReplyToKitty(command, Graphics.KittyError.NotFound);
+            return;
+        }
+
+        var animation = image.Animation;
+        if (animation is null)
+        {
+            // A still picture has no frames to control. Saying so beats silently doing nothing.
+            ReplyToKitty(command, Graphics.KittyError.NotFound);
+            return;
+        }
+
+        // r with z sets one frame's gap. A gap of zero means "unspecified" and is ignored, which is
+        // why this is not simply "if r was given".
+        if (command.EditFrame > 0 && command.ZIndex != 0)
+            animation.SetGap(command.EditFrame, command.ZIndex);
+
+        if (command.BaseFrame > 0 && !animation.SetCurrentFrame(command.BaseFrame))
+        {
+            ReplyToKitty(command, Graphics.KittyError.NotFound);
+            return;
+        }
+
+        var state = command.AnimationStateValue;
+        if (state is >= 1 and <= 3)
+            animation.SetState((Graphics.AnimationState)state, command.LoopCount);
+
+        ReplyToKitty(command, Graphics.KittyError.None, id);
+    }
+
+    /// <summary>
+    /// Copies a rectangle from one frame of an image onto another.
+    /// </summary>
+    /// <remarks>
+    /// The cheap way to change a frame: no pixels cross the wire at all. The protocol is specific
+    /// about the failures -- a missing frame is ENOENT, a rectangle off the edge is EINVAL, and so
+    /// is one frame overlapping itself, since the result would depend on the copy order.
+    /// </remarks>
+    private void ComposeKittyFrames(Graphics.KittyCommand command)
+    {
+        if (!TryResolveKittyImage(command, out var id, out var image))
+        {
+            ReplyToKitty(command, Graphics.KittyError.NotFound);
+            return;
+        }
+
+        var animation = image.Animation;
+        if (animation is null
+            || !animation.TryGetFrame(command.EditFrame, out var source)
+            || !animation.TryGetFrame(command.BaseFrame, out _))
+        {
+            ReplyToKitty(command, Graphics.KittyError.NotFound);
+            return;
+        }
+
+        var width = command.CropWidth > 0 ? command.CropWidth : image.PixelWidth;
+        var height = command.CropHeight > 0 ? command.CropHeight : image.PixelHeight;
+
+        if (!FitsInside(command.OffsetX, command.OffsetY, width, height, image)
+            || !FitsInside(command.CropX, command.CropY, width, height, image))
+        {
+            ReplyToKitty(command, Graphics.KittyError.BadData);
+            return;
+        }
+
+        // Same frame with overlapping rectangles: the answer would depend on which pixel was copied
+        // first, so the protocol asks for a refusal rather than an arbitrary one.
+        if (command.EditFrame == command.BaseFrame
+            && Overlaps(command.OffsetX, command.OffsetY, command.CropX, command.CropY, width, height))
+        {
+            ReplyToKitty(command, Graphics.KittyError.BadData);
+            return;
+        }
+
+        // Read the source before making the destination writable: editing the root frame copies it
+        // away from the image, and if the two are the same frame the span would be left dangling.
+        var sourcePixels = source.Pixels.ToArray();
+        var destination = animation.GetWritableFrame(command.BaseFrame);
+
+        Graphics.ImageAnimation.Blend(
+            destination, image.PixelWidth, image.PixelHeight,
+            sourcePixels, image.PixelWidth,
+            sourceX: command.OffsetX, sourceY: command.OffsetY,
+            destinationX: command.CropX, destinationY: command.CropY,
+            width: width, height: height,
+            replace: command.ComposeMode == 1);
+
+        ReplyToKitty(command, Graphics.KittyError.None, id);
+    }
+
+    private static bool FitsInside(int x, int y, int width, int height, Graphics.TerminalImage image)
+        => x >= 0 && y >= 0
+           && (long)x + width <= image.PixelWidth
+           && (long)y + height <= image.PixelHeight;
+
+    private static bool Overlaps(int aX, int aY, int bX, int bY, int width, int height)
+        => aX < bX + width && bX < aX + width
+           && aY < bY + height && bY < aY + height;
 
     private void PlaceStoredKittyImage(Graphics.KittyCommand command)
     {
