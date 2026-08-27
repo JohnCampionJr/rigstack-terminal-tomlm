@@ -120,6 +120,67 @@ public class BufferLine : IEnumerable<BufferCell>
     }
 
     /// <summary>
+    /// Writes a run of single-width, single-codepoint cells starting at <paramref name="index"/>.
+    ///
+    /// The per-cell SetCell path re-checks bounds and clears Cache for every character. Now that
+    /// BufferCell holds no references, a run can be written straight into a span of the backing
+    /// array: bounds are checked once, the cache is cleared once, and the writes carry no GC write
+    /// barrier. Callers must have established that every char is printable, single-width and needs
+    /// no charset translation.
+    /// </summary>
+    public void SetSingleWidthRun(int index, ReadOnlySpan<char> text, AttributeData attributes)
+    {
+        if (index < 0 || text.Length == 0 || index + text.Length > _length)
+            return;
+
+        var cells = _cells.AsSpan(index, text.Length);
+        for (var i = 0; i < text.Length; i++)
+        {
+            cells[i].CodePoint = text[i];
+            cells[i].Width = 1;
+            cells[i].Attributes = attributes;
+            cells[i].ClusterId = XTerm.Common.ClusterTable.None;
+        }
+
+        // This path writes cells directly rather than through SetCell, so it has to do what SetCell
+        // does about pictures: printing over one replaces that part of it. Missing this made text
+        // typed over an image leave the image behind, but only when the fast path took the write --
+        // which is the sort of difference between two paths that reads as an intermittent fault.
+        //
+        // One field test on a line with no pictures, which is nearly every line.
+        if (_placements is not null)
+            SplitPlacementsOver(index, text.Length);
+
+        Cache = null;
+    }
+
+    /// <summary>
+    /// As above, from UTF-8 bytes. Every byte must be printable ASCII, where the byte value and the
+    /// codepoint are the same number, so no decoding is needed at all.
+    /// </summary>
+    public void SetSingleWidthRun(int index, ReadOnlySpan<byte> ascii, AttributeData attributes)
+    {
+        if (index < 0 || ascii.Length == 0 || index + ascii.Length > _length)
+            return;
+
+        var cells = _cells.AsSpan(index, ascii.Length);
+        for (var i = 0; i < ascii.Length; i++)
+        {
+            cells[i].CodePoint = ascii[i];
+            cells[i].Width = 1;
+            cells[i].Attributes = attributes;
+            cells[i].ClusterId = XTerm.Common.ClusterTable.None;
+        }
+
+        // Same as the char overload: this writes cells directly, so it owes pictures the same
+        // treatment SetCell gives them.
+        if (_placements is not null)
+            SplitPlacementsOver(index, ascii.Length);
+
+        Cache = null;
+    }
+
+    /// <summary>
     /// Gets the cell code point at a specific column.
     /// </summary>
     public int GetCodePoint(int index)
@@ -557,6 +618,31 @@ public class BufferLine : IEnumerable<BufferCell>
     /// <summary>
     /// Clones the line.
     /// </summary>
+    /// <summary>
+    /// Refills this line in place, as if it had just been constructed with <paramref name="fillCell"/>.
+    ///
+    /// The cell array is reused rather than reallocated, which is the entire point: scrolling a full
+    /// buffer discards the oldest line and builds a fresh one for the bottom, and at 240 columns that
+    /// is several kilobytes of garbage per scrolled line.
+    ///
+    /// Cache is cleared. The renderer stores per-line formatted runs there and keys them on the line
+    /// object, so a recycled line that kept its cache would draw the previous occupant's text.
+    /// </summary>
+    public void ResetInPlace(BufferCell fillCell, bool isWrapped = false)
+    {
+        Array.Fill(_cells, fillCell);
+        _isWrapped = isWrapped;
+        _lineAttribute = LineAttribute.Normal;
+
+        // A recycled line keeps nothing, pictures included. The line is what holds an image alive,
+        // so reusing the object without dropping its runs would keep a picture that scrolled off the
+        // end of the scrollback from ever being collected — the one thing line ownership exists to
+        // guarantee.
+        ClearImages();
+
+        Cache = null;
+    }
+
     public BufferLine Clone()
     {
         var newLine = new BufferLine(_length);
