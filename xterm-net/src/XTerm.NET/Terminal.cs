@@ -298,11 +298,20 @@ public class Terminal
         _selectionManager = new SelectionManager(this);
 
         // Subscribe to parser events using C# event pattern
-        _parser.Print += OnParserPrint;
-        _parser.Execute += OnParserExecute;
-        _parser.Csi += OnParserCsi;
-        _parser.Esc += OnParserEsc;
-        _parser.Osc += OnParserOsc;
+        // PrintFast rather than the Print event: same call, without an EventArgs per character.
+        _parser.PrintFast = _inputHandler.Print;
+        _parser.PrintRunFast = _inputHandler.PrintAsciiRun;
+        _parser.PrintByteRunFast = _inputHandler.PrintAsciiRun;
+        // Fast hooks rather than events: the terminal is the parser's only mandatory listener, and
+        // an EventArgs per control character and per escape sequence is pure overhead for it. The
+        // public events still fire for anyone else subscribed.
+        _parser.ExecuteFast = HandleExecute;
+        _parser.CsiFast = _inputHandler.HandleCsi;
+        _parser.EscFast = _inputHandler.HandleEsc;
+        _parser.OscFast = _inputHandler.HandleOsc;
+
+        // DCS stays on events here. A Sixel payload arrives as many DcsPut chunks and is worth the
+        // same treatment, which a later commit gives it.
         _parser.DcsHook += OnParserDcsHook;
         _parser.DcsPut += OnParserDcsPut;
         _parser.DcsUnhook += OnParserDcsUnhook;
@@ -320,37 +329,8 @@ public class Terminal
         SendFocusEvents = false;
     }
 
-    /// <summary>
-    /// Handles print events from the parser.
-    /// </summary>
-    private void OnParserPrint(object? sender, PrintEventArgs e)
-    {
-        _inputHandler.Print(e.Data);
-    }
 
-    /// <summary>
-    /// Handles execute events from the parser.
-    /// </summary>
-    private void OnParserExecute(object? sender, ExecuteEventArgs e)
-    {
-        HandleExecute(e.Code);
-    }
 
-    /// <summary>
-    /// Handles CSI events from the parser.
-    /// </summary>
-    private void OnParserCsi(object? sender, CsiEventArgs e)
-    {
-        _inputHandler.HandleCsi(e.Identifier, e.Parameters);
-    }
-
-    /// <summary>
-    /// Handles ESC events from the parser.
-    /// </summary>
-    private void OnParserEsc(object? sender, EscEventArgs e)
-    {
-        _inputHandler.HandleEsc(e.FinalChar, e.Collected);
-    }
 
     /// <summary>
     /// Handles the start of a DCS sequence from the parser.
@@ -401,11 +381,13 @@ public class Terminal
     }
 
     /// <summary>
-    /// Handles OSC events from the parser.
+    /// Whether runs of printable ASCII are written in one batch rather than a character at a time.
+    /// On by default; see <c>InputHandler.UseRunPrinting</c>.
     /// </summary>
-    private void OnParserOsc(object? sender, OscEventArgs e)
+    public bool UseRunPrinting
     {
-        _inputHandler.HandleOsc(e.Data);
+        get => _inputHandler.UseRunPrinting;
+        set => _inputHandler.UseRunPrinting = value;
     }
 
     /// <summary>
@@ -414,6 +396,23 @@ public class Terminal
     public void Write(string data)
     {
         if (string.IsNullOrEmpty(data))
+            return;
+
+        _parser.Parse(data);
+    }
+
+    /// <summary>
+    /// Writes UTF-8 bytes to the terminal.
+    ///
+    /// Prefer this over the string overload when the source is a PTY. Decoding a read to UTF-16
+    /// first allocates a string per read and does work most of the bytes do not need — printable
+    /// ASCII is the same number as a byte, as a codepoint and in the cell. It also carries a partial
+    /// multi-byte sequence across calls, which a caller decoding each read on its own cannot do:
+    /// a read boundary landing mid-codepoint corrupts that character.
+    /// </summary>
+    public void Write(ReadOnlySpan<byte> data)
+    {
+        if (data.IsEmpty)
             return;
 
         _parser.Parse(data);
@@ -1092,11 +1091,14 @@ public class Terminal
     public void Dispose()
     {
         // Unsubscribe from parser events
-        _parser.Print -= OnParserPrint;
-        _parser.Execute -= OnParserExecute;
-        _parser.Csi -= OnParserCsi;
-        _parser.Esc -= OnParserEsc;
-        _parser.Osc -= OnParserOsc;
+        _parser.PrintFast = null;
+        _parser.PrintRunFast = null;
+        _parser.PrintByteRunFast = null;
+        _parser.ExecuteFast = null;
+        _parser.CsiFast = null;
+        _parser.EscFast = null;
+        _parser.OscFast = null;
+
         _parser.DcsHook -= OnParserDcsHook;
         _parser.DcsPut -= OnParserDcsPut;
         _parser.DcsUnhook -= OnParserDcsUnhook;

@@ -2,4 +2,7 @@
   <Project Path="Example/Example.csproj" />
   <Project Path="XTerm.NET.Tests/XTerm.NET.Tests.csproj" Id="1e8c4b2b-7439-4130-b6ca-cf847da7b06d" />
   <Project Path="XTerm.NET/XTerm.NET.csproj" />
+  <Project Path="XTerm.NET.Bench/XTerm.NET.Bench.csproj" />
+  <Project Path="Cat150/Original/Cat150.Original.csproj" />
+  <Project Path="Cat150/Fork/Cat150.Fork.csproj" />
 </Solution>

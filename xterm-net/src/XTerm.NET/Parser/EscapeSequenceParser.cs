@@ -1,3 +1,5 @@
+using System;
+using System.Buffers;
 using System.Diagnostics;
 using System.Text;
 using XTerm.Common;
@@ -58,6 +60,36 @@ public class EscapeSequenceParser
     /// Fired when printable characters are parsed.
     /// </summary>
     public event EventHandler<PrintEventArgs>? Print;
+
+    /// <summary>
+    /// Internal print hook, bypassing <see cref="Print"/> and its per-character EventArgs allocation.
+    /// The public event still fires for anyone subscribed; this exists so the terminal's own hot path
+    /// does not pay for an observer pattern it does not need.
+    /// </summary>
+    internal Action<string>? PrintFast;
+
+    /// <summary>Internal run hook: (data, start, count) for a stretch of printable ASCII in Ground.</summary>
+    internal Action<string, int, int>? PrintRunFast;
+
+    /// <summary>
+    /// Internal run hook for the byte entry. A custom delegate because Action&lt;&gt; cannot carry a
+    /// <see cref="ReadOnlySpan{T}"/>.
+    /// </summary>
+    internal delegate void ByteRunHandler(ReadOnlySpan<byte> run);
+
+    internal ByteRunHandler? PrintByteRunFast;
+
+    /// <summary>Internal Execute hook. See <see cref="PrintFast"/>: control characters are as hot as printable ones.</summary>
+    internal Action<int>? ExecuteFast;
+
+    /// <summary>Internal CSI hook, bypassing the per-sequence CsiEventArgs.</summary>
+    internal Action<string, Params>? CsiFast;
+
+    /// <summary>Internal ESC hook, bypassing the per-sequence EscEventArgs.</summary>
+    internal Action<string, string>? EscFast;
+
+    /// <summary>Internal OSC hook, bypassing the per-sequence OscEventArgs.</summary>
+    internal Action<string>? OscFast;
 
     /// <summary>
     /// Fired when control characters are executed.
@@ -149,9 +181,221 @@ public class EscapeSequenceParser
     /// </summary>
     public void Parse(string data)
     {
-        foreach (var rune in data.EnumerateRunes())
+        var i = 0;
+        var length = data.Length;
+
+        // A previous call ended on a high surrogate with nothing after it. That is not malformed
+        // input: a PTY read boundary falls wherever the read happens to end, so a surrogate pair
+        // straddling two Write calls is ordinary. Resolve it against the start of this chunk.
+        // Bytes held from a byte-entry call cannot be completed by UTF-16 input, so they are
+        // abandoned here. Abandoning them SILENTLY would delete input; U+FFFD says something was
+        // there. Mixing the two entries mid-sequence is a caller error, but a caller error should
+        // not make characters vanish.
+        if (_pendingByteCount > 0)
         {
+            _pendingByteCount = 0;
+            ParseChar(0xFFFD);
+        }
+
+        if (_pendingHighSurrogate != '\0')
+        {
+            var pending = _pendingHighSurrogate;
+            _pendingHighSurrogate = '\0';
+
+            if (length > 0 && char.IsLowSurrogate(data[0]))
+            {
+                ParseChar(char.ConvertToUtf32(pending, data[0]));
+                i = 1;
+            }
+            else
+            {
+                ParseChar(0xFFFD);   // nothing followed it, so it really was unpaired
+            }
+        }
+
+        while (i < length)
+        {
+            // Ground-state fast path for printable ASCII.
+            //
+            // A sampled profile put 70% of emulator time in ParseChar and 27% in this loop's rune
+            // enumeration, with the actual cell work no longer even visible. That cost is per-character
+            // dispatch, not parsing: for a run of ordinary text every character re-tests the C0/C1
+            // ranges, re-switches on a state that cannot have changed, and is decoded through a Rune
+            // enumerator that checks for surrogates it will never find.
+            //
+            // U+0020..U+007E in Ground is unambiguous -- ParseChar would reach `if (code >= 0x20)
+            // OnPrint(code)` and nothing else -- so the run can be emitted directly. Printing cannot
+            // change parser state, so _state stays Ground for the whole run. Everything outside that
+            // range, DEL and the C1 block included, falls through to the original path unchanged.
+            if (_state == ParserState.Ground)
+            {
+                var start = i;
+                while (i < length)
+                {
+                    var c = data[i];
+                    if (c < 0x20 || c >= 0x7F)
+                        break;
+                    i++;
+                }
+
+                if (i > start)
+                {
+                    OnPrintRun(data, start, i - start);
+                    continue;
+                }
+            }
+
+            // Slow path: one codepoint. Mirrors string.EnumerateRunes(), which substitutes U+FFFD for
+            // an unpaired surrogate rather than throwing -- terminal input is not guaranteed well-formed.
+            var ch = data[i];
+            if (char.IsHighSurrogate(ch))
+            {
+                if (i + 1 < length)
+                {
+                    if (char.IsLowSurrogate(data[i + 1]))
+                    {
+                        ParseChar(char.ConvertToUtf32(ch, data[i + 1]));
+                        i += 2;
+                        continue;
+                    }
+
+                    ParseChar(0xFFFD);
+                    i++;
+                    continue;
+                }
+
+                // Last char of the chunk: hold it rather than declaring it unpaired, and decide once
+                // the next chunk arrives.
+                _pendingHighSurrogate = ch;
+                return;
+            }
+
+            if (char.IsLowSurrogate(ch))
+            {
+                ParseChar(0xFFFD);
+                i++;
+                continue;
+            }
+
+            ParseChar(ch);
+            i++;
+        }
+    }
+
+    /// <summary>
+    /// Parses UTF-8 bytes directly.
+    ///
+    /// The string entry forces every caller to transcode a PTY read to UTF-16 first, allocating a
+    /// string per read and doing decode work most of the bytes do not need: terminal output is
+    /// overwhelmingly printable ASCII, where the byte, the codepoint and the cell are the same
+    /// number. This entry keeps the bytes as bytes.
+    ///
+    /// The Ground-state scan uses IndexOfAnyExceptInRange, which the runtime vectorises — that is
+    /// where the SIMD comes from, with no hand-written intrinsics to maintain.
+    /// </summary>
+    public void Parse(ReadOnlySpan<byte> data)
+    {
+        // The mirror of the case at the top of Parse(string): a high surrogate held from a string
+        // call cannot be completed by UTF-8 input.
+        if (_pendingHighSurrogate != '\0')
+        {
+            _pendingHighSurrogate = '\0';
+            ParseChar(0xFFFD);
+        }
+
+        // Resolve a sequence the previous chunk left incomplete. PTY reads split on byte boundaries,
+        // so a multi-byte codepoint straddling two calls is ordinary input, not corruption.
+        if (_pendingByteCount > 0)
+        {
+            Span<byte> joined = stackalloc byte[8];
+            var held = _pendingByteCount;
+            _pendingBytes.AsSpan(0, held).CopyTo(joined);
+
+            var take = Math.Min(data.Length, joined.Length - held);
+            data[..take].CopyTo(joined[held..]);
+            _pendingByteCount = 0;
+
+            var available = joined[..(held + take)];
+            var status = Rune.DecodeFromUtf8(available, out var rune, out var consumed);
+
+            if (status == OperationStatus.NeedMoreData && data.Length <= take)
+            {
+                StashPending(available);   // still short, and no more input to draw on
+                return;
+            }
+
+            // consumed >= held always, so the held bytes can never be dropped here. Bytes are only
+            // ever stashed on NeedMoreData, which makes them a VALID PREFIX, and DecodeFromUtf8
+            // consumes the maximal invalid subsequence -- which contains that prefix. Checked
+            // exhaustively rather than argued: all 17,651 valid prefixes of one to three bytes,
+            // against every continuation byte, produced no case consuming fewer than were held.
             ParseChar(rune.Value);
+            data = data[Math.Max(0, consumed - held)..];
+        }
+
+        while (!data.IsEmpty)
+        {
+            if (_state == ParserState.Ground)
+            {
+                // Longest stretch of printable ASCII. Anything outside U+0020..U+007E ends it: C0 and
+                // DEL are control, and >= 0x80 begins a multi-byte sequence.
+                var end = data.IndexOfAnyExceptInRange((byte)0x20, (byte)0x7E);
+                var runLength = end < 0 ? data.Length : end;
+
+                if (runLength > 0)
+                {
+                    OnPrintByteRun(data[..runLength]);
+                    data = data[runLength..];
+                    continue;
+                }
+            }
+
+            var b = data[0];
+            if (b < 0x80)
+            {
+                ParseChar(b);
+                data = data[1..];
+                continue;
+            }
+
+            var decode = Rune.DecodeFromUtf8(data, out var decoded, out var used);
+            if (decode == OperationStatus.NeedMoreData)
+            {
+                StashPending(data);
+                return;
+            }
+
+            // On invalid data DecodeFromUtf8 yields U+FFFD and consumes at least one byte, so this
+            // always advances.
+            ParseChar(decoded.Value);
+            data = data[used..];
+        }
+    }
+
+    private void StashPending(ReadOnlySpan<byte> remainder)
+    {
+        var count = Math.Min(remainder.Length, _pendingBytes.Length);
+        remainder[..count].CopyTo(_pendingBytes);
+        _pendingByteCount = count;
+    }
+
+    /// <summary>Bytes of a UTF-8 sequence the previous chunk ended part-way through.</summary>
+    private readonly byte[] _pendingBytes = new byte[4];
+    private int _pendingByteCount;
+
+    /// <summary>
+    /// Emits a run of printable ASCII bytes. The public Print event, if observed, still sees one
+    /// character at a time.
+    /// </summary>
+    protected virtual void OnPrintByteRun(ReadOnlySpan<byte> run)
+    {
+        PrintByteRunFast?.Invoke(run);
+
+        var handler = Print;
+        if (handler is not null)
+        {
+            foreach (var b in run)
+                handler.Invoke(this, new PrintEventArgs(CodePointText.Get((char)b)));
         }
     }
 
@@ -531,7 +775,35 @@ public class EscapeSequenceParser
     /// </summary>
     protected virtual void OnPrint(int code)
     {
-        Print?.Invoke(this, new PrintEventArgs(char.ConvertFromUtf32(code)));
+        // Two allocations used to happen here for every printed character: the string, and the
+        // EventArgs wrapping it. The string now comes from a cache, and the EventArgs is built only
+        // when something is actually subscribed to the public event -- the terminal itself uses
+        // PrintFast and never observes it.
+        var text = CodePointText.Get(code);
+
+        PrintFast?.Invoke(text);
+
+        var handler = Print;
+        if (handler is not null)
+            handler.Invoke(this, new PrintEventArgs(text));
+    }
+
+    /// <summary>
+    /// Emits a run of printable ASCII.
+    ///
+    /// The fast hook takes the whole run; the public Print event, if anyone is listening, still sees
+    /// one character at a time, because that is the contract it has always had.
+    /// </summary>
+    protected virtual void OnPrintRun(string data, int start, int count)
+    {
+        PrintRunFast?.Invoke(data, start, count);
+
+        var handler = Print;
+        if (handler is not null)
+        {
+            for (var k = 0; k < count; k++)
+                handler.Invoke(this, new PrintEventArgs(CodePointText.Get(data[start + k])));
+        }
     }
 
     /// <summary>
@@ -539,8 +811,18 @@ public class EscapeSequenceParser
     /// </summary>
     protected virtual void OnExecute(int code)
     {
-        Execute?.Invoke(this, new ExecuteEventArgs(code));
+        ExecuteFast?.Invoke(code);
+
+        var handler = Execute;
+        if (handler is not null)
+            handler.Invoke(this, new ExecuteEventArgs(code));
     }
+
+    /// <summary>
+    /// A high surrogate that ended the previous chunk, awaiting its low surrogate.
+    /// <c>'\0'</c> when there is none.
+    /// </summary>
+    private char _pendingHighSurrogate;
 
     private void Collect(int code)
     {
@@ -615,12 +897,16 @@ public class EscapeSequenceParser
     {
         FlushSubParam();
 
-        var finalChar = ((char)code).ToString();
-        // Clone params so handlers get their own copy
-        var paramsClone = _params.Clone();
-        // Collected characters come BEFORE the final character (e.g., "?" before "h" gives "?h")
-        var identifier = _collect.ToString() + finalChar;
-        OnCsi(identifier, paramsClone);
+        // Collected characters come BEFORE the final character (e.g., "?" before "h" gives "?h").
+        // The overwhelmingly common case is nothing collected at all -- a bare SGR is just "m" --
+        // so take the cached single-character string and skip building one.
+        var identifier = _collect.Length == 0
+            ? CodePointText.Get((char)code)
+            : _collect.ToString() + (char)code;
+
+        // Not cloned. The handler reads the parameters synchronously and the parser does not touch
+        // them again until the next sequence, so a copy per CSI bought nothing.
+        OnCsi(identifier, _params);
     }
 
     /// <summary>
@@ -628,13 +914,23 @@ public class EscapeSequenceParser
     /// </summary>
     protected virtual void OnCsi(string identifier, Params parameters)
     {
-        Csi?.Invoke(this, new CsiEventArgs(identifier, parameters));
+        // The internal handler gets the live Params. It reads them synchronously and keeps no
+        // reference -- InputHandler has no Params field -- and the parser resets the instance after
+        // dispatch, so there is nothing for a copy to protect against. Cloning here cost five
+        // allocations per sequence (the Params, two Lists, and their backing arrays), which on
+        // colour-heavy output was the single largest remaining source of garbage.
+        CsiFast?.Invoke(identifier, parameters);
+
+        // An external subscriber is a different matter: it may hold on to what it is handed, and the
+        // instance above is about to be reset underneath it. That one still gets its own copy.
+        var handler = Csi;
+        if (handler is not null)
+            handler.Invoke(this, new CsiEventArgs(identifier, parameters.Clone()));
     }
 
     private void DispatchEsc(int code)
     {
-        var finalChar = ((char)code).ToString();
-        OnEsc(finalChar, _collect.ToString());
+        OnEsc(CodePointText.Get((char)code), _collect.ToString());
     }
 
     /// <summary>
@@ -642,12 +938,27 @@ public class EscapeSequenceParser
     /// </summary>
     protected virtual void OnEsc(string finalChar, string collected)
     {
-        Esc?.Invoke(this, new EscEventArgs(finalChar, collected));
+        EscFast?.Invoke(finalChar, collected);
+
+        var handler = Esc;
+        if (handler is not null)
+            handler.Invoke(this, new EscEventArgs(finalChar, collected));
     }
 
     private void OscPut(int code)
     {
-        _osc.Append(char.ConvertFromUtf32(code));
+        // Append the char, not a string built from it. ConvertFromUtf32 allocated once per character
+        // of every OSC payload -- window titles, OSC 7 working directories, OSC 8 URLs, and every
+        // OSC 133 prompt mark, which a shell emits several times per command.
+        if (code < 0x10000)
+        {
+            _osc.Append((char)code);
+            return;
+        }
+
+        var value = code - 0x10000;
+        _osc.Append((char)(0xD800 + (value >> 10)));
+        _osc.Append((char)(0xDC00 + (value & 0x3FF)));
     }
 
     /// <summary>
@@ -852,7 +1163,11 @@ public class EscapeSequenceParser
     /// </summary>
     protected virtual void OnOsc(string data)
     {
-        Osc?.Invoke(this, new OscEventArgs(data));
+        OscFast?.Invoke(data);
+
+        var handler = Osc;
+        if (handler is not null)
+            handler.Invoke(this, new OscEventArgs(data));
     }
 
     /// <summary>
@@ -865,6 +1180,8 @@ public class EscapeSequenceParser
         EndDcs(terminatedCleanly: false);
         EndApc(terminatedCleanly: false);
 
+        // And a half of a surrogate pair carried across a Write is abandoned with it.
+        _pendingHighSurrogate = '\0';
         _state = ParserState.Ground;
         _params.Reset();
         _collect.Clear();

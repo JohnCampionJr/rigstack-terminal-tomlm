@@ -416,3 +416,6 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+# Generated benchmark corpus — reproducible from a fixed seed
+src/XTerm.NET.Bench/**/corpus/

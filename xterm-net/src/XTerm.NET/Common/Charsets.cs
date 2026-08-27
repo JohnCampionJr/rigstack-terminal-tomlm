@@ -85,7 +85,7 @@ public static class Charsets
     public static string TranslateChar(char c, Dictionary<char, string>? charset)
     {
         if (charset == null || !charset.TryGetValue(c, out var translated))
-            return c.ToString();
+            return CodePointText.Get(c);   // cached: c.ToString() allocated once per printed character
         
         return translated;
     }

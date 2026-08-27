@@ -58,7 +58,7 @@ public class TerminalTests
 
         // Act & Assert - Should not throw
         terminal.Write("");
-        terminal.Write(null!);
+        terminal.Write((string)null!);   // disambiguated: Write(ReadOnlySpan<byte>) also accepts null
     }
 
     [Fact]

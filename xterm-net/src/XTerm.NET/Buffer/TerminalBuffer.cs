@@ -72,6 +72,13 @@ public class TerminalBuffer
     public event Action<int>? Trimmed;
 
     /// <summary>
+    /// Whether scrolling reuses the scrollback line it is about to discard instead of allocating a
+    /// new one. On by default. Turn it off if a consumer holds <see cref="BufferLine"/> references
+    /// across writes; see the invariant documented in <c>ScrollUp</c>.
+    /// </summary>
+    public bool RecycleScrolledLines { get; set; } = true;
+
+    /// <summary>
     /// Saved cursor state for DECSC/DECRC.
     /// </summary>
     public class SavedCursor
@@ -141,14 +148,40 @@ public class TerminalBuffer
     {
         for (int i = 0; i < lines; i++)
         {
-            // Create a new blank line that will be inserted at the bottom of the scroll region
-            var newLine = GetBlankLine(AttributeData.Default, isWrapped);
+            BufferLine newLine;
 
             // Only the full-screen scroll region contributes to scrollback.
             // Top-anchored partial regions reserve rows below the margin and
             // must scroll in place so prompts/status rows are not promoted.
             if (_scrollTop == 0 && _scrollBottom == _rows - 1 && _lines.MaxLength > _rows)
             {
+                // Reuse the line the ring is about to drop, rather than allocating a replacement.
+                //
+                // At capacity, Push overwrites the oldest slot -- so the oldest line becomes garbage
+                // on every single scrolled line. At 240 columns that is several KB per line, and it
+                // showed up as ~19 gen0 collections per million characters on short-line output.
+                // Handing that same line back as the new blank one turns the allocation into a fill.
+                //
+                // INVARIANT this relies on: nothing outside the buffer retains a BufferLine across a
+                // write. Within this library that holds -- SelectionManager tracks coordinates and
+                // adjusts them on Trimmed, it does not hold line objects. Renderers must fetch lines
+                // from Buffer.Lines per frame rather than caching them; per-line render state belongs
+                // in BufferLine.Cache, which ResetInPlace clears. Set RecycleScrolledLines to false
+                // if a consumer cannot honour that.
+                if (RecycleScrolledLines
+                    && _lines.TryPeekEvictionCandidate(out var recycled)
+                    && recycled.Length == _cols)
+                {
+                    var fill = BufferCell.Space;
+                    fill.Attributes = AttributeData.Default;
+                    recycled.ResetInPlace(fill, isWrapped);
+                    newLine = recycled;
+                }
+                else
+                {
+                    newLine = GetBlankLine(AttributeData.Default, isWrapped);
+                }
+
                 // When scrollTop is 0, the top line goes into scrollback.
                 // In xterm.js: push new line first, then increment yBase and yDisp.
                 // This causes the circular list to potentially recycle the oldest line.
@@ -183,6 +216,10 @@ public class TerminalBuffer
             }
             else
             {
+                // A partial scroll region drops a line from the middle of the ring, not the oldest
+                // slot, so there is nothing safe to recycle here.
+                newLine = GetBlankLine(AttributeData.Default, isWrapped);
+
                 // Scroll region is not at top of screen.
                 // Remove line from scroll region top and add blank at bottom.
                 // Use yBase offset for correct absolute positioning.
