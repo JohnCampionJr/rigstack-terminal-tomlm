@@ -437,6 +437,14 @@ public class EscapeSequenceParser
             case ParserState.DcsEntry:
                 _params.Reset();
                 _collect.Clear();
+                // The sub-parameter accumulator is transient state like the rest, and nothing else
+                // clears it when a sequence is ABANDONED rather than dispatched -- FlushSubParam
+                // runs on a separator or at dispatch, none of which happen then. Left set, the digit
+                // branch swallows every digit of the NEXT sequence up to its first separator, so its
+                // first parameter reads as 0: ESC[31m becomes SGR 0 and resets every attribute
+                // instead of setting red.
+                _inSubParam = false;
+                _subParamValue = 0;
                 _params.AddParam(0);
                 break;
 
@@ -708,6 +716,11 @@ public class EscapeSequenceParser
         _state = ParserState.Ground;
         _params.Reset();
         _collect.Clear();
+
+        // Cleared here too, so an application can recover in-band: a partial write followed by RIS
+        // would otherwise leave the terminal misreading the first sequence after the reset.
+        _inSubParam = false;
+        _subParamValue = 0;
         _osc.Clear();
         _dcs.Clear();
         _dcsChunkLength = 0;

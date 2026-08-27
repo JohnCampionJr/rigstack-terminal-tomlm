@@ -79,7 +79,12 @@ public class Params : ICloneable
         }
         else
         {
-            _params.Add(value);
+            // Through AddParam, which extends BOTH lists. Adding to _params alone leaves
+            // _subParamStart a element short, and every sub-parameter lookup indexes it by the
+            // parameter's own index -- so the next AddSubParam or GetSubParams would throw. The
+            // parser cannot reach this today because entering CsiEntry always seeds a parameter,
+            // but this type is public and the invariant is new.
+            AddParam(value);
         }
     }
 

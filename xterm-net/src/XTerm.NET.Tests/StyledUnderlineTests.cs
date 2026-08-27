@@ -150,6 +150,52 @@ public class StyledUnderlineTests
         Assert.NotEqual(0, first);
     }
 
+    // ---- an abandoned sequence must not poison the next one --------------------------------------
+    //
+    // Raised in review. The sub-parameter accumulator is parser-lifetime state, and nothing cleared
+    // it when a sequence was abandoned rather than dispatched -- so every digit of the NEXT sequence
+    // up to its first separator was swallowed into the stale sub-parameter and its first parameter
+    // read as 0. Worse than a dropped sequence, because 0 means something for most of them.
+
+    private static AttributeData AttrAt(Terminal terminal)
+        => terminal.Buffer.Lines[terminal.Buffer.YBase]![0].Attributes;
+
+    /// <summary>What a clean SGR 31 gives, to compare a poisoned one against.</summary>
+    private static int RedForeground()
+    {
+        var terminal = Fresh();
+        terminal.Write($"{Esc}[31mx");
+        return AttrAt(terminal).GetFgColor();
+    }
+
+    [Theory]
+    [InlineData("\u001b[4:3")]            // ESC begins the next sequence and abandons this one
+    [InlineData("\u001b[4:3\u0018")]      // CAN
+    [InlineData("\u001b[4:3\u001a")]      // SUB
+    [InlineData("\u001b[4:3\u001bc")]     // RIS
+    public void An_abandoned_sequence_does_not_swallow_the_next_one(string abandoned)
+    {
+        var terminal = Fresh();
+        terminal.Write(abandoned);
+        terminal.Write($"{Esc}[31mx");
+
+        Assert.Equal(RedForeground(), AttrAt(terminal).GetFgColor());
+    }
+
+    /// <summary>
+    /// Not only SGR: a lost first parameter homes the cursor instead of moving it.
+    /// </summary>
+    [Fact]
+    public void An_abandoned_sequence_does_not_swallow_a_cursor_move()
+    {
+        var terminal = Fresh();
+        terminal.Write($"{Esc}[4:3");
+        terminal.Write($"{Esc}[2;5H");
+        terminal.Write("z");
+
+        Assert.Equal("z", terminal.Buffer.Lines[terminal.Buffer.YBase + 1]![4].Content);
+    }
+
     // ---- the reason this is stored as an id ------------------------------------------------------
 
     /// <summary>
