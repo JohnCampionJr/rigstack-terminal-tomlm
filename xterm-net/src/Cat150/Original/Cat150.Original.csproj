@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The RELEASED library, from NuGet. Same harness source as the fork project next door; the two
+       cannot live in one assembly because they publish the same types. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <AssemblyName>Cat150.Original</AssemblyName>
+    <RootNamespace>Cat150</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="XTerm.NET" Version="1.1.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="../Harness.cs" Link="Harness.cs" />
+    <Compile Include="../Program.cs" Link="Program.cs" />
+  </ItemGroup>
+
+</Project>

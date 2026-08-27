@@ -39,6 +39,26 @@ public class CircularList<T> where T : class
     }
 
     /// <summary>
+    /// The item the next <see cref="Push"/> would overwrite, when the list is at capacity.
+    /// Returns false otherwise.
+    ///
+    /// Exists so a caller that is about to discard the oldest entry can reuse it instead of
+    /// allocating a replacement. The caller must reset whatever it takes back: the item is still
+    /// in the list until Push replaces it.
+    /// </summary>
+    public bool TryPeekEvictionCandidate(out T item)
+    {
+        if (_length == MaxLength && MaxLength > 0)
+        {
+            item = _array[GetCyclicIndex(0)]!;
+            return item is not null;
+        }
+
+        item = default!;
+        return false;
+    }
+
+    /// <summary>
     /// Pushes a new item to the end of the list.
     /// </summary>
     public void Push(T item)
