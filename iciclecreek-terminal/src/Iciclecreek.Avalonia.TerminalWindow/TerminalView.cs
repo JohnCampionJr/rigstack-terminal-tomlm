@@ -674,18 +674,34 @@ namespace Iciclecreek.Terminal
         /// writing <c>Environment.GetEnvironmentVariable(...)</c> would get a compile error rather than the
         /// framework. <c>ProcessStartInfo.EnvironmentVariables</c> is the established .NET name for exactly
         /// this concept.</para>
-        /// <para><c>TERM</c> is supplied automatically as <c>xterm-256color</c> when this dictionary does not
-        /// carry one, because nothing else does — the PTY layer does not set it, and on Windows there is
-        /// none in the environment to inherit. Put <c>TERM</c> in here to override that.</para>
+        /// <para><c>TERM</c> and <c>COLORTERM</c> are supplied automatically (as <c>xterm-256color</c> and
+        /// <c>truecolor</c>) when this dictionary does not carry them, because nothing else does — the PTY
+        /// layer sets neither, and on Windows there is none in the environment to inherit. Put either in
+        /// here to override it.</para>
         /// </remarks>
         /// <summary>
         /// The <c>TERM</c> given to a launched process when the caller supplies none.
         /// </summary>
         /// <remarks>
-        /// What this terminal actually behaves like: an xterm with 24-bit colour. Overridden by putting
-        /// <c>TERM</c> in <see cref="EnvironmentVariables"/>.
+        /// What this terminal actually behaves like. Overridden by putting <c>TERM</c> in
+        /// <see cref="EnvironmentVariables"/>.
         /// </remarks>
         public const string DefaultTermType = "xterm-256color";
+
+        /// <summary>
+        /// The <c>COLORTERM</c> given to a launched process when the caller supplies none.
+        /// </summary>
+        /// <remarks>
+        /// <para>Not a contradiction of <see cref="DefaultTermType"/>. The two answer different questions:
+        /// <c>TERM</c> names a terminfo entry, and <c>xterm-256color</c> describes the 256-entry indexed
+        /// palette that terminfo can express; <c>COLORTERM</c> advertises DIRECT 24-bit colour, which
+        /// terminfo has no standard way to state. Every modern terminal sets both -- Windows Terminal,
+        /// kitty, alacritty and iTerm2 among them.</para>
+        /// <para>Without it a program reads the terminfo entry, concludes 256 colours, and quantises its
+        /// output to the palette. This terminal takes full RGB, so that would be throwing away colour it
+        /// could have shown.</para>
+        /// </remarks>
+        public const string DefaultColorTerm = "truecolor";
 
         public static readonly StyledProperty<IDictionary<string, string>?> EnvironmentVariablesProperty =
             AvaloniaProperty.Register<TerminalView, IDictionary<string, string>?>(
@@ -3880,6 +3896,13 @@ namespace Iciclecreek.Terminal
 
                 if (!environment.ContainsKey("TERM"))
                     environment["TERM"] = DefaultTermType;
+
+                // COLORTERM alongside it, because TERM cannot carry this. A terminfo entry describes an
+                // indexed palette, so xterm-256color says "256 colours" and a program quantises to them --
+                // this terminal takes full RGB, and that would be discarding colour it could have shown.
+                // It is the first thing consulted by everything that looks, ahead of terminfo entirely.
+                if (!environment.ContainsKey("COLORTERM"))
+                    environment["COLORTERM"] = DefaultColorTerm;
 
                 options.Environment = environment;
 
