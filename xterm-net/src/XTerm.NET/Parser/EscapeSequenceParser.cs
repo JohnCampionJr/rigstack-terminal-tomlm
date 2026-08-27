@@ -303,11 +303,6 @@ public class EscapeSequenceParser
                     Collect(code);
                     Transition(ParserState.CsiIntermediate);
                 }
-                else if (code == 0x3A) // :
-                {
-                    // Sub-parameter separator
-                    Transition(ParserState.CsiIgnore);
-                }
                 break;
 
             case ParserState.CsiIntermediate:
@@ -514,6 +509,14 @@ public class EscapeSequenceParser
             case ParserState.DcsEntry:
                 _params.Reset();
                 _collect.Clear();
+                // The sub-parameter accumulator is transient state like the rest, and nothing else
+                // clears it when a sequence is ABANDONED rather than dispatched -- FlushSubParam
+                // runs on a separator or at dispatch, none of which happen then. Left set, the digit
+                // branch swallows every digit of the NEXT sequence up to its first separator, so its
+                // first parameter reads as 0: ESC[31m becomes SGR 0 and resets every attribute
+                // instead of setting red.
+                _inSubParam = false;
+                _subParamValue = 0;
                 _params.AddParam(0);
                 break;
 
@@ -544,16 +547,63 @@ public class EscapeSequenceParser
         _collect.Append((char)code);
     }
 
+    /// <summary>
+    /// True between a colon and the next separator, while digits belong to a sub-parameter rather
+    /// than to the parameter itself.
+    /// </summary>
+    private bool _inSubParam;
+
+    private int _subParamValue;
+
+    /// <summary>
+    /// Ends the current parameter or sub-parameter and starts a sub-parameter.
+    /// </summary>
+    /// <remarks>
+    /// An empty slot is a real value, not an omission — <c>58:2::255:0:0</c> carries a colour space
+    /// id nobody uses, and dropping it would shift the three components by one and turn red into
+    /// black.
+    /// </remarks>
+    private void BeginSubParam()
+    {
+        FlushSubParam();
+        _inSubParam = true;
+        _subParamValue = 0;
+    }
+
+    private void FlushSubParam()
+    {
+        if (!_inSubParam)
+            return;
+
+        _params.AddSubParam(_subParamValue);
+        _inSubParam = false;
+        _subParamValue = 0;
+    }
+
     private void Param(int code)
     {
-        if (code == 0x3B) // ;
+        if (code == 0x3A) // :
         {
+            // Handled HERE and not in the state machine, because 0x3A sits inside the 0x30..0x3F
+            // parameter-byte range the digit branch already claims -- a colon case beside that
+            // branch can never be reached, which is how this went unnoticed.
+            BeginSubParam();
+        }
+        else if (code == 0x3B) // ;
+        {
+            FlushSubParam();
             _params.AddParam(0);
         }
         else if (code >= 0x30 && code <= 0x39) // 0-9
         {
             var digit = code - 0x30;
-            
+
+            if (_inSubParam)
+            {
+                _subParamValue = _subParamValue * 10 + digit;
+                return;
+            }
+
             // Get current value of last parameter and update it
             var currentValue = _params.GetParam(_params.Length - 1, 0);
             var newValue = currentValue * 10 + digit;
@@ -563,6 +613,8 @@ public class EscapeSequenceParser
 
     private void DispatchCsi(int code)
     {
+        FlushSubParam();
+
         var finalChar = ((char)code).ToString();
         // Clone params so handlers get their own copy
         var paramsClone = _params.Clone();
@@ -816,6 +868,11 @@ public class EscapeSequenceParser
         _state = ParserState.Ground;
         _params.Reset();
         _collect.Clear();
+
+        // Cleared here too, so an application can recover in-band: a partial write followed by RIS
+        // would otherwise leave the terminal misreading the first sequence after the reset.
+        _inSubParam = false;
+        _subParamValue = 0;
         _osc.Clear();
         _dcs.Clear();
         _dcsChunkLength = 0;

@@ -6,8 +6,23 @@ namespace XTerm.Parser;
 public class Params : ICloneable
 {
     private readonly List<int> _params;
+
+    /// <summary>
+    /// Every sub-parameter in the sequence, flat. <see cref="_subParamStart"/> says where each
+    /// parameter's run begins.
+    /// </summary>
+    /// <remarks>
+    /// Flat rather than a list per parameter because almost no sequence has sub-parameters at all,
+    /// and the ones that do have a handful — a list of lists would allocate on every CSI to describe
+    /// nothing.
+    /// </remarks>
     private readonly List<int> _subParams;
-    private int _subParamsStart;
+
+    /// <summary>
+    /// Index into <see cref="_subParams"/> where each parameter's sub-parameters begin, and -1 for
+    /// a parameter that has none, which is nearly all of them.
+    /// </summary>
+    private readonly List<int> _subParamStart;
 
     public int Length => _params.Count;
 
@@ -17,8 +32,8 @@ public class Params : ICloneable
     public Params()
     {
         _params = new List<int>(32);
-        _subParams = new List<int>(32);
-        _subParamsStart = 0;
+        _subParams = new List<int>(8);
+        _subParamStart = new List<int>(32);
     }
 
     /// <summary>
@@ -28,7 +43,7 @@ public class Params : ICloneable
     {
         _params = new List<int>(other._params);
         _subParams = new List<int>(other._subParams);
-        _subParamsStart = other._subParamsStart;
+        _subParamStart = new List<int>(other._subParamStart);
     }
 
     /// <summary>
@@ -50,6 +65,7 @@ public class Params : ICloneable
     public void AddParam(int value)
     {
         _params.Add(value);
+        _subParamStart.Add(-1);
     }
 
     /// <summary>
@@ -63,31 +79,68 @@ public class Params : ICloneable
         }
         else
         {
-            _params.Add(value);
+            // Through AddParam, which extends BOTH lists. Adding to _params alone leaves
+            // _subParamStart a element short, and every sub-parameter lookup indexes it by the
+            // parameter's own index -- so the next AddSubParam or GetSubParams would throw. The
+            // parser cannot reach this today because entering CsiEntry always seeds a parameter,
+            // but this type is public and the invariant is new.
+            AddParam(value);
         }
     }
 
     /// <summary>
     /// Adds a sub-parameter.
     /// </summary>
+    /// <summary>
+    /// Adds a sub-parameter to the parameter most recently added.
+    /// </summary>
     public void AddSubParam(int value)
     {
+        if (_params.Count == 0)
+        {
+            // A sequence beginning with a colon has nothing to attach to. Give it a parameter to
+            // belong to rather than dropping it, so CSI :1 m is read as parameter 0 with a
+            // sub-parameter rather than vanishing.
+            AddParam(0);
+        }
+
+        var last = _params.Count - 1;
+        if (_subParamStart[last] < 0)
+            _subParamStart[last] = _subParams.Count;
+
         _subParams.Add(value);
     }
 
     /// <summary>
-    /// Gets sub-parameters for a specific parameter index.
+    /// The sub-parameters of one parameter, or an empty list when it has none.
     /// </summary>
-    public List<int> GetSubParams(int index)
+    /// <remarks>
+    /// These carry the colon forms: <c>4:3</c> for a curly underline, <c>58:2::r:g:b</c> for an
+    /// underline colour, <c>38:2::r:g:b</c> for a foreground. Before this returned anything the
+    /// parser discarded such sequences outright, so a program using the colon form of truecolor got
+    /// no colour at all.
+    /// </remarks>
+    public IReadOnlyList<int> GetSubParams(int index)
     {
-        var result = new List<int>();
-        if (index >= 0 && index < _params.Count)
+        if (index < 0 || index >= _params.Count)
+            return Array.Empty<int>();
+
+        var start = _subParamStart[index];
+        if (start < 0)
+            return Array.Empty<int>();
+
+        // Runs are contiguous and in order, so this one ends where the next begins.
+        var end = _subParams.Count;
+        for (var i = index + 1; i < _subParamStart.Count; i++)
         {
-            // Sub-parameters are stored contiguously
-            // This is a simplified version
-            return result;
+            if (_subParamStart[i] >= 0)
+            {
+                end = _subParamStart[i];
+                break;
+            }
         }
-        return result;
+
+        return _subParams.GetRange(start, end - start);
     }
 
     /// <summary>
@@ -97,7 +150,7 @@ public class Params : ICloneable
     {
         _params.Clear();
         _subParams.Clear();
-        _subParamsStart = 0;
+        _subParamStart.Clear();
     }
 
     /// <summary>
