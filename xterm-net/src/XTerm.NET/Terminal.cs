@@ -97,6 +97,16 @@ public class Terminal
     public ShellIntegrationMark? ShellIntegrationState { get; internal set; }
 
     /// <summary>
+    /// Whether an application has declared an atomic update in progress (DEC private mode 2026).
+    /// </summary>
+    /// <remarks>
+    /// A renderer should hold the last complete frame while this is true, and must bound the wait
+    /// with a timeout of its own — an application that sets this and dies would otherwise freeze the
+    /// display permanently.
+    /// </remarks>
+    public bool SynchronizedOutput { get; internal set; }
+
+    /// <summary>
     /// The exit code from the last OSC 133 ; D, or null if none has been reported.
     /// </summary>
     public int? LastCommandExitCode { get; internal set; }
@@ -176,6 +186,20 @@ public class Terminal
     /// Fired for each OSC 133 shell integration mark.
     /// </summary>
     public event EventHandler<TerminalEvents.ShellIntegrationEventArgs>? ShellIntegrationMarkReceived;
+
+    /// <summary>
+    /// Raised when an atomic update begins or ends, so a renderer can react without polling.
+    /// </summary>
+    public event EventHandler<bool>? SynchronizedOutputChanged;
+
+    internal void RaiseSynchronizedOutputChanged(bool active)
+    {
+        if (SynchronizedOutput == active)
+            return;
+
+        SynchronizedOutput = active;
+        SynchronizedOutputChanged?.Invoke(this, active);
+    }
 
     /// <summary>
     /// Fired when progress is reported via OSC 9 ; 4.
