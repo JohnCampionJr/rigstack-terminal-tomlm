@@ -422,9 +422,14 @@ public class TerminalBuffer
         // alone moved the cursor onto earlier content: shrink a window with a prompt at row 22 down
         // to ten rows and the cursor landed on absolute row 9, where the next write destroyed
         // whatever lived there.
-        if (_y > newRows - 1)
+        // Floored, because newRows can be zero: a bare "newRows - 1" is -1 there, which makes the
+        // test true for any cursor and inflates the overflow by one, scrolling the buffer during a
+        // resize that has no viewport at all.
+        var newBottom = Math.Max(0, newRows - 1);
+
+        if (_y > newBottom)
         {
-            var overflow = _y - (newRows - 1);
+            var overflow = _y - newBottom;
             var room = Math.Max(0, _lines.Length - newRows - _yBase);
             var shift = Math.Min(overflow, room);
 
@@ -435,7 +440,7 @@ public class TerminalBuffer
                 _yDisp = _yBase;
         }
 
-        _y = Math.Clamp(_y, 0, Math.Max(0, newRows - 1));
+        _y = Math.Clamp(_y, 0, newBottom);
         SavedCursorState.X = Math.Clamp(SavedCursorState.X, 0, Math.Max(0, newCols - 1));
         SavedCursorState.Y = Math.Max(SavedCursorState.Y, 0);
 

@@ -133,6 +133,32 @@ public class ResizeEdgeCaseTests
     }
 
     /// <summary>
+    /// A zero-row resize has no viewport to overflow out of, and must not scroll the buffer.
+    /// </summary>
+    /// <remarks>
+    /// The bottom row of a zero-row viewport is not -1, and treating it as such makes the overflow
+    /// one line too large -- so a resize that shows nothing still moved the cursor's content row,
+    /// and the line that came back at the top when rows were restored was the wrong one. Zero rows
+    /// is a real case here: a buffer can be built with none and brought to life by a later resize.
+    /// </remarks>
+    [Fact]
+    public void ZeroRowResize_DoesNotScrollTheBuffer()
+    {
+        var terminal = new Terminal(new TerminalOptions { Cols = 40, Rows = 24, Scrollback = 200 });
+        for (var i = 0; i < 20; i++)
+            terminal.Write($"line {i}\r\n");
+        terminal.Write("prompt$ ");
+
+        var contentRow = terminal.Buffer.YBase + terminal.Buffer.Y;
+
+        terminal.Resize(40, 0);
+        Assert.Equal(contentRow, terminal.Buffer.YBase + terminal.Buffer.Y);
+
+        terminal.Resize(40, 24);
+        Assert.Equal(contentRow, terminal.Buffer.YBase + terminal.Buffer.Y);
+    }
+
+    /// <summary>
     /// A resize must not move the cursor off the line it is on. Its position is YBase + Y, and both
     /// halves of a resize used to change one without the other.
     /// </summary>
