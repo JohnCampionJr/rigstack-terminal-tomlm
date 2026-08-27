@@ -6,9 +6,11 @@ A .NET terminal emulator library inspired by [xterm.js](https://github.com/xterm
 XTerm.NET provides a headless terminal emulator that parses and processes VT100/ANSI escape sequences,
 making it easy to host console applications in your .NET applications.
 
-**Sixel and Kitty graphics are supported.** Images arrive as ordinary cell content rather than as an
-overlay, so they are overwritten by text, cleared by `ED`/`EL`, scrolled with their lines, and freed
-when they fall out of the scrollback — see [Images](#images).
+**Sixel and Kitty graphics are supported.** A picture is held as a run on the line it appears on, so
+it scrolls with that line, is cleared by `ED`/`EL`, and is freed when the line falls out of the
+scrollback — and a resize does nothing to it at all. Sixel is *content*, so printing over it replaces
+that part of the picture; Kitty is an *overlay* ordered against the text by its z-index. See
+[Images](#images).
 
 ## Features
 
@@ -24,6 +26,50 @@ when they fall out of the scrollback — see [Images](#images).
 - **Kitty Graphics** — Decodes the Kitty protocol (`ESC _ G …`), including chunked transmission, PNG,
   transmit-once/place-many by image id, animation, and U+10EEEE Unicode placeholders, so `icat`,
   `chafa -f kitty`, `timg -pk`, `yazi` and `image.nvim` work the same way
+
+## Upgrading to 2.0
+
+**2.0 targets .NET 10** and removes the per-cell image API. If you only host a terminal and draw
+text, nothing changes but the target framework. If you draw images, the contract has been replaced
+rather than extended.
+
+A picture used to be scattered across cells, each carrying a reference and a tile coordinate. It is
+now a run held by the line: `LinePlacement`, with the columns it covers and the source rectangle it
+reads. That is what makes a resize stop destroying pictures — a run keeps its natural width, so
+narrowing a window shows less of a picture instead of losing it.
+
+**Removed from `BufferCell`.** A cell is a struct, so a copy of one has no idea which line or column
+it came from and cannot answer for a run anchored to both. Ask the line instead:
+
+| Gone | Use |
+| --- | --- |
+| `cell.Image` | `line.TryGetImageAt(column, out var image)` |
+| `cell.IsImage` | `line.TryGetPlacementAt(column, out _)` |
+| `cell.ImageTile`, `cell.ImageCol`, `cell.ImageRow` | `line.TryGetPlacementAt(column, out var p)` — `p.SrcX`, `p.SrcY` |
+| `BufferCell.PackTile(col, row)` | no longer meaningful; runs carry source pixels, not tile numbers |
+
+**Changed elsewhere.**
+
+- `TerminalImage.ByteCount` is a `long`. An animation's frames are counted against the image budget
+  alongside the root picture, and the two together can exceed what an `int` holds.
+- `Params.GetSubParams` returns `IReadOnlyList<int>` rather than `List<int>`. It used to be a stub
+  that returned an empty list; it now returns the real sub-parameters, which is what makes `4:3` a
+  curly underline and `38:2::r:g:b` a colour instead of both being discarded.
+- `AttributeData.IsUnderline()` reports the underline *style* rather than a separate flag, so a cell
+  underlined by `4:3` or `21` now answers true. Keeping a flag beside the style is how a cell ends up
+  underlined by one and not the other.
+
+**What a renderer does now.** Take `line.Placements`, order them by `ZIndex` — a stable sort, so
+equal depths keep the order they were placed in, which is age — and draw them back to front with the
+text going down between the negative ones and the rest. Each run is a single blit: source
+`(SrcX, SrcY, SrcWidth, SrcHeight)`, destination the columns from `Column` for `Cols` cells. Clip the
+destination to the line's width and narrow the source by the same proportion. Paint the cell
+background from the bottom-most run covering it and no other, or a nearer picture will erase what is
+behind it instead of blending over it.
+
+For animation, draw `image.CurrentPixels` rather than `image.Pixels`, and re-upload a cached texture
+when `image.FrameSerial` changes. Drive the clock with `AdvanceAnimations(delta)`, and use
+`HasRunningAnimations()` to decide whether you need one at all.
 
 ## Installation
 
