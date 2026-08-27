@@ -1,3 +1,4 @@
+using System.Linq;
 using XTerm;
 using XTerm.Graphics;
 
@@ -35,6 +36,83 @@ internal static class ImageAssertions
     /// <summary>Whether a screen position shows part of a picture.</summary>
     public static bool IsImageAt(Terminal terminal, int col, int screenRow)
         => PlacementAt(terminal, col, screenRow) is not null;
+
+    /// <summary>
+    /// Which piece of its picture a screen position shows, as the source pixel it starts at.
+    /// </summary>
+    /// <remarks>
+    /// The replacement for <c>cell.ImageCol</c> and <c>cell.ImageRow</c>. A run no longer numbers
+    /// tiles -- it carries the source rectangle directly -- so "which tile is this" becomes "which
+    /// pixels does this column read from", which is the same question one level down and the one
+    /// the renderer actually asks.
+    /// </remarks>
+    public static (int X, int Y)? SourceAt(Terminal terminal, int col, int screenRow)
+    {
+        if (PlacementAt(terminal, col, screenRow) is not { } placement)
+            return null;
+
+        // Runs divide their source evenly across their columns, so the offset of this column within
+        // the run is the offset of its pixels within the source rectangle.
+        var perCell = placement.Cols > 0 ? (double)placement.SrcWidth / placement.Cols : 0;
+        return (placement.SrcX + (int)System.Math.Round((col - placement.Column) * perCell),
+                placement.SrcY);
+    }
+
+    /// <summary>How many screen rows one placement covers, found by its serial.</summary>
+    /// <remarks>
+    /// The replacement for asking a placement how many rows it had. A run is one line of a picture,
+    /// so the height is a property of the set of runs sharing a serial rather than of any one.
+    /// </remarks>
+    public static int RowsOf(Terminal terminal, int serial)
+    {
+        var rows = 0;
+        for (var row = 0; row < terminal.Rows; row++)
+        {
+            if (PlacementsOn(terminal, row).Any(p => p.Serial == serial))
+                rows++;
+        }
+        return rows;
+    }
+
+    /// <summary>
+    /// Which tile of its picture a screen position shows, in the picture's own cell grid.
+    /// </summary>
+    /// <remarks>
+    /// The direct replacement for <c>cell.ImageCol</c> and <c>cell.ImageRow</c>. Runs carry source
+    /// pixels rather than tile numbers, so this divides back down by the image's cell size — which
+    /// is what a tile number always was.
+    /// </remarks>
+    public static (int Col, int Row)? TileAt(Terminal terminal, int col, int screenRow)
+    {
+        if (SourceAt(terminal, col, screenRow) is not { } source)
+            return null;
+
+        var image = ImageAt(terminal, col, screenRow);
+        if (image is null || image.CellWidth <= 0 || image.CellHeight <= 0)
+            return null;
+
+        return (source.X / image.CellWidth, source.Y / image.CellHeight);
+    }
+
+    /// <summary>Every run on a screen row, in the order they were placed.</summary>
+    public static IReadOnlyList<LinePlacement> PlacementsOn(Terminal terminal, int screenRow)
+    {
+        var line = terminal.Buffer.Lines[terminal.Buffer.YBase + screenRow];
+        return line is null ? System.Array.Empty<LinePlacement>() : line.Placements;
+    }
+
+    /// <summary>Every run covering a screen position, front to back by z-index.</summary>
+    /// <remarks>
+    /// Stacking order, which two overlapping pictures need and a single "what is here" cannot give.
+    /// Ordered by z and then by age, age being the order they were added to the line -- so a stable
+    /// sort on z alone is the whole rule.
+    /// </remarks>
+    public static List<LinePlacement> StackAt(Terminal terminal, int col, int screenRow)
+        => PlacementsOn(terminal, screenRow)
+            .Where(p => p.Covers(col))
+            .OrderByDescending(p => p.ZIndex)
+            .ThenByDescending(p => p.Serial)
+            .ToList();
 
     /// <summary>
     /// How many cells in the whole buffer show part of a picture.

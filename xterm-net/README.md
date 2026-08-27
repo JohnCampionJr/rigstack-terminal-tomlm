@@ -6,9 +6,9 @@ A .NET terminal emulator library inspired by [xterm.js](https://github.com/xterm
 XTerm.NET provides a headless terminal emulator that parses and processes VT100/ANSI escape sequences,
 making it easy to host console applications in your .NET applications.
 
-**Sixel graphics are supported.** Images arrive as ordinary cell content rather than as an overlay, so
-they are overwritten by text, cleared by `ED`/`EL`, scrolled with their lines, and freed when they fall
-out of the scrollback — see [Sixel Images](#sixel-images).
+**Sixel and Kitty graphics are supported.** Images arrive as ordinary cell content rather than as an
+overlay, so they are overwritten by text, cleared by `ED`/`EL`, scrolled with their lines, and freed
+when they fall out of the scrollback — see [Images](#images).
 
 ## Features
 
@@ -21,6 +21,9 @@ out of the scrollback — see [Sixel Images](#sixel-images).
 - **Unicode Support** — Proper handling of wide characters and Unicode text
 - **Sixel Graphics** — Decodes Sixel images (`ESC P … q`) and stores them on the cells they cover, so
   `img2sixel`, `chafa`, `lsix` and `timg` work against a host that renders them
+- **Kitty Graphics** — Decodes the Kitty protocol (`ESC _ G …`), including chunked transmission, PNG,
+  transmit-once/place-many by image id, animation, and U+10EEEE Unicode placeholders, so `icat`,
+  `chafa -f kitty`, `timg -pk`, `yazi` and `image.nvim` work the same way
 
 ## Installation
 
@@ -252,13 +255,19 @@ void RenderTerminal(Terminal terminal)
 
 Wide characters (e.g., CJK ideographs, emoji) have `Width = 2`. The first cell contains the character, and the second cell has `Width = 0` as a placeholder — skip it during rendering but allocate space for the double-width glyph.
 
-### Sixel Images
+### Images
 
-A Sixel image (`ESC P … q … ESC \`) is decoded and written into the cells it covers. Each covered
-cell carries a reference to one shared `TerminalImage` plus the coordinates of the piece it shows,
-so an image behaves like terminal content rather than an overlay: printing over a cell replaces
-that part of the picture, `ED`/`EL` clear it, scrolling carries it, and the image is freed once the
-last cell holding it is gone.
+Two graphics protocols are decoded — Sixel (`ESC P … q … ESC \`) and Kitty
+(`ESC _ G … ESC \`) — and both end up in the same place: the cells the picture covers. Each covered
+cell carries a reference to a shared `ImagePlacement` plus the coordinates of the piece it shows, so
+an image behaves like terminal content rather than an overlay: printing over a cell replaces that
+part of the picture, `ED`/`EL` clear it, scrolling carries it, and the image is freed once the last
+cell holding it is gone.
+
+A **placement** is one appearance of a picture: which `TerminalImage` it draws, which rectangle of
+that image it takes, and how many cells it fills. Sixel makes one placement per image. Kitty can
+transmit a picture once and place it many times, so several placements may share one `TerminalImage`
+— which is why cells reference the placement and not the image.
 
 **Tell the terminal your cell size.** XTerm.NET is headless and cannot measure a font, so it cannot
 work out how many columns an image covers unless you say. Set these from your renderer's metrics,
@@ -298,45 +307,136 @@ surplus runs off the bottom and scrolls the screen.
 ```csharp
 BufferCell cell = line[col];
 
-if (cell.Image is TerminalImage image &&
-    image.TryGetTileSource(cell.ImageCol, cell.ImageRow, out int sx, out int sy, out int sw, out int sh))
+if (cell.Placement is ImagePlacement placement &&
+    placement.TryGetTileLayout(cell.ImageCol, cell.ImageRow,
+                               out int sx, out int sy, out int sw, out int sh,
+                               out double offX, out double offY,
+                               out double cellsWide, out double cellsHigh))
 {
     // Pixels are BGRA8888 with straight (unpremultiplied) alpha, top row first.
-    // Cache your framework's bitmap against the image object — a ConditionalWeakTable keyed on
-    // `image` lets the bitmap die when the image does, with no eviction list to maintain.
-    var bitmap = _bitmaps.GetOrCreate(image);
-
-    // Edge tiles are clipped, so scale the destination to match rather than stretching a partial
-    // tile over a whole cell.
-    double destW = cellWidth  * sw / (double)image.CellWidth;
-    double destH = cellHeight * sh / (double)image.CellHeight;
+    // Cache your framework's bitmap against `placement.Image` — a ConditionalWeakTable keyed on the
+    // image lets the bitmap die when the image does, with no eviction list to maintain, and two
+    // placements of one picture share the single upload.
+    var bitmap = _bitmaps.GetOrCreate(placement.Image);
 
     DrawImage(bitmap,
         source: (sx, sy, sw, sh),
-        dest: (col * cellWidth, row * cellHeight, destW, destH));
+        dest: ((col + offX) * cellWidth, (row + offY) * cellHeight,
+               cellWidth * cellsWide, cellHeight * cellsHigh));
     continue;
 }
 ```
 
-Adjacent cells sharing the same `Image` reference and `ImageRow` with consecutive `ImageCol` values
-are contiguous, so a renderer can coalesce them into a single draw call per row instead of one per
-cell. If you cache rendered rows, note that image cells must break a text run: compare `Image` by
-reference as well as comparing `Attributes`.
+`TryGetTileLayout` answers both halves in one call: which pixels to take, and where in the cell to
+put them. Both are needed because neither implies the other — a natural-size tile at the right edge
+is clipped short, a stretched tile is a proportional slice, and a placement carrying `X=`/`Y=` starts
+partway into its first cell and is *both* narrower and shifted. The older
+`GetTileCoverage(sw, sh, out cellsWide, out cellsHigh)` still works and still returns the same
+numbers, but it has no way to express that shift, so a renderer that wants offsets must use the
+layout call.
+
+Adjacent cells sharing the same **`Placement`** reference and `ImageRow` with consecutive `ImageCol`
+values are contiguous, so a renderer can coalesce them into a single draw call per row instead of one
+per cell. Compare the placement, not the image: under Kitty two appearances of one picture can sit
+side by side, and coalescing on the image would run a single strip across the join and blit the wrong
+pixels into both halves. If you cache rendered rows, note that image cells must break a text run —
+compare `Placement` by reference as well as comparing `Attributes`.
+
+`cell.Image` remains available as shorthand for `cell.Placement?.Image` and still identifies the
+pixels, so bitmap caches keyed on it need no change.
 
 Image cells hold `" "` as their content, so `TranslateToString` and selection copy yield blanks.
+
+**Placement geometry.** `ImagePlacement.Scaling` says how tiles divide the source:
+
+- `Natural` — a fixed cell pitch with edge tiles clipped. Sixel always, and Kitty when neither `c`
+  nor `r` is given.
+- `Stretched` — the source rectangle divided proportionally across the cell box, which is what
+  Kitty's `c`/`r` keys ask for. Tiles are not all the same width, so size each from its own source
+  rectangle rather than from the first one.
+
+`TryGetTileSource` and `GetTileCoverage` handle both, so a renderer using them does not need to
+branch on the mode.
 
 **Options:**
 
 | Option | Default | Purpose |
 |---|---|---|
-| `SixelEnabled` | `true` | Decode images, and advertise Sixel in the primary Device Attributes reply |
+| `SixelEnabled` | `true` | Decode Sixel, and advertise it in the primary Device Attributes reply |
+| `KittyGraphicsEnabled` | `true` | Decode Kitty graphics sequences and answer their queries |
 | `CellWidthPixels` / `CellHeightPixels` | `10` / `20` | Cell size images are laid out against |
 | `MaxSixelPixels` | `4_000_000` | Largest single image accepted |
 | `MaxImageBytes` | `64 MB` | Budget for image data live in the buffer; oldest are dropped past it |
+| `MaxImageRegistryBytes` | `32 MB` | Budget for transmitted-but-unplaced Kitty images, evicted oldest first |
 
 Images are dropped when the terminal is resized to a different **column** count, because reflow
 re-wraps lines by copying ranges of cells and the pieces would reassemble in the wrong places. A
 change of row count alone keeps them.
+
+#### Kitty graphics
+
+Supported: transmit (`a=t`), transmit-and-display (`a=T`), place a stored image (`a=p`), delete
+(`a=d`), and query (`a=q`); chunked payloads (`m=1`/`m=0`); RGB (`f=24`), RGBA (`f=32`) and PNG
+(`f=100`, including interlaced); zlib compression (`o=z`); source cropping (`x`,`y`,`w`,`h`);
+cell-box scaling (`c`,`r`); pixel offsets within the first cell (`X`,`Y`); cursor policy (`C`); and
+response suppression (`q=1`/`q=2`).
+
+An image may be named by the id the client chose (`i=`) or by a number it chose (`I=`), in which
+case the terminal picks an id and reports both back. The whole delete matrix is implemented — by id,
+by number, by placement id, at the cursor, at a cell, by row, by column, and by z-index — with the
+upper-case form of each additionally releasing the stored image.
+
+Images may be transmitted once and placed repeatedly, including via **U+10EEEE Unicode
+placeholders**, where the image id travels in the cell's foreground colour. That is how `yazi`,
+`ranger` and `image.nvim` draw. The combining marks that state an explicit tile row and column are
+decoded, so a client may write tiles in any order rather than as a rectangle in reading order.
+
+**Animation** is supported: frame transmission (`a=f`), animation control (`a=a`) and frame
+composition (`a=c`). Frames may carry only the rectangle that changed, composed onto a previous
+frame or onto a flat colour, blended or replaced. Both driving styles work — the client can make a
+frame current itself, or set gaps and hand the timing to the terminal.
+
+The emulator owns no timer. It is driven entirely by `Write`, and starting a thread inside a library
+that has none, to repaint a host that already has a render loop, would be the wrong place for it.
+So a host drives the clock:
+
+```csharp
+// From your render loop, with however long the last frame took.
+if (terminal.AdvanceAnimations(elapsed))
+    InvalidateVisual();
+```
+
+`HasRunningAnimations()` says whether a clock is needed at all, so a terminal showing nothing but
+text runs no timer. Draw `image.CurrentPixels` rather than `image.Pixels` — the latter stays the
+root frame and never changes, which is what makes it safe to hold and hand to another thread. Cache
+your texture against the image as before, and re-upload when `image.FrameSerial` changes.
+
+Not supported, and refused with a proper error reply rather than ignored:
+
+- **File, temp-file and shared-memory transmission (`t=f`, `t=t`, `t=s`)** are refused with `ENOTSUP`
+  by design. The terminal would be opening a path chosen by the program it hosts, and the host
+  usually holds more privilege than that program does. Direct transmission (`t=d`) is the only medium
+  accepted.
+
+**Draw order (`z=`)** is honoured, including where pictures overlap. A picture is a run held by the
+line rather than anything written into cells, so two pictures over the same columns are simply two
+runs and the z-index says which a renderer draws last — ordered by z, and at equal z by which was
+placed later. Covering one has no way to modify it: a translucent picture blends over the one behind
+it, and deleting the front one reveals the back one whole, because the back one was never touched.
+
+A host draws a line's runs from the back forwards, and paints each cell's own background once
+underneath them — painting it again with a nearer run would erase what is behind instead of letting
+it show through.
+
+A **negative** z-index means something different in kind — behind the *text*. A Kitty placement is an
+overlay rather than content, so printing over one never modifies it: the z-index alone decides
+whether the glyph or the picture is on top, and a picture placed under existing text leaves it
+readable. That is also why typing over a picture in *front* of the text hides the character without
+destroying it, and deleting the picture gives it back. Sixel is the other kind and keeps its
+replace-on-write. Erasing (`ED`/`EL`) clears both, because a picture showing through a cleared screen
+would be a leak rather than a feature. A host renders these by drawing the tile first
+and the glyph over it; text with no background colour of its own paints no fill, which is what lets
+the picture show through.
 
 ## License
 

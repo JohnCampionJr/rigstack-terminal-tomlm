@@ -306,6 +306,9 @@ public class Terminal
         _parser.DcsHook += OnParserDcsHook;
         _parser.DcsPut += OnParserDcsPut;
         _parser.DcsUnhook += OnParserDcsUnhook;
+        _parser.ApcHook += OnParserApcHook;
+        _parser.ApcPut += OnParserApcPut;
+        _parser.ApcUnhook += OnParserApcUnhook;
 
         InsertMode = false;
         ApplicationCursorKeys = false;
@@ -371,6 +374,30 @@ public class Terminal
     private void OnParserDcsUnhook(object? sender, DcsUnhookEventArgs e)
     {
         _inputHandler.HandleDcsUnhook(e.TerminatedCleanly);
+    }
+
+    /// <summary>
+    /// Handles the start of an APC sequence from the parser.
+    /// </summary>
+    private void OnParserApcHook(object? sender, ApcHookEventArgs e)
+    {
+        _inputHandler.HandleApcHook(e.Introducer);
+    }
+
+    /// <summary>
+    /// Handles a chunk of an APC payload from the parser.
+    /// </summary>
+    private void OnParserApcPut(object? sender, ApcPutEventArgs e)
+    {
+        _inputHandler.HandleApcPut(e.Data.Span);
+    }
+
+    /// <summary>
+    /// Handles the end of an APC sequence from the parser.
+    /// </summary>
+    private void OnParserApcUnhook(object? sender, ApcUnhookEventArgs e)
+    {
+        _inputHandler.HandleApcUnhook(e.TerminatedCleanly);
     }
 
     /// <summary>
@@ -542,6 +569,160 @@ public class Terminal
     /// Both buffers are swept: an image on the alternate screen costs the same memory as one on
     /// the normal screen.</para>
     /// </remarks>
+    /// <summary>
+    /// Removes every appearance of one image from both buffers.
+    /// </summary>
+    /// <remarks>
+    /// What Kitty's delete-by-id asks for. The pixels themselves go when the last reference to them
+    /// does, so this is about what is on screen rather than about memory.
+    /// </remarks>
+    internal void DropImage(Graphics.TerminalImage image)
+    {
+        var doomed = new HashSet<Graphics.TerminalImage> { image };
+        DropImages(_normalBuffer, doomed);
+        DropImages(_altBuffer, doomed);
+    }
+
+    /// <summary>
+    /// Removes every run matching a test, from both buffers.
+    /// </summary>
+    /// <remarks>
+    /// Kitty's delete targets select placements by identity -- image id, placement id, z-index -- so
+    /// they need a test on the run rather than on the pixels behind it. Deleting by image is the
+    /// special case where every appearance of one picture goes at once, and that goes through
+    /// <see cref="DropImage"/> instead.
+    /// </remarks>
+    internal void DropPlacements(Func<Graphics.LinePlacement, bool> predicate)
+    {
+        DropPlacements(_normalBuffer, predicate);
+        DropPlacements(_altBuffer, predicate);
+    }
+
+    /// <summary>
+    /// Removes whole placements by serial, from both buffers.
+    /// </summary>
+    /// <remarks>
+    /// The second half of a positional delete. A placement is found through one of its cells but
+    /// must go in its entirety -- removing only the runs on the named row or column would leave a
+    /// picture with a band missing out of the middle of it. The serial is what makes "the rest of
+    /// this picture" answerable from a run that knows nothing about the lines above and below it.
+    /// </remarks>
+    internal void DropPlacements(HashSet<int> serials)
+    {
+        if (serials.Count == 0)
+            return;
+
+        DropPlacements(placement => serials.Contains(placement.Serial));
+    }
+
+    /// <summary>
+    /// Finds the runs whose cells satisfy a test, looking only at what is on screen.
+    /// </summary>
+    /// <remarks>
+    /// Kitty's cell, row and column delete targets are stated in screen coordinates, so the
+    /// scrollback is deliberately not searched: a picture scrolled out of view is not "at row 3"
+    /// however many rows above it happen to be.
+    /// </remarks>
+    /// <param name="cellMatches">Called with the column and the screen row, zero-based.</param>
+    internal List<Graphics.LinePlacement> CollectPlacementsOnScreen(Func<int, int, bool> cellMatches)
+    {
+        var found = new List<Graphics.LinePlacement>();
+        var buffer = Buffer;
+
+        for (int row = 0; row < Rows; row++)
+        {
+            var line = buffer.Lines[buffer.YBase + row];
+            if (line is null || !line.HasImages)
+                continue;
+
+            foreach (var placement in line.Placements)
+            {
+                // Every run covering a matching cell, not merely the first. A picture covered by
+                // another is still at that cell, and taking only the top one would make "delete
+                // what is here" depend on what happened to be stacked over it.
+                for (int col = placement.Column; col < placement.EndColumn && col < Cols; col++)
+                {
+                    if (col < 0 || !cellMatches(col, row))
+                        continue;
+
+                    found.Add(placement);
+                    break;
+                }
+            }
+        }
+
+        return found;
+    }
+
+    private static void DropPlacements(Buffer.TerminalBuffer? buffer,
+                                       Func<Graphics.LinePlacement, bool> predicate)
+    {
+        if (buffer is null)
+            return;
+
+        for (int i = 0; i < buffer.Lines.Length; i++)
+        {
+            var line = buffer.Lines[i];
+            if (line is null || !line.HasImages)
+                continue;
+
+            line.RemovePlacements(predicate);
+        }
+    }
+
+    /// <summary>
+    /// Moves every animated image on by a slice of real time.
+    /// </summary>
+    /// <remarks>
+    /// <para>The emulator owns no timer. It is driven entirely by <c>Write</c>, and starting a
+    /// thread inside a library that has none -- to repaint a host that already has a render loop --
+    /// would be the wrong place for it. So the host calls this with however long its last frame
+    /// took, and is told whether anything moved.</para>
+    /// <para>Both buffers and the registry, because an image can be transmitted and animated before
+    /// it is ever placed, and one on the alternate screen keeps running while the normal screen is
+    /// in front.</para>
+    /// </remarks>
+    /// <returns>True when some frame changed, so the host should repaint.</returns>
+    public bool AdvanceAnimations(TimeSpan delta)
+    {
+        if (delta <= TimeSpan.Zero)
+            return false;
+
+        var moved = false;
+
+        foreach (var image in CollectAnimatedImages())
+            moved |= image.Animation!.Advance(delta);
+
+        return moved;
+    }
+
+    /// <summary>Whether anything on screen or in the registry is currently animating.</summary>
+    /// <remarks>
+    /// A host uses this to decide whether it needs a repaint clock at all, rather than ticking
+    /// forever for a terminal showing nothing but text.
+    /// </remarks>
+    public bool HasRunningAnimations()
+    {
+        foreach (var image in CollectAnimatedImages())
+        {
+            if (image.Animation!.State != Graphics.AnimationState.Stopped)
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Every image that has frames.
+    /// </summary>
+    /// <remarks>
+    /// Kept as its own list rather than found by scanning the buffers, because a host asks whether
+    /// anything is animating on every frame and the answer for a terminal showing plain text has to
+    /// cost nothing. It also reaches images that were transmitted and animated but never placed,
+    /// which no amount of scanning cells would find.
+    /// </remarks>
+    private IEnumerable<Graphics.TerminalImage> CollectAnimatedImages() => _inputHandler.AnimatedImages;
+
     internal void EnforceImageBudget()
     {
         var budget = Options.MaxImageBytes;
@@ -579,8 +760,14 @@ public class Terminal
         Collect(_altBuffer);
         return live;
 
-        void Collect(Buffer.TerminalBuffer buffer)
+        // Nullable because the fields are: the buffers are built in the constructor and never
+        // cleared, but nothing in the type system says so, and a sweep of a buffer that does not
+        // exist has nothing to find.
+        void Collect(Buffer.TerminalBuffer? buffer)
         {
+            if (buffer is null)
+                return;
+
             for (int i = 0; i < buffer.Lines.Length; i++)
             {
                 var line = buffer.Lines[i];
@@ -595,8 +782,15 @@ public class Terminal
         }
     }
 
-    private static void DropImages(Buffer.TerminalBuffer buffer, HashSet<Graphics.TerminalImage> doomed)
+    /// <remarks>
+    /// Takes a nullable buffer for the same reason <c>Collect</c> does: the fields are nullable, and
+    /// dropping images from a buffer that does not exist is a no-op rather than an error.
+    /// </remarks>
+    private static void DropImages(Buffer.TerminalBuffer? buffer, HashSet<Graphics.TerminalImage> doomed)
     {
+        if (buffer is null)
+            return;
+
         for (int i = 0; i < buffer.Lines.Length; i++)
         {
             var line = buffer.Lines[i];
@@ -906,6 +1100,9 @@ public class Terminal
         _parser.DcsHook -= OnParserDcsHook;
         _parser.DcsPut -= OnParserDcsPut;
         _parser.DcsUnhook -= OnParserDcsUnhook;
+        _parser.ApcHook -= OnParserApcHook;
+        _parser.ApcPut -= OnParserApcPut;
+        _parser.ApcUnhook -= OnParserApcUnhook;
 
         // Clear all event subscriptions
         DataReceived = null;

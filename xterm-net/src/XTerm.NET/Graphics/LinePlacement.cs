@@ -70,6 +70,26 @@ public readonly struct LinePlacement
     /// <summary>How this placement behaves when text is written across it.</summary>
     public readonly PlacementKind Kind;
 
+    /// <summary>
+    /// Which placement this run is part of. Every row of one picture shares it, and no two
+    /// placements ever share one.
+    /// </summary>
+    /// <remarks>
+    /// <para>Not the same thing as <see cref="PlacementId"/>. That one is the CLIENT's, from Kitty's
+    /// <c>p=</c>: it is zero when the client named none, and several placements may carry the same
+    /// value. This is the TERMINAL's, and it is what makes "delete the picture at this cell" mean
+    /// the whole picture rather than the one row the cell is on.</para>
+    /// <para>A run is a line-local thing by design, so a placement spanning eight rows is eight
+    /// unrelated structs; before pictures were runs, the placement was one object and reference
+    /// identity answered this for free. This is what replaces that.</para>
+    /// </remarks>
+    public readonly int Serial;
+
+    private static int _nextSerial;
+
+    /// <summary>Takes the next serial, for one placement however many rows it covers.</summary>
+    public static int NextSerial() => System.Threading.Interlocked.Increment(ref _nextSerial);
+
     public LinePlacement(
         int imageId,
         int column,
@@ -82,7 +102,8 @@ public readonly struct LinePlacement
         int placementId = 0,
         short offsetX = 0,
         short offsetY = 0,
-        short zIndex = 0)
+        short zIndex = 0,
+        int serial = 0)
     {
         ImageId = imageId;
         Column = column;
@@ -96,6 +117,7 @@ public readonly struct LinePlacement
         OffsetX = offsetX;
         OffsetY = offsetY;
         ZIndex = zIndex;
+        Serial = serial;
     }
 
     /// <summary>One past the last column this run covers when fully visible.</summary>
@@ -138,6 +160,6 @@ public readonly struct LinePlacement
             ImageId, column, cols,
             srcX, SrcY,
             System.Math.Min(width, System.Math.Max(0, SrcX + SrcWidth - srcX)), SrcHeight,
-            Kind, PlacementId, OffsetX, OffsetY, ZIndex);
+            Kind, PlacementId, OffsetX, OffsetY, ZIndex, Serial);
     }
 }

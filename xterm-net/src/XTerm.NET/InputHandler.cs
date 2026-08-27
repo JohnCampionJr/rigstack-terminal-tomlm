@@ -163,6 +163,18 @@ public class InputHandler
         {
             var codePoint = char.ConvertToUtf32(data, 0);
 
+            // A placeholder is a character that means "part of a picture goes here". It has to be
+            // taken before the combining-character machinery below, which would otherwise try to
+            // merge the diacritics that follow it into a text cell.
+            if (codePoint == KittyPlaceholder && TryPrintKittyPlaceholder())
+                return;
+
+            // The combining marks that state a placeholder's tile explicitly. They must be taken
+            // here too: left to the machinery below they would be appended to the image cell as
+            // text, and left to nothing at all they would print as visible marks of their own.
+            if (TryApplyPlaceholderDiacritic(codePoint))
+                return;
+
             // A character standing exactly where a ZWJ was just merged continues that cluster.
             var continuesCluster = _zwjContinuation is { } pending
                                    && pending.Row == _buffer.Y + _buffer.YBase
@@ -254,6 +266,11 @@ public class InputHandler
             // Shift cells right
             line?.CopyCellsFrom(line, _buffer.X, _buffer.X + width, _terminal.Cols - _buffer.X - width, false);
         }
+
+        // Printing over a picture needs no special case here any more. SetCell splits a SIXEL run
+        // around the written column, because a Sixel is content and printing replaces that part of
+        // it; a Kitty run is left alone, because it is an overlay whose z-index orders it against
+        // the text. Both fall out of where a picture is stored rather than from anything done here.
 
         // Set the cell
         line?.SetCell(_buffer.X, ref cell);
@@ -375,6 +392,13 @@ public class InputHandler
 
         // Get the previous cell
         if (prevX < 0 || prevX >= line.Length)
+            return false;
+
+        // A position showing part of a picture has no text to combine with. Kitty's placeholders are
+        // followed by combining marks that state a row and column, so this is the ordinary case
+        // rather than a curiosity: letting the mark combine here would both put an accent in the
+        // middle of the picture and stop the mark being read as the tile it is.
+        if (line.TryGetPlacementAt(prevX, out _))
             return false;
 
         var prevCell = line[prevX];
@@ -814,21 +838,971 @@ public class InputHandler
 
         var image = decoder.Finish();
         if (image is not null)
-            PlaceImage(image);
+            PlaceImage(Graphics.ImagePlacement.Natural(image), Graphics.PlacementKind.Sixel);
+    }
+
+    /// <summary>The text of the APC sequence currently arriving.</summary>
+    /// <remarks>
+    /// One sequence at a time. A Kitty image spans several, and what carries across them is
+    /// <see cref="_kittyTransmission"/>, not this.
+    /// </remarks>
+    private readonly StringBuilder _apcPayload = new();
+
+    /// <summary>The image being assembled across several sequences, if one is.</summary>
+    private Graphics.KittyTransmission? _kittyTransmission;
+
+    /// <summary>Images the client has transmitted and may ask to see again.</summary>
+    private readonly Graphics.ImageRegistry _kittyImages = new();
+
+    /// <summary>
+    /// Every image that has been given frames, held weakly.
+    /// </summary>
+    /// <remarks>
+    /// <para>The animation clock is asked whether anything is moving on every host frame, so the
+    /// answer has to be cheap. Scanning both buffers and the registry is not: it is the length of
+    /// the scrollback, sixty times a second, to discover that a terminal showing text is showing
+    /// text.</para>
+    /// <para>Weak references because a strong set would keep every animation's pixels alive for the
+    /// life of the terminal, defeating the whole point of letting the last cell holding a picture
+    /// take it away. Dead entries are pruned as they are found.</para>
+    /// </remarks>
+    private readonly List<WeakReference<Graphics.TerminalImage>> _animatedImages = new();
+
+    internal IEnumerable<Graphics.TerminalImage> AnimatedImages
+    {
+        get
+        {
+            for (int i = _animatedImages.Count - 1; i >= 0; i--)
+            {
+                if (_animatedImages[i].TryGetTarget(out var image))
+                    yield return image;
+                else
+                    _animatedImages.RemoveAt(i);
+            }
+        }
+    }
+
+    private void NoteAnimated(Graphics.TerminalImage image)
+    {
+        foreach (var known in AnimatedImages)
+        {
+            if (ReferenceEquals(known, image))
+                return;
+        }
+
+        _animatedImages.Add(new WeakReference<Graphics.TerminalImage>(image));
     }
 
     /// <summary>
-    /// Writes an image into the buffer, one cell per tile.
+    /// Ceiling on the base64 held for one image, so a client that never sends its last chunk
+    /// cannot make the terminal grow without limit.
+    /// </summary>
+    private int MaxKittyPayloadChars
+    {
+        get
+        {
+            // Enough base64 for the largest image allowed, plus slack for a PNG's own overhead.
+            var bytes = (long)_terminal.Options.MaxSixelPixels * Graphics.TerminalImage.BytesPerPixel;
+            var encoded = bytes * 4 / 3 + 1024;
+            return (int)Math.Clamp(encoded, 4096, int.MaxValue);
+        }
+    }
+
+    /// <summary>
+    /// Handles the start of an APC sequence.
     /// </summary>
     /// <remarks>
-    /// <para>Each covered cell gets a blank space carrying a reference to the shared image and the
-    /// coordinates of the piece it shows. Writing it through <c>SetCell</c> is what makes the rest
-    /// of the terminal treat it as content: the line's render cache is dropped, printing over it
-    /// replaces it, erasing clears it, and scrolling carries it along.</para>
-    /// <para>The cell keeps a space as its character so that selecting the image and copying it
-    /// yields blanks rather than something unreadable.</para>
+    /// APC carries no parameters in front of its payload, so nothing can be decided here: what the
+    /// sequence is depends on its first payload character, which has not arrived yet.
     /// </remarks>
-    private void PlaceImage(Graphics.TerminalImage image)
+    public void HandleApcHook(char introducer)
+    {
+        _ = introducer;
+        _apcPayload.Clear();
+    }
+
+    /// <summary>
+    /// Handles a chunk of an APC payload.
+    /// </summary>
+    public void HandleApcPut(ReadOnlySpan<char> data)
+    {
+        // Bounded here rather than at the end: the point is to stop a runaway sequence before the
+        // memory is spent, not to notice afterwards.
+        if (_apcPayload.Length <= MaxKittyPayloadChars)
+            _apcPayload.Append(data);
+    }
+
+    /// <summary>
+    /// Handles the end of an APC sequence.
+    /// </summary>
+    public void HandleApcUnhook(bool terminatedCleanly)
+    {
+        var payload = _apcPayload.ToString();
+        _apcPayload.Clear();
+
+        // A sequence cut short says nothing reliable about what it was carrying, and half a
+        // transmission would corrupt whatever it was appended to.
+        if (!terminatedCleanly)
+        {
+            _kittyTransmission = null;
+            return;
+        }
+
+        if (payload.Length == 0 || payload[0] != 'G')
+            return;
+        if (!_terminal.Options.KittyGraphicsEnabled)
+            return;
+
+        HandleKittyGraphics(payload.AsSpan(1));
+    }
+
+    /// <summary>
+    /// U+10EEEE, the character Kitty uses to mean "part of a picture belongs in this cell".
+    /// </summary>
+    private const int KittyPlaceholder = 0x10EEEE;
+
+    /// <summary>
+    /// Where the placeholder rectangle currently being written started, so a cell can work out
+    /// which tile of the picture it is.
+    /// </summary>
+    /// <remarks>
+    /// The serial is held here as well as the position so that every cell of one rectangle belongs
+    /// to the same placement, and a delete aimed at any of them takes the whole picture.
+    /// </remarks>
+    private (int Row, int Col, uint ImageId, Graphics.TerminalImage Image, int Serial)? _placeholderOrigin;
+
+    /// <summary>
+    /// The placeholder cell just written, and how many of its combining marks have arrived.
+    /// </summary>
+    /// <remarks>
+    /// The marks modify the cell BEFORE them, and there are up to three: row, then column, then the
+    /// most significant byte of the image id. Tracking the count is what tells the second from the
+    /// first, since the characters themselves are drawn from one table and carry no clue which
+    /// position they are filling.
+    /// </remarks>
+    private (int Row, int Col, int MarksSeen)? _placeholderCell;
+
+    /// <summary>
+    /// Writes a cell that a client marked as showing part of an image.
+    /// </summary>
+    /// <remarks>
+    /// <para>The image is named by the cell's FOREGROUND COLOUR, which carries a 24-bit id rather
+    /// than a colour. That works here because <c>AttributeData</c> keeps 25 bits for the value, so
+    /// it survives the round trip unchanged.</para>
+    /// <para>Which tile the cell shows is worked out from where it sits relative to the top-left of
+    /// the run, which is how a contiguous rectangle written in reading order comes out right. A
+    /// client may also state the row and column explicitly, as combining marks drawn from a fixed
+    /// table; those arrive after this cell and are applied by
+    /// <see cref="TryApplyPlaceholderDiacritic"/>.</para>
+    /// </remarks>
+    /// <returns>False when nothing can be resolved, so the character prints as ordinary text.</returns>
+    private bool TryPrintKittyPlaceholder()
+    {
+        if (!_terminal.Options.KittyGraphicsEnabled)
+            return false;
+
+        // Mode 0 is a palette index; only a direct colour carries an id.
+        if (_curAttr.GetFgColorMode() == 0)
+            return false;
+
+        var imageId = (uint)_curAttr.GetFgColor();
+        if (imageId == 0 || !_kittyImages.TryGet(imageId, out var image))
+            return false;
+
+        var row = _buffer.Y + _buffer.YBase;
+        var col = _buffer.X;
+
+        // A cell continues the rectangle if it follows one -- along the same row, or at the start of
+        // the row below. Anything else is a new picture starting here.
+        var continues = _placeholderOrigin is { } origin
+                        && origin.ImageId == imageId
+                        && row >= origin.Row
+                        && col >= origin.Col;
+
+        if (!continues)
+            _placeholderOrigin = (row, col, imageId, image, Graphics.LinePlacement.NextSerial());
+
+        var start = _placeholderOrigin!.Value;
+        if (!WritePlaceholderCell(row, col, start.Image, start.Serial, col - start.Col, row - start.Row))
+            return false;
+
+        _placeholderCell = (row, col, 0);
+        _buffer.SetCursorRaw(_buffer.X + 1, _buffer.Y);
+        return true;
+    }
+
+    /// <summary>Puts one tile of a placeholder rectangle onto its line, as a one-column run.</summary>
+    /// <remarks>
+    /// <para>One run per cell, rather than one per row, because a placeholder rectangle is written a
+    /// cell at a time and each cell may be RE-tiled afterwards by the combining marks that follow
+    /// it. A row-wide run would have to be split and rebuilt on every mark; a one-column run is
+    /// simply replaced.</para>
+    /// <para>Every cell of one rectangle shares a serial, so it is still a single placement as far
+    /// as deleting is concerned. A renderer that wants one blit per strip can merge adjacent runs of
+    /// the same image whose source rectangles are contiguous.</para>
+    /// </remarks>
+    /// <returns>False when the tile falls outside the picture.</returns>
+    private bool WritePlaceholderCell(int row, int col, Graphics.TerminalImage image, int serial,
+                                      int tileCol, int tileRow)
+    {
+        if (tileCol < 0 || tileRow < 0 || tileCol >= image.Cols || tileRow >= image.Rows)
+            return false;
+
+        var line = _buffer.Lines[row];
+        if (line is null)
+            return false;
+
+        if (!image.TryGetTileSource(tileCol, tileRow, out var srcX, out var srcY,
+                                    out var srcWidth, out var srcHeight))
+            return false;
+
+        // The cell keeps the placeholder character it was printed with; the picture is beside it
+        // rather than in it. Written before the run so SetCell's Sixel split cannot see it.
+        var cell = new BufferCell(" ", 1, _curAttr);
+        line.SetCell(col, ref cell);
+
+        // Anything already claiming this cell for this rectangle goes -- a mark may be re-tiling a
+        // cell written a moment ago.
+        line.RemovePlacements(p => p.Serial == serial && p.Column == col);
+
+        line.AddPlacement(
+            new Graphics.LinePlacement(
+                image.Id, col, 1,
+                srcX: srcX, srcY: srcY, srcWidth: srcWidth, srcHeight: srcHeight,
+                kind: Graphics.PlacementKind.Kitty,
+                serial: serial),
+            image);
+        return true;
+    }
+
+    /// <summary>
+    /// Applies a combining mark that states part of the preceding placeholder cell's identity.
+    /// </summary>
+    /// <remarks>
+    /// <para>The marks come in a fixed order and are positional: the first gives the tile row, the
+    /// second the tile column, the third the most significant byte of the image id. A client may
+    /// send fewer than three and let the rest be inferred, which is why each is applied on its own
+    /// rather than waiting for the set.</para>
+    /// <para>The third one can change WHICH image the cell shows, so the placement has to be
+    /// rebuilt. That is rare -- it only matters for ids above 16777215 -- but resolving it late is
+    /// the only option, since the id is not complete until the mark arrives.</para>
+    /// </remarks>
+    /// <returns>False if this is not a mark applying to a placeholder, so it prints normally.</returns>
+    private bool TryApplyPlaceholderDiacritic(int codePoint)
+    {
+        if (_placeholderCell is not { } target || _placeholderOrigin is not { } origin)
+            return false;
+
+        // Only the cell immediately to the left, and only up to three marks.
+        if (target.Row != _buffer.Y + _buffer.YBase || target.Col != _buffer.X - 1 || target.MarksSeen >= 3)
+            return false;
+
+        if (!Graphics.PlaceholderDiacritics.TryGetValue(codePoint, out var value))
+            return false;
+
+        var line = _buffer.Lines[target.Row];
+        if (line is null)
+            return false;
+
+        // Which tile the cell is showing now, read back off the run that was written for it. The
+        // run is one column wide, so the column of the rectangle it belongs to is the offset from
+        // the origin rather than anything stored.
+        if (!line.TryGetPlacementAt(target.Col, out var current) || current.Serial != origin.Serial)
+            return false;
+
+        var image = origin.Image;
+
+        // Read the tile back off the run rather than recomputing it from the position. The marks
+        // arrive one at a time and each is meant to survive the next: row then column means the
+        // column mark must not undo the row one, which recomputing from the origin would do.
+        var tileCol = image.CellWidth > 0 ? current.SrcX / image.CellWidth : 0;
+        var tileRow = image.CellHeight > 0 ? current.SrcY / image.CellHeight : 0;
+
+        switch (target.MarksSeen)
+        {
+            case 0:
+                tileRow = value;
+                break;
+
+            case 1:
+                tileCol = value;
+                break;
+
+            default:
+                // The high byte of the id. Re-resolving can fail, and when it does the cell keeps
+                // the picture it already had rather than becoming a blank.
+                var extendedId = ((uint)value << 24) | (origin.ImageId & 0x00FFFFFF);
+                if (_kittyImages.TryGet(extendedId, out var extended))
+                {
+                    image = extended;
+                    _placeholderOrigin = (origin.Row, origin.Col, extendedId, extended, origin.Serial);
+                }
+                break;
+        }
+
+        _placeholderCell = (target.Row, target.Col, target.MarksSeen + 1);
+
+        // An explicit row or column outside the picture is a client error; keeping the cell as it
+        // was is better than blanking it, and better than throwing on another process's input.
+        if (tileCol >= image.Cols || tileRow >= image.Rows)
+            return true;
+
+        WritePlaceholderCell(target.Row, target.Col, image, origin.Serial, tileCol, tileRow);
+        return true;
+    }
+
+    /// <summary>
+    /// Handles one Kitty graphics command, payload and all.
+    /// </summary>
+    /// <remarks>
+    /// The control data and the payload are separated by the first semicolon. A sequence may carry
+    /// only control data and no semicolon at all -- which is exactly what the first chunk of a
+    /// chunked transmission looks like.
+    /// </remarks>
+    private void HandleKittyGraphics(ReadOnlySpan<char> body)
+    {
+        var separator = body.IndexOf(';');
+        var controlText = separator < 0 ? body : body[..separator];
+        var payload = separator < 0 ? ReadOnlySpan<char>.Empty : body[(separator + 1)..];
+
+        var command = Graphics.KittyCommand.Parse(controlText);
+
+        // A continuation chunk carries only "m=", so the command it belongs to is the one held from
+        // the first chunk. Without this, every chunk after the first would read as a fresh transmit.
+        if (_kittyTransmission is not null)
+        {
+            _kittyTransmission.Append(payload);
+
+            if (command.MoreChunks)
+                return;
+
+            var pending = _kittyTransmission;
+            _kittyTransmission = null;
+            CompleteKittyTransmission(pending);
+            return;
+        }
+
+        switch (command.Action)
+        {
+            case Graphics.KittyAction.Transmit:
+            case Graphics.KittyAction.TransmitAndDisplay:
+            case Graphics.KittyAction.Query:
+                BeginKittyTransmission(command, payload);
+                break;
+
+            case Graphics.KittyAction.Put:
+                PlaceStoredKittyImage(command);
+                break;
+
+            case Graphics.KittyAction.Delete:
+                DeleteKittyImages(command);
+                break;
+
+            // A frame carries pixels like a transmission does, chunking and all, so it goes through
+            // the same accumulator and is told apart at the end by its action.
+            case Graphics.KittyAction.Frame:
+                BeginKittyTransmission(command, payload);
+                break;
+
+            case Graphics.KittyAction.Animate:
+                ControlKittyAnimation(command);
+                break;
+
+            case Graphics.KittyAction.Compose:
+                ComposeKittyFrames(command);
+                break;
+
+            default:
+                // Anything a later revision adds. Saying so is better than silence: a client that
+                // asked can fall back rather than wait.
+                ReplyToKitty(command, Graphics.KittyError.Unsupported);
+                break;
+        }
+    }
+
+    private void BeginKittyTransmission(Graphics.KittyCommand command, ReadOnlySpan<char> payload)
+    {
+        // Only the payload actually carried in the escape sequence. Reading a file the client names
+        // would have the terminal open a path on its say-so, and this library runs inside hosts that
+        // may hold more privilege than the program they are running.
+        if (command.Medium != 'd')
+        {
+            ReplyToKitty(command, Graphics.KittyError.Unsupported);
+            return;
+        }
+
+        // Refused on the declared size, before a byte of it is kept. A raw format states its
+        // dimensions up front, so there is no reason to accumulate megabytes only to reject them --
+        // and the payload cap would otherwise truncate the data and report it as corrupt instead of
+        // as too large, which tells the client the wrong thing.
+        if (command.Format != Graphics.KittyCommand.FormatPng
+            && (long)command.Width * command.Height > _terminal.Options.MaxSixelPixels)
+        {
+            ReplyToKitty(command, Graphics.KittyError.TooLarge);
+            return;
+        }
+
+        var transmission = new Graphics.KittyTransmission(command);
+        transmission.Append(payload);
+
+        if (command.MoreChunks)
+        {
+            _kittyTransmission = transmission;
+            return;
+        }
+
+        CompleteKittyTransmission(transmission);
+    }
+
+    private void CompleteKittyTransmission(Graphics.KittyTransmission transmission)
+    {
+        var command = transmission.Command;
+
+        var result = transmission.TryBuild(_terminal.Options.MaxSixelPixels,
+                                           out var pixels, out var width, out var height);
+        if (result != Graphics.KittyError.None)
+        {
+            ReplyToKitty(command, result);
+            return;
+        }
+
+        // A frame belongs to a picture that already exists, so it becomes an entry in that image's
+        // frame list rather than an image of its own. Taken before the image below is built, which
+        // would be an allocation the size of the picture with nothing to use it.
+        if (command.Action == Graphics.KittyAction.Frame)
+        {
+            AddKittyFrame(command, pixels, width, height);
+            return;
+        }
+
+        var image = new Graphics.TerminalImage(
+            pixels, width, height,
+            Math.Max(1, _terminal.Options.CellWidthPixels),
+            Math.Max(1, _terminal.Options.CellHeightPixels));
+
+        // A query validates and answers. It must not put anything on the screen -- programs probe
+        // with a real one-pixel image and expect their own output to be undisturbed.
+        if (command.Action == Graphics.KittyAction.Query)
+        {
+            ReplyToKitty(command, Graphics.KittyError.None);
+            return;
+        }
+
+        // A client that sent only a number gets an id chosen here, and is told what it was.
+        var id = command.ImageId != 0 ? command.ImageId : _kittyImages.NextAssignedId();
+        _kittyImages.Store(id, image, _terminal.Options.MaxImageRegistryBytes, command.ImageNumber);
+
+        if (command.Action == Graphics.KittyAction.TransmitAndDisplay)
+            PlaceKittyImage(image, command);
+
+        ReplyToKitty(command, Graphics.KittyError.None, id);
+    }
+
+    /// <summary>
+    /// Turns transmitted pixels into a frame of an image that already exists.
+    /// </summary>
+    /// <remarks>
+    /// <para>A frame is built by composing the arriving rectangle onto a canvas. The canvas is
+    /// another frame when the client names one with <c>c=</c>, the frame itself when it is editing
+    /// one with <c>r=</c>, and otherwise a flat colour -- black and fully transparent unless
+    /// <c>Y=</c> says otherwise. That is what lets an animation send only the pixels that changed.</para>
+    /// <para>The rectangle's position comes from <c>x</c> and <c>y</c> and its size from the
+    /// transmitted <c>s</c> and <c>v</c>, so a frame carrying the whole picture is just the case
+    /// where the rectangle happens to be the full size.</para>
+    /// </remarks>
+    private void AddKittyFrame(Graphics.KittyCommand command, byte[] pixels, int width, int height)
+    {
+        if (!TryResolveKittyImage(command, out var id, out var image))
+        {
+            ReplyToKitty(command, Graphics.KittyError.NotFound);
+            return;
+        }
+
+        var animation = image.EnsureAnimation();
+        NoteAnimated(image);
+        var frameBytes = (long)image.PixelWidth * image.PixelHeight * Graphics.TerminalImage.BytesPerPixel;
+
+        byte[] canvas;
+        int frameNumber;
+
+        if (command.EditFrame > 0)
+        {
+            // Editing an existing frame: the canvas is that frame, and the result replaces it.
+            if (!animation.TryGetFrame(command.EditFrame, out _))
+            {
+                ReplyToKitty(command, Graphics.KittyError.NotFound);
+                return;
+            }
+
+            canvas = animation.GetWritableFrame(command.EditFrame);
+            frameNumber = command.EditFrame;
+        }
+        else
+        {
+            canvas = new byte[frameBytes];
+
+            if (command.BaseFrame > 0)
+            {
+                if (!animation.TryGetFrame(command.BaseFrame, out var baseFrame))
+                {
+                    ReplyToKitty(command, Graphics.KittyError.NotFound);
+                    return;
+                }
+
+                baseFrame.Pixels.Span.CopyTo(canvas);
+            }
+            else
+            {
+                FillCanvas(canvas, command.FrameBackground);
+            }
+
+            // A new frame's gap defaults to the protocol's figure rather than to nothing, or an
+            // animation built without explicit gaps would run as fast as the host repaints.
+            var gap = command.ZIndex != 0 ? command.ZIndex : Graphics.ImageAnimation.DefaultGapMilliseconds;
+            frameNumber = animation.AddFrame(canvas, gap);
+        }
+
+        // X=1 overwrites, anything else blends. The same key carries a pixel offset on a display
+        // command; which is meant follows from the action.
+        var replace = command.OffsetX == 1;
+
+        Graphics.ImageAnimation.Blend(
+            canvas, image.PixelWidth, image.PixelHeight,
+            pixels, width,
+            sourceX: 0, sourceY: 0,
+            destinationX: command.CropX, destinationY: command.CropY,
+            width: width, height: height,
+            replace: replace);
+
+        if (command.EditFrame > 0 && command.ZIndex != 0)
+            animation.SetGap(frameNumber, command.ZIndex);
+
+        _terminal.NoteImagePlaced(image);
+        ReplyToKitty(command, Graphics.KittyError.None, id);
+    }
+
+    /// <summary>Fills a new frame's canvas with a 32-bit RGBA colour.</summary>
+    /// <remarks>
+    /// The protocol states the colour as RGBA; the buffer is BGRA, so the two outer channels swap.
+    /// Getting this backwards produces a picture that looks right until something is transparent.
+    /// </remarks>
+    private static void FillCanvas(byte[] canvas, uint rgba)
+    {
+        if (rgba == 0)
+            return;   // already black and fully transparent
+
+        var r = (byte)(rgba >> 24);
+        var g = (byte)(rgba >> 16);
+        var b = (byte)(rgba >> 8);
+        var a = (byte)rgba;
+
+        for (int i = 0; i + 3 < canvas.Length; i += Graphics.TerminalImage.BytesPerPixel)
+        {
+            canvas[i] = b;
+            canvas[i + 1] = g;
+            canvas[i + 2] = r;
+            canvas[i + 3] = a;
+        }
+    }
+
+    /// <summary>
+    /// Starts, stops or steps an animation, and sets frame gaps.
+    /// </summary>
+    /// <remarks>
+    /// A client may drive the animation itself by making frames current one at a time, or hand the
+    /// timing to the terminal by setting gaps and letting it run. Both arrive here; the difference
+    /// is only which keys are present.
+    /// </remarks>
+    private void ControlKittyAnimation(Graphics.KittyCommand command)
+    {
+        if (!TryResolveKittyImage(command, out var id, out var image))
+        {
+            ReplyToKitty(command, Graphics.KittyError.NotFound);
+            return;
+        }
+
+        var animation = image.Animation;
+        if (animation is null)
+        {
+            // A still picture has no frames to control. Saying so beats silently doing nothing.
+            ReplyToKitty(command, Graphics.KittyError.NotFound);
+            return;
+        }
+
+        // r with z sets one frame's gap. A gap of zero means "unspecified" and is ignored, which is
+        // why this is not simply "if r was given".
+        if (command.EditFrame > 0 && command.ZIndex != 0)
+            animation.SetGap(command.EditFrame, command.ZIndex);
+
+        if (command.BaseFrame > 0 && !animation.SetCurrentFrame(command.BaseFrame))
+        {
+            ReplyToKitty(command, Graphics.KittyError.NotFound);
+            return;
+        }
+
+        var state = command.AnimationStateValue;
+        if (state is >= 1 and <= 3)
+            animation.SetState((Graphics.AnimationState)state, command.LoopCount);
+
+        ReplyToKitty(command, Graphics.KittyError.None, id);
+    }
+
+    /// <summary>
+    /// Copies a rectangle from one frame of an image onto another.
+    /// </summary>
+    /// <remarks>
+    /// The cheap way to change a frame: no pixels cross the wire at all. The protocol is specific
+    /// about the failures -- a missing frame is ENOENT, a rectangle off the edge is EINVAL, and so
+    /// is one frame overlapping itself, since the result would depend on the copy order.
+    /// </remarks>
+    private void ComposeKittyFrames(Graphics.KittyCommand command)
+    {
+        if (!TryResolveKittyImage(command, out var id, out var image))
+        {
+            ReplyToKitty(command, Graphics.KittyError.NotFound);
+            return;
+        }
+
+        var animation = image.Animation;
+        if (animation is null
+            || !animation.TryGetFrame(command.EditFrame, out var source)
+            || !animation.TryGetFrame(command.BaseFrame, out _))
+        {
+            ReplyToKitty(command, Graphics.KittyError.NotFound);
+            return;
+        }
+
+        var width = command.CropWidth > 0 ? command.CropWidth : image.PixelWidth;
+        var height = command.CropHeight > 0 ? command.CropHeight : image.PixelHeight;
+
+        if (!FitsInside(command.OffsetX, command.OffsetY, width, height, image)
+            || !FitsInside(command.CropX, command.CropY, width, height, image))
+        {
+            ReplyToKitty(command, Graphics.KittyError.BadData);
+            return;
+        }
+
+        // Same frame with overlapping rectangles: the answer would depend on which pixel was copied
+        // first, so the protocol asks for a refusal rather than an arbitrary one.
+        if (command.EditFrame == command.BaseFrame
+            && Overlaps(command.OffsetX, command.OffsetY, command.CropX, command.CropY, width, height))
+        {
+            ReplyToKitty(command, Graphics.KittyError.BadData);
+            return;
+        }
+
+        // Read the source before making the destination writable: editing the root frame copies it
+        // away from the image, and if the two are the same frame the span would be left dangling.
+        var sourcePixels = source.Pixels.ToArray();
+        var destination = animation.GetWritableFrame(command.BaseFrame);
+
+        Graphics.ImageAnimation.Blend(
+            destination, image.PixelWidth, image.PixelHeight,
+            sourcePixels, image.PixelWidth,
+            sourceX: command.OffsetX, sourceY: command.OffsetY,
+            destinationX: command.CropX, destinationY: command.CropY,
+            width: width, height: height,
+            replace: command.ComposeMode == 1);
+
+        ReplyToKitty(command, Graphics.KittyError.None, id);
+    }
+
+    private static bool FitsInside(int x, int y, int width, int height, Graphics.TerminalImage image)
+        => x >= 0 && y >= 0
+           && (long)x + width <= image.PixelWidth
+           && (long)y + height <= image.PixelHeight;
+
+    private static bool Overlaps(int aX, int aY, int bX, int bY, int width, int height)
+        => aX < bX + width && bX < aX + width
+           && aY < bY + height && bY < aY + height;
+
+    private void PlaceStoredKittyImage(Graphics.KittyCommand command)
+    {
+        if (!TryResolveKittyImage(command, out var id, out var image))
+        {
+            ReplyToKitty(command, Graphics.KittyError.NotFound);
+            return;
+        }
+
+        PlaceKittyImage(image, command);
+        ReplyToKitty(command, Graphics.KittyError.None, id);
+    }
+
+    /// <summary>
+    /// Finds a stored image from whichever identity the client used.
+    /// </summary>
+    /// <remarks>
+    /// A client may name an image by the id it chose (<c>i=</c>) or by a number it chose
+    /// (<c>I=</c>), leaving the terminal to pick the id. The id wins when both are present, since
+    /// it is the more specific of the two.
+    /// </remarks>
+    private bool TryResolveKittyImage(Graphics.KittyCommand command,
+                                      out uint id, out Graphics.TerminalImage image)
+    {
+        if (command.ImageId != 0)
+        {
+            id = command.ImageId;
+            return _kittyImages.TryGet(id, out image);
+        }
+
+        if (command.ImageNumber != 0)
+            return _kittyImages.TryGetByNumber(command.ImageNumber, out id, out image);
+
+        id = 0;
+        image = null!;
+        return false;
+    }
+
+    /// <summary>
+    /// Turns a Kitty display command into a placement and writes it into the buffer.
+    /// </summary>
+    private void PlaceKittyImage(Graphics.TerminalImage image, Graphics.KittyCommand command)
+    {
+        // A placeholder placement is shown by cells the client writes as text, not here.
+        if (command.UnicodePlaceholder)
+            return;
+
+        var cropWidth = command.CropWidth > 0 ? command.CropWidth : image.PixelWidth - command.CropX;
+        var cropHeight = command.CropHeight > 0 ? command.CropHeight : image.PixelHeight - command.CropY;
+        if (cropWidth <= 0 || cropHeight <= 0)
+            return;
+
+        // c and r name a box to fill, which is a stretch. Without them the picture keeps its own
+        // size and the edge tiles are clipped, which is a different calculation entirely.
+        var stretched = command.Cols > 0 || command.Rows > 0;
+        var cols = command.Cols > 0
+            ? command.Cols
+            : (cropWidth + image.CellWidth - 1) / image.CellWidth;
+        var rows = command.Rows > 0
+            ? command.Rows
+            : (cropHeight + image.CellHeight - 1) / image.CellHeight;
+
+        var placement = new Graphics.ImagePlacement(
+            image, command.PlacementId,
+            command.CropX, command.CropY, cropWidth, cropHeight,
+            cols, rows,
+            stretched ? Graphics.ImageScaling.Stretched : Graphics.ImageScaling.Natural,
+            command.ZIndex, command.OffsetX, command.OffsetY);
+
+        PlaceImage(placement, Graphics.PlacementKind.Kitty, command.KeepCursor);
+    }
+
+    /// <summary>
+    /// Removes placements, and with an upper-case target the pixels behind them too.
+    /// </summary>
+    /// <remarks>
+    /// <para>The case of the target letter is the whole difference between "stop showing this" and
+    /// "forget it entirely": lower case removes the appearances, upper case additionally releases
+    /// the stored image so its id no longer resolves.</para>
+    /// <para>Several keys mean something different here than they do on a transmission. On a delete,
+    /// <c>x</c> and <c>y</c> are screen cell coordinates rather than a crop origin, and <c>z</c> is
+    /// the z-index being matched rather than one being assigned. The protocol overloads them by
+    /// action, so the parsed <c>CropX</c>/<c>CropY</c> carry the cell here.</para>
+    /// <para>Positional targets find a placement through one of its cells and then remove all of it.
+    /// Deleting only the cells that fall in the named row or column would leave a picture with a
+    /// hole through it, which is not what "delete the placements intersecting row 3" means.</para>
+    /// </remarks>
+    private void DeleteKittyImages(Graphics.KittyCommand command)
+    {
+        var target = command.DeleteTarget;
+        var alsoFree = char.IsUpper(target);
+
+        // Kitty numbers the screen from one; the buffer numbers it from zero.
+        var cellX = command.CropX - 1;
+        var cellY = command.CropY - 1;
+
+        switch (char.ToLowerInvariant(target))
+        {
+            case 'a':
+                _terminal.Buffer.ClearImages();
+                if (alsoFree)
+                    _kittyImages.Clear();
+                break;
+
+            // By image id, or by image number -- d=i and d=n name different identities, so each
+            // looks up the one it is about rather than sharing a resolver that prefers the id.
+            case 'i':
+            case 'n':
+                DeleteKittyImageByIdentity(command, byNumber: char.ToLowerInvariant(target) == 'n',
+                                           alsoFree);
+                break;
+
+            case 'c':
+                DropPlacementsAt(_buffer.X, _buffer.Y, alsoFree);
+                break;
+
+            case 'p':
+                DropPlacementsAt(cellX, cellY, alsoFree);
+                break;
+
+            case 'q':
+                DropPlacementsWhere(p => p.ZIndex == command.ZIndex,
+                                    (col, row) => col == cellX && row == cellY, alsoFree);
+                break;
+
+            case 'x':
+                DropPlacementsWhere(null, (col, _) => col == cellX, alsoFree);
+                break;
+
+            case 'y':
+                DropPlacementsWhere(null, (_, row) => row == cellY, alsoFree);
+                break;
+
+            case 'z':
+                DropPlacementsWhere(p => p.ZIndex == command.ZIndex, null, alsoFree);
+                break;
+
+            case 'f':
+                // Animation frames. Nothing here stores any, so there is nothing to remove -- but
+                // saying "unsupported" would be wrong, since the requested state is the state.
+                break;
+
+            default:
+                ReplyToKitty(command, Graphics.KittyError.Unsupported);
+                return;
+        }
+
+        ReplyToKitty(command, Graphics.KittyError.None, command.ImageId);
+    }
+
+    /// <summary>
+    /// Removes the appearances of one stored image, named by id or by number.
+    /// </summary>
+    /// <remarks>
+    /// A placement id narrows it to a single appearance. That case deliberately does not release the
+    /// pixels even for an upper-case target: other placements of the same image may still be on
+    /// screen, and freeing it would blank pictures the client did not name.
+    /// </remarks>
+    private void DeleteKittyImageByIdentity(Graphics.KittyCommand command, bool byNumber, bool alsoFree)
+    {
+        uint id;
+        Graphics.TerminalImage image;
+
+        if (byNumber)
+        {
+            if (!_kittyImages.TryGetByNumber(command.ImageNumber, out id, out image))
+                return;
+        }
+        else
+        {
+            id = command.ImageId;
+            if (id == 0 || !_kittyImages.TryGet(id, out image))
+                return;
+        }
+
+        if (command.PlacementId != 0)
+        {
+            _terminal.DropPlacements(p => p.ImageId == image.Id && p.PlacementId == command.PlacementId);
+            return;
+        }
+
+        _terminal.DropImage(image);
+
+        if (alsoFree)
+            _kittyImages.Remove(id);
+    }
+
+    /// <summary>Removes every placement covering one screen cell.</summary>
+    private void DropPlacementsAt(int col, int row, bool alsoFree)
+        => DropPlacementsWhere(null, (c, r) => c == col && r == row, alsoFree);
+
+    /// <summary>
+    /// Removes placements chosen by identity, by position, or by both.
+    /// </summary>
+    /// <param name="matches">A test on the placement, or null to accept any.</param>
+    /// <param name="cellMatches">A test on a cell's screen position, or null to search everywhere.</param>
+    private void DropPlacementsWhere(Func<Graphics.LinePlacement, bool>? matches,
+                                     Func<int, int, bool>? cellMatches,
+                                     bool alsoFree)
+    {
+        // No position to search by means every run on screen is a candidate and the identity test
+        // does all the work.
+        var doomed = _terminal.CollectPlacementsOnScreen(cellMatches ?? ((_, _) => true));
+
+        if (matches is not null)
+            doomed = doomed.Where(matches).ToList();
+
+        if (doomed.Count == 0)
+            return;
+
+        // By SERIAL, not by run. A run found through one of its cells is one line of a picture, and
+        // the target is the picture -- dropping only the rows that matched would leave a band cut
+        // out of the middle of it.
+        var serials = new HashSet<int>(doomed.Select(p => p.Serial));
+        _terminal.DropPlacements(serials);
+
+        if (!alsoFree)
+            return;
+
+        // The images behind the placements that just went. Any of them still shown elsewhere is
+        // kept, because releasing it would blank an appearance the client did not name.
+        var stillShown = _terminal.CollectPlacementsOnScreen((_, _) => true);
+        foreach (var imageId in doomed.Select(p => p.ImageId).Distinct())
+        {
+            if (!stillShown.Any(p => p.ImageId == imageId))
+                _kittyImages.Remove((uint)imageId);
+        }
+    }
+
+    /// <summary>
+    /// Answers a Kitty command, unless the client asked not to be told.
+    /// </summary>
+    /// <remarks>
+    /// q=1 suppresses success and q=2 suppresses failure as well. A reply is what a program uses to
+    /// find out the terminal speaks this protocol at all, so silence is never the default.
+    /// </remarks>
+    private void ReplyToKitty(Graphics.KittyCommand command, Graphics.KittyError error, uint id = 0)
+    {
+        var succeeded = error == Graphics.KittyError.None;
+
+        if (command.Quiet >= 2 || (command.Quiet >= 1 && succeeded))
+            return;
+
+        // An unsolicited reply to a command that named neither an id nor a number would be
+        // unattributable, so the protocol asks for silence instead.
+        var replyId = id != 0 ? id : command.ImageId;
+        if (replyId == 0 && command.ImageNumber == 0)
+            return;
+
+        // A client that addressed the image by number needs both halves back: the number so it can
+        // match the reply to the command it sent, and the id the terminal chose so it can use the
+        // image afterwards. Only one of the two is known when the command failed early.
+        var identity = (replyId, command.ImageNumber) switch
+        {
+            (0, var number) => $"I={number}",
+            (var actual, 0) => $"i={actual}",
+            (var actual, var number) => $"i={actual},I={number}"
+        };
+        var status = error switch
+        {
+            Graphics.KittyError.None => "OK",
+            Graphics.KittyError.NotFound => "ENOENT:no such image",
+            Graphics.KittyError.TooLarge => "EFBIG:image too large",
+            Graphics.KittyError.Unsupported => "ENOTSUP:not supported",
+            _ => "EINVAL:bad image data"
+        };
+
+        _terminal.RaiseDataReceived($"\u001b_G{identity};{status}\u001b\\");
+    }
+
+    /// <summary>
+    /// Writes an image into the buffer as one run per line.
+    /// </summary>
+    /// <remarks>
+    /// <para>A picture spanning several rows becomes several <see cref="Graphics.LinePlacement"/>s,
+    /// one per line, each carrying its own slice of the source. The line owns the run and the image,
+    /// so scrolling, scrollback eviction and ownership all keep working without anything being
+    /// written into cells — and a resize does nothing to a picture at all.</para>
+    /// <para>Cells are not touched. That is the whole difference between the two protocols here:
+    /// Sixel is CONTENT, so printing over it replaces that part of the picture and
+    /// <see cref="BufferLine.SplitPlacementsAt"/> does it explicitly; Kitty is an OVERLAY the
+    /// z-index orders against the text, so a picture placed over a character hides it while it is
+    /// there and reveals it again when it is deleted. Blanking the cell would make that
+    /// irreversible.</para>
+    /// </remarks>
+    private void PlaceImage(Graphics.ImagePlacement placement,
+                            Graphics.PlacementKind kind,
+                            bool keepCursor = false)
     {
         // DECSDM set means the older display behaviour: pinned to the top-left, clipped rather
         // than scrolled, cursor untouched.
@@ -841,7 +1815,11 @@ public class InputHandler
 
         var lastRowDrawn = row;
 
-        for (int tileRow = 0; tileRow < image.Rows; tileRow++)
+        // One serial for the placement, shared by every row of it, so a delete aimed at any one
+        // cell can find and remove the whole picture.
+        var serial = Graphics.LinePlacement.NextSerial();
+
+        for (int tileRow = 0; tileRow < placement.Rows; tileRow++)
         {
             if (row > _buffer.ScrollBottom)
             {
@@ -858,36 +1836,57 @@ public class InputHandler
             if (line is null)
                 break;
 
-            // One run per line instead of a cell per tile. The line takes ownership of the image,
-            // and Cols is the picture's NATURAL width — deliberately NOT clipped to the terminal, so
-            // a window widened later reveals more of the picture rather than having lost it.
-            if (image.TryGetTileSource(0, tileRow, out _, out var srcY, out _, out var srcHeight))
+            // One run per line. Cols is the picture's NATURAL width — deliberately NOT clipped to
+            // the terminal, so a window widened later reveals more of the picture rather than
+            // having lost it.
+            //
+            // The row's own slice of the source comes from the placement rather than the image,
+            // because a Kitty placement may be cropped and scaled: tileRow 3 of a stretched box is
+            // not the same pixels as tileRow 3 of the picture at its natural size.
+            if (placement.TryGetTileLayout(0, tileRow, out _, out var srcY, out _, out var srcHeight,
+                                           out _, out _, out _, out _))
             {
                 line.AddPlacement(
                     new Graphics.LinePlacement(
-                        image.Id,
+                        placement.Image.Id,
                         startCol,
-                        image.Cols,
-                        srcX: 0,
+                        placement.Cols,
+                        srcX: placement.SourceX,
                         srcY: srcY,
-                        srcWidth: image.PixelWidth,
+                        srcWidth: placement.SourceWidth,
                         srcHeight: srcHeight,
-                        kind: Graphics.PlacementKind.Sixel),
-                    image);
+                        kind: kind,
+                        placementId: placement.Id,
+                        offsetX: (short)placement.OffsetX,
+                        // Only the first row is shifted down inside its cell. Every row after it
+                        // starts at the top of its own, or the offset would be re-applied per row
+                        // and walk the picture down the screen.
+                        offsetY: tileRow == 0 ? (short)placement.OffsetY : (short)0,
+                        zIndex: (short)placement.ZIndex,
+                        serial: serial),
+                    placement.Image);
             }
 
             lastRowDrawn = row;
-            if (tileRow < image.Rows - 1)
+            if (tileRow < placement.Rows - 1)
                 row++;
         }
 
         if (!scrolling)
             return;
 
+        // Kitty's C=1. The picture is drawn but the cursor does not follow it, which is what lets a
+        // program place several images without tracking where each one left the caret.
+        if (keepCursor)
+        {
+            _terminal.NoteImagePlaced(placement.Image);
+            return;
+        }
+
         if (_terminal.SixelCursorRight)
         {
             // Mode 8452: stay on the image's last row, just past its right edge.
-            _buffer.SetCursor(Math.Min(startCol + image.Cols, _terminal.Cols - 1), lastRowDrawn);
+            _buffer.SetCursor(Math.Min(startCol + placement.Cols, _terminal.Cols - 1), lastRowDrawn);
         }
         else
         {
@@ -902,7 +1901,7 @@ public class InputHandler
             _buffer.SetCursor(0, below);
         }
 
-        _terminal.NoteImagePlaced(image);
+        _terminal.NoteImagePlaced(placement.Image);
     }
 
     #endregion
