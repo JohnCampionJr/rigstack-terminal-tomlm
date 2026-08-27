@@ -39,6 +39,7 @@ public static class CsiCommandExtensions
         { "t", CsiCommand.WindowManipulation },
         { "u", CsiCommand.RestoreCursorAnsi },
         { " q", CsiCommand.SelectCursorStyle },
+        { "$p", CsiCommand.RequestMode },
         { "q", CsiCommand.SelectCursorStyle }
     };
 
