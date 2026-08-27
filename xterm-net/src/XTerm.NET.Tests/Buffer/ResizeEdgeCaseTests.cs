@@ -131,4 +131,143 @@ public class ResizeEdgeCaseTests
 
         Assert.True(buffer.Lines.Length > 0, $"Lines.Length was {buffer.Lines.Length}");
     }
+
+    /// <summary>
+    /// A shrink that was following the tail keeps following it, with nothing stranded below.
+    /// </summary>
+    /// <remarks>
+    /// The screen is the last `rows` lines of the buffer, so a shrink has to move the difference
+    /// into scrollback. Shifting only far enough to bring the cursor back on screen left lines below
+    /// the screen — and the viewport tops out at YBase, so scrolling could never reach them again.
+    /// Caught in review on this PR.
+    /// </remarks>
+    [Fact]
+    public void ShrinkingRows_LeavesNothingStrandedBelowTheScreen()
+    {
+        var terminal = new Terminal(new TerminalOptions { Cols = 40, Rows = 24, Scrollback = 200 });
+        for (var i = 0; i < 20; i++)
+            terminal.Write($"line {i}\r\n");
+        terminal.Write("prompt$ ");
+
+        // Park the cursor with blank rows below it, which is what leaves room to strand.
+        terminal.Write("\u001b[24;1H");
+        terminal.Write("\u001b[6A");
+
+        var contentRow = terminal.Buffer.YBase + terminal.Buffer.Y;
+
+        terminal.Resize(40, 10);
+
+        // The cursor is still on its line...
+        Assert.Equal(contentRow, terminal.Buffer.YBase + terminal.Buffer.Y);
+
+        // ...and the screen reaches the end of the buffer, so nothing is below it.
+        Assert.Equal(terminal.Buffer.Lines.Length, terminal.Buffer.YBase + terminal.Rows);
+
+        // A viewport that was at the tail is still at the tail.
+        Assert.Equal(terminal.Buffer.YBase, terminal.Buffer.ViewportY);
+    }
+
+    /// <summary>
+    /// A zero-row resize has no viewport to overflow out of, and must not scroll the buffer.
+    /// </summary>
+    /// <remarks>
+    /// The bottom row of a zero-row viewport is not -1, and treating it as such makes the overflow
+    /// one line too large -- so a resize that shows nothing still moved the cursor's content row,
+    /// and the line that came back at the top when rows were restored was the wrong one. Zero rows
+    /// is a real case here: a buffer can be built with none and brought to life by a later resize.
+    /// </remarks>
+    [Fact]
+    public void ZeroRowResize_DoesNotScrollTheBuffer()
+    {
+        var terminal = new Terminal(new TerminalOptions { Cols = 40, Rows = 24, Scrollback = 200 });
+        for (var i = 0; i < 20; i++)
+            terminal.Write($"line {i}\r\n");
+        terminal.Write("prompt$ ");
+
+        var contentRow = terminal.Buffer.YBase + terminal.Buffer.Y;
+
+        terminal.Resize(40, 0);
+        Assert.Equal(contentRow, terminal.Buffer.YBase + terminal.Buffer.Y);
+
+        terminal.Resize(40, 24);
+        Assert.Equal(contentRow, terminal.Buffer.YBase + terminal.Buffer.Y);
+    }
+
+    /// <summary>
+    /// A resize must not move the cursor off the line it is on. Its position is YBase + Y, and both
+    /// halves of a resize used to change one without the other.
+    /// </summary>
+    /// <remarks>
+    /// <para>The consequence is silent corruption rather than a crash, which is why it survived: the
+    /// cursor lands on earlier content and the next write destroys a line the application never
+    /// touched. A shell hides its own damage, because it redraws its prompt on every SIGWINCH and
+    /// repaints what it just overwrote. Anything that does NOT repaint -- a Sixel picture, a
+    /// full-screen TUI mid-frame -- keeps the evidence.</para>
+    /// <para>Both directions are tested, because they fail through different mechanisms and fixing
+    /// one leaves the other.</para>
+    /// </remarks>
+    [Fact]
+    public void ShrinkingRows_KeepsTheCursorOnItsLine()
+    {
+        var terminal = new Terminal(new TerminalOptions { Cols = 40, Rows = 24, Scrollback = 200 });
+        for (var i = 0; i < 20; i++)
+            terminal.Write($"line {i}\r\n");
+        terminal.Write("prompt$ ");
+
+        var contentRow = terminal.Buffer.YBase + terminal.Buffer.Y;
+
+        terminal.Resize(40, 8);
+
+        Assert.Equal(contentRow, terminal.Buffer.YBase + terminal.Buffer.Y);
+    }
+
+    [Fact]
+    public void GrowingRows_KeepsTheCursorOnItsLine()
+    {
+        var terminal = new Terminal(new TerminalOptions { Cols = 40, Rows = 24, Scrollback = 200 });
+        for (var i = 0; i < 20; i++)
+            terminal.Write($"line {i}\r\n");
+        terminal.Write("prompt$ ");
+
+        terminal.Resize(40, 8);
+        var contentRow = terminal.Buffer.YBase + terminal.Buffer.Y;
+
+        terminal.Resize(40, 24);
+
+        Assert.Equal(contentRow, terminal.Buffer.YBase + terminal.Buffer.Y);
+    }
+
+    /// <summary>
+    /// The live case: a drag is many resize events, and a shell writes between them. What the cursor
+    /// slides over is what gets destroyed, so the round trip is asserted on CONTENT and not only on
+    /// coordinates.
+    /// </summary>
+    [Fact]
+    public void ResizeLadderWithRedraws_LeavesEarlierLinesIntact()
+    {
+        var terminal = new Terminal(new TerminalOptions { Cols = 40, Rows = 24, Scrollback = 200 });
+        for (var i = 0; i < 20; i++)
+            terminal.Write($"line {i}\r\n");
+        terminal.Write("prompt$ ");
+
+        for (var rows = 20; rows >= 6; rows -= 4)
+        {
+            terminal.Resize(40, rows);
+            terminal.Write("\rprompt$ ");
+        }
+
+        for (var rows = 10; rows <= 24; rows += 4)
+        {
+            terminal.Resize(40, rows);
+            terminal.Write("\rprompt$ ");
+        }
+
+        // Every "line N" written before the drag must still read back exactly.
+        for (var i = 0; i < 20; i++)
+        {
+            var line = terminal.Buffer.Lines[i];
+            Assert.NotNull(line);
+            Assert.Equal($"line {i}", line!.TranslateToString(true).TrimEnd());
+        }
+    }
 }
