@@ -607,6 +607,10 @@ public class InputHandler
                 SelectCursorStyle(parameters);
                 break;
 
+            case CsiCommand.RequestMode:
+                HandleRequestMode(parameters, isPrivate);
+                break;
+
             case CsiCommand.SetMode:
                 SetCSIModeParameters(parameters, isPrivate: isPrivate);
                 break;
@@ -2210,6 +2214,34 @@ public class InputHandler
         }
     }
 
+    /// <summary>
+    /// DECRQM — reports whether a mode is recognised and what it is set to.
+    /// </summary>
+    /// <remarks>
+    /// <para>This is how an application finds out whether synchronized output is worth using: it
+    /// asks, and a terminal that says nothing is one that does not support the query. Emitting the
+    /// mode without answering for it would leave well-behaved applications never using it.</para>
+    /// <para>Deliberately answers for 2026 alone. The reply codes distinguish "set" and "reset" from
+    /// "not recognised", and this terminal keeps mode state as individual properties rather than a
+    /// registry — so answering for everything would mean a switch mapping every mode back to its
+    /// property, and getting one wrong tells an application a feature is missing when it is not.
+    /// Staying silent for the rest is exactly the behaviour before this change, so nothing regresses
+    /// while the one mode that needs an answer gets a correct one.</para>
+    /// </remarks>
+    private void HandleRequestMode(Params parameters, bool isPrivate)
+    {
+        if (!isPrivate)
+            return;
+
+        var mode = parameters.GetParam(0, 0);
+        if (mode != (int)TerminalMode.SynchronizedOutput)
+            return;
+
+        // DECRPM: 1 = set, 2 = reset.
+        var state = _terminal.SynchronizedOutput ? 1 : 2;
+        _terminal.RaiseDataReceived($"\u001b[?{mode};{state}$y");
+    }
+
     private void SetCSIModeParameters(Params parameters, bool isPrivate)
     {
         for (int i = 0; i < parameters.Length; i++)
@@ -2280,6 +2312,10 @@ public class InputHandler
 
                 case TerminalMode.AppKeypad:
                     _terminal.ApplicationKeypad = true;
+                    break;
+
+                case TerminalMode.SynchronizedOutput:
+                    _terminal.RaiseSynchronizedOutputChanged(true);
                     break;
 
                 case TerminalMode.BracketedPasteMode:
@@ -2480,6 +2516,10 @@ public class InputHandler
 
                 case TerminalMode.AppKeypad:
                     _terminal.ApplicationKeypad = false;
+                    break;
+
+                case TerminalMode.SynchronizedOutput:
+                    _terminal.RaiseSynchronizedOutputChanged(false);
                     break;
 
                 case TerminalMode.BracketedPasteMode:

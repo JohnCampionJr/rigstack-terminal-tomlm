@@ -133,6 +133,25 @@ public static class TerminalEvents
     }
 
     /// <summary>
+    /// An atomic update beginning or ending — DEC private mode 2026.
+    /// </summary>
+    /// <remarks>
+    /// An EventArgs rather than a bare bool so that anything this needs to carry later — how the
+    /// update ended, how long it was held — can be added without breaking every subscriber. The
+    /// difference between a minor version and a major one.
+    /// </remarks>
+    public class SynchronizedOutputEventArgs : EventArgs
+    {
+        public SynchronizedOutputEventArgs(bool active)
+        {
+            Active = active;
+        }
+
+        /// <summary>True when an application has begun an atomic update, false when it has ended.</summary>
+        public bool Active { get; }
+    }
+
+    /// <summary>
     /// Shell integration event - fired for each OSC 133 mark.
     /// </summary>
     public class ShellIntegrationEventArgs : EventArgs
