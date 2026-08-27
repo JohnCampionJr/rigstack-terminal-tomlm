@@ -963,6 +963,9 @@ public class InputHandler
     /// has to be carried across to the new cell rather than dropped with the old one.</para>
     /// <para>Only negative z. At zero or above the picture is in front of the text and printing
     /// replaces it, exactly as it did before z-indexes were honoured at all.</para>
+    /// <para>Layers, plural: several pictures can be stacked under one cell, so what carries across
+    /// is the background part of the stack rather than a single placement. The pictures in front of
+    /// the text are dropped in the same step, which is the replacement half of the same rule.</para>
     /// </remarks>
     private static void CarryBackgroundImage(BufferLine? line, int col, ref BufferCell cell)
     {
@@ -970,11 +973,15 @@ public class InputHandler
             return;
 
         var existing = line[col];
-        if (existing.Placement is not { } placement || placement.ZIndex >= 0)
+        if (existing.Placement is null)
             return;
 
-        cell.Placement = placement;
+        if (!existing.KeepOnlyBackgroundLayers())
+            return;
+
+        cell.Placement = existing.Placement;
         cell.ImageTile = existing.ImageTile;
+        cell.Below = existing.Below;
     }
 
     /// <summary>
@@ -1830,30 +1837,26 @@ public class InputHandler
                 if (col >= _terminal.Cols)
                     break;
 
-                var existing = line[col];
+                var cell = line[col];
 
-                // A picture already here with a higher z-index stays in front. A cell holds one
-                // placement, so "in front" has to mean "instead of" rather than "over the top of":
-                // what is lost is blending two overlapping pictures, not the ordering between them.
-                if (existing.Placement is { } inFront && inFront.ZIndex > placement.ZIndex)
-                    continue;
-
-                BufferCell cell;
-
-                if (placement.ZIndex < 0 && !existing.IsImage)
+                if (placement.ZIndex >= 0)
                 {
-                    // Negative z means behind the text. The glyph and its attributes stay exactly as
-                    // they were and the picture is attached underneath, so a host draws the tile and
-                    // then the character over it -- which is how a background image is expressed.
-                    cell = existing;
-                }
-                else
-                {
-                    cell = new BufferCell(" ", 1, _curAttr);
+                    // In front of the text, so the character goes. The pictures already covering the
+                    // cell do not: this is an insert into the cell's stack, not a replacement of it,
+                    // so one placed over another leaves the one behind intact and merely covered.
+                    // That is what lets a translucent picture blend over what it covers, and what
+                    // makes deleting the front one reveal the back one whole instead of punching a
+                    // hole through it.
+                    cell.Content = " ";
+                    cell.Width = 1;
+                    cell.CodePoint = 0x20;
+                    cell.Attributes = _curAttr;
                 }
 
-                cell.Placement = placement;
-                cell.ImageTile = BufferCell.PackTile(tileCol, tileRow);
+                // Negative z means behind the text, so there the glyph and its attributes are left
+                // exactly as they were and the picture goes underneath -- a host draws the tile
+                // first and the character over it, which is how a background image is expressed.
+                cell.AddImageLayer(placement, BufferCell.PackTile(tileCol, tileRow));
                 line.SetCell(col, ref cell);
             }
 

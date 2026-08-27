@@ -442,7 +442,8 @@ path they should have.
 
 Scope in: transmit (`a=t`), transmit-and-display (`a=T`), place (`a=p`), delete (`a=d`), query
 (`a=q`); chunked payloads; RGB, RGBA and PNG; zlib; cropping; cell-box scaling; cursor policy; quiet
-levels; and U+10EEEE Unicode placeholders. Out: animation, z-index and overlapping placements.
+levels; and U+10EEEE Unicode placeholders. Out at the time: animation, z-index and overlapping
+placements — all three since done, and covered further down.
 
 ## Placements, because a picture can now appear twice
 
@@ -603,12 +604,27 @@ Adam7 is decoded rather than refused. Each pass is filtered against its own neig
 be read as one strided image, and an empty pass contributes no bytes at all -- counting one would
 shift every later pass and turn the rest of the picture into noise.
 
-**Draw order.** A cell holds one placement, so ordering between two pictures is which of them the
-cell keeps: a placement never displaces one with a higher z-index, and at equal z the newer wins.
-Exact for opaque pictures, losing only the blend where a translucent one overlaps another. A
-NEGATIVE z means behind the TEXT, and there the cell keeps both -- which needed the one exception to
-the rule that printing rebuilds a cell from scratch. Erasing still clears both; a picture showing
-through a cleared screen would be a leak.
+**Draw order.** A cell keeps every placement covering it, ordered by z-index and, at equal z, by
+which was placed later. A NEGATIVE z means behind the TEXT, and there the cell keeps the glyph too --
+which needed the one exception to the rule that printing rebuilds a cell from scratch. Erasing still
+clears the lot; a picture showing through a cleared screen would be a leak.
+
+**`d=a` took the text with the pictures.** Deleting every placement reached the cells through the
+helper a resize uses, which blanks them. That is right for a picture in FRONT of the text, whose
+character was only ever the placeholder space it wrote when it landed, and wrong for a background
+one, whose character is whatever the user typed onto it. Every other delete target already got this
+right, so the two disagreed. The rule now lives on `BufferCell.RemoveImages` and all three paths --
+`d=a`, delete-by-placement and delete-by-image -- go through it. Invisible until something is drawn
+behind text, which is how it survived: every other image cell holds a space, and blanking a space
+changes nothing. Found by the walkthrough script, not by a test.
+
+**Overlap.** Covering a picture no longer destroys it. The stack lives on the cell as the frontmost
+placement inline, as before, plus a `Below` chain that is null for every cell not actually
+overlapped -- so the common case costs the field and nothing else, no allocation and no indirection.
+Two things fall out of it: a translucent picture blends over what it covers, and deleting the front
+one reveals the back one whole. The second is a bug fix rather than a feature, and it bit opaque
+pictures too -- the covered cells had been overwritten, so the lower picture came back with a hole
+through it.
 
 **Animation.** Frames, composition and control, both client-driven and terminal-driven.
 
@@ -644,7 +660,9 @@ through a cleared screen would be a leak.
 - `src/XTerm.NET/Graphics/ImageAnimation.cs` -- frames, state, the clock, and the blend
 - `src/XTerm.NET/Graphics/PlaceholderDiacritics.cs` -- kitty's 297-mark table, verbatim
 - `src/XTerm.NET/Graphics/TerminalImage.cs` -- `Animation`, `CurrentPixels`, `FrameSerial`
-- `src/XTerm.NET/Graphics/ImagePlacement.cs` -- `ZIndex`, offsets, `TryGetTileLayout`
+- `src/XTerm.NET/Graphics/ImagePlacement.cs` -- `ZIndex`, `Sequence`, offsets, `TryGetTileLayout`
+- `src/XTerm.NET/Graphics/CellImageLayer.cs` -- the overlap chain and its ordering rule
+- `src/XTerm.NET/Buffer/BufferCell.cs` -- `Below`, and the stack operations over it
 - `src/XTerm.NET/Graphics/PngDecoder.cs` -- Adam7
 - `src/XTerm.NET/Graphics/KittyCommand.cs` -- frame, animate and compose actions and their keys
 - `src/XTerm.NET/Graphics/ImageRegistry.cs` -- image numbers, removal by image

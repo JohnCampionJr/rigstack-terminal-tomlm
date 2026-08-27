@@ -5,11 +5,11 @@ namespace XTerm.Tests.Graphics;
 /// <summary>
 /// Draw order, from Kitty's <c>z=</c> key.
 ///
-/// <para>A cell holds one placement, so ordering between two pictures is expressed by which of them
-/// the cell keeps rather than by blending them. That is exact for opaque pictures and loses only the
-/// blend where a translucent one overlaps another -- see
-/// <see cref="Two_overlapping_pictures_are_not_blended"/>, which records the limit rather than
-/// pretending it is not there.</para>
+/// <para>A cell keeps every picture covering it, stacked by z-index and, at equal z, by age. Being
+/// covered is not the same as being deleted: the picture behind is still there, which is what lets a
+/// translucent one blend over it and what makes deleting the front one reveal the back one whole
+/// rather than leave a hole punched through it. See <see cref="KittyOverlapTests"/> for the stack
+/// itself; this file is about the order.</para>
 ///
 /// <para>Negative z means something different in kind: behind the TEXT. There the cell keeps both,
 /// because a background image that vanished the moment anything was typed on it would be useless.
@@ -69,7 +69,7 @@ public class KittyZIndexTests
     }
 
     [Fact]
-    public void A_higher_z_picture_displaces_a_lower_one()
+    public void A_higher_z_picture_goes_in_front_of_a_lower_one()
     {
         var terminal = WithTwoImages();
         PlaceAt(terminal, 1, 0, 0, z: 1);
@@ -112,20 +112,20 @@ public class KittyZIndexTests
     }
 
     /// <summary>
-    /// The limit of one placement per cell, recorded deliberately. Where two pictures overlap the
-    /// front one is shown outright rather than composited over the one behind, so a translucent
-    /// picture does not let the lower one through.
+    /// Where two pictures overlap the front one is the cell's frontmost, and the one behind is kept
+    /// under it rather than discarded -- which is what a host composites and what a delete reveals.
     /// </summary>
     [Fact]
-    public void Two_overlapping_pictures_are_not_blended()
+    public void Two_overlapping_pictures_are_both_kept()
     {
         var terminal = WithTwoImages();
         PlaceAt(terminal, 1, 0, 0, z: 1);
         PlaceAt(terminal, 2, 0, 0, z: 5);
 
         var cell = Cell(terminal, 0, 0);
-        Assert.NotNull(cell.Placement);
         Assert.Equal(5, cell.Placement!.ZIndex);
+        Assert.Equal(1, cell.Below!.Placement.ZIndex);
+        Assert.Null(cell.Below.Below);
     }
 
     // ---- behind the text --------------------------------------------------------------------------

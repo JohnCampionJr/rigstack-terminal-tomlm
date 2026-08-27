@@ -418,10 +418,16 @@ Not supported, and refused with a proper error reply rather than ignored:
   usually holds more privilege than that program does. Direct transmission (`t=d`) is the only medium
   accepted.
 
-**Draw order (`z=`)** is honoured, with one documented limit. A cell holds one placement, so ordering
-between two *pictures* is expressed by which of them the cell keeps: a placement never displaces one
-with a higher z-index, and at equal z the newer wins. That is exact for opaque pictures and loses
-only the blend where a translucent one overlaps another.
+**Draw order (`z=`)** is honoured, including where pictures overlap. A cell keeps every placement
+covering it, stacked by z-index and, at equal z, by which was placed later. Being covered is not the
+same as being deleted: a translucent picture blends over the one behind it, and deleting the front
+one reveals the back one whole rather than leaving a hole where the two met.
+
+A host draws a cell's stack from the bottom up, which is what makes the blend come out right. The
+cell's own background goes down once, underneath all of it — painting it again with an upper layer
+would erase the layers below instead of letting them show through. The stack is bounded at eight
+deep per cell, dropping the bottom layer: nothing in the protocol stops a client stacking pictures
+over one spot forever, and every layer is retained pixels that cannot be seen.
 
 A **negative** z-index means something different in kind — behind the *text*. There the cell keeps
 both, so a picture placed under existing text leaves it readable, and text typed onto a background

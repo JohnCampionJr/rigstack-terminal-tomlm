@@ -76,11 +76,27 @@ public sealed class ImagePlacement
     /// The client's requested draw order, from Kitty's <c>z=</c> key.
     /// </summary>
     /// <remarks>
-    /// Recorded so that a delete can select by it, which the protocol's <c>d=z</c> and <c>d=q</c>
-    /// targets require. A cell holds one placement, so this does not yet affect what is drawn on top
-    /// of what -- a placement written over an occupied cell replaces it regardless of z.
+    /// <para>Decides what is drawn over what where two placements cover the same cell: the cell
+    /// keeps both, stacked by this, and a host draws them from the bottom up. A negative z means
+    /// something different in kind -- behind the <em>text</em> rather than behind another picture.
+    /// </para>
+    /// <para>A delete can also select by it, which the protocol's <c>d=z</c> and <c>d=q</c> targets
+    /// require.</para>
     /// </remarks>
     public int ZIndex { get; }
+
+    /// <summary>
+    /// When this placement was made, relative to every other one.
+    /// </summary>
+    /// <remarks>
+    /// Kitty breaks a z-index tie by age -- at equal z the placement made later is drawn on top --
+    /// and nothing else on a placement records that. Reference identity cannot: it says whether two
+    /// placements differ, not which came first. Handed out from a counter that only ever goes up, so
+    /// it is a total order and both the buffer and a renderer sorting a line reach the same answer.
+    /// </remarks>
+    public long Sequence { get; }
+
+    private static long _nextSequence;
 
     /// <summary>
     /// Pixels to shift the picture rightwards inside the first cell, from Kitty's <c>X=</c> key.
@@ -127,6 +143,7 @@ public sealed class ImagePlacement
         Rows = rows;
         Scaling = scaling;
         ZIndex = zIndex;
+        Sequence = System.Threading.Interlocked.Increment(ref _nextSequence);
         OffsetX = Math.Clamp(offsetX, 0, Math.Max(0, image.CellWidth - 1));
         OffsetY = Math.Clamp(offsetY, 0, Math.Max(0, image.CellHeight - 1));
     }

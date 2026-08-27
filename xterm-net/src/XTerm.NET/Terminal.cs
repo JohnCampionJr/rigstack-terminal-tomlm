@@ -604,9 +604,17 @@ public class Terminal
 
             for (int col = 0; col < line.Length && col < Cols; col++)
             {
-                var placement = line[col].Placement;
-                if (placement is not null && cellMatches(col, row))
-                    found.Add(placement);
+                var cell = line[col];
+                if (cell.Placement is null || !cellMatches(col, row))
+                    continue;
+
+                // Every layer, not just the frontmost. A delete aimed at a cell means the pictures
+                // at that cell, and a picture covered by another is still there -- selecting only
+                // the top one would make "delete what is at row 3" depend on what happened to be
+                // stacked over it.
+                found.Add(cell.Placement);
+                for (var layer = cell.Below; layer is not null; layer = layer.Below)
+                    found.Add(layer.Placement);
             }
         }
 
@@ -629,14 +637,13 @@ public class Terminal
             for (int x = 0; x < line.Length; x++)
             {
                 var cell = line[x];
-                if (cell.Placement is null || !predicate(cell.Placement))
+
+                // Matching layers go from anywhere in the stack, and whatever was underneath the
+                // frontmost is promoted rather than dropped -- that reveal is the point of keeping
+                // the layers at all.
+                if (!cell.RemoveImages(predicate))
                     continue;
 
-                cell.Placement = null;
-                cell.ImageTile = 0;
-                cell.Content = " ";
-                cell.Width = 1;
-                cell.CodePoint = 0x20;
                 line.SetCell(x, ref cell);
                 touched = true;
             }
@@ -778,16 +785,15 @@ public class Terminal
             for (int x = 0; x < line.Length; x++)
             {
                 var cell = line[x];
-                if (cell.Image is null || !doomed.Contains(cell.Image))
+
+                // Doomed by IMAGE, cleared by placement: every appearance of a picture goes when its
+                // pixels do, which is the point of freeing them. Layer by layer, and testing each
+                // layer's own image rather than the frontmost -- a covered appearance is still an
+                // appearance, and nulling the top while leaving what was under it would strand a
+                // picture the cell can no longer reach.
+                if (!cell.RemoveImages(placement => doomed.Contains(placement.Image)))
                     continue;
 
-                // Doomed by IMAGE, cleared by placement: every appearance of a picture goes when
-                // its pixels do, which is the point of freeing them.
-                cell.Placement = null;
-                cell.ImageTile = 0;
-                cell.Content = " ";
-                cell.Width = 1;
-                cell.CodePoint = 0x20;
                 line.SetCell(x, ref cell);
                 touched = true;
             }

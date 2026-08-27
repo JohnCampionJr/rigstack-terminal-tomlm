@@ -249,14 +249,12 @@ public class BufferLine : IEnumerable<BufferCell>
         bool found = false;
         for (int i = 0; i < _length; i++)
         {
-            if (_cells[i].Placement is null)
+            // The whole stack, not just the picture in front: a cleared line showing the second of
+            // two overlapping pictures would be a leak in exactly the way the first one is. The
+            // character survives if it was the user's rather than a picture's -- see RemoveImages.
+            if (!_cells[i].RemoveImages(static _ => true))
                 continue;
 
-            _cells[i].Placement = null;
-            _cells[i].ImageTile = 0;
-            _cells[i].Content = " ";
-            _cells[i].Width = 1;
-            _cells[i].CodePoint = 0x20;
             found = true;
         }
 
