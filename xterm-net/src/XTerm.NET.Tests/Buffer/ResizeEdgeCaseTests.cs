@@ -133,6 +133,41 @@ public class ResizeEdgeCaseTests
     }
 
     /// <summary>
+    /// A shrink that was following the tail keeps following it, with nothing stranded below.
+    /// </summary>
+    /// <remarks>
+    /// The screen is the last `rows` lines of the buffer, so a shrink has to move the difference
+    /// into scrollback. Shifting only far enough to bring the cursor back on screen left lines below
+    /// the screen — and the viewport tops out at YBase, so scrolling could never reach them again.
+    /// Caught in review on this PR.
+    /// </remarks>
+    [Fact]
+    public void ShrinkingRows_LeavesNothingStrandedBelowTheScreen()
+    {
+        var terminal = new Terminal(new TerminalOptions { Cols = 40, Rows = 24, Scrollback = 200 });
+        for (var i = 0; i < 20; i++)
+            terminal.Write($"line {i}\r\n");
+        terminal.Write("prompt$ ");
+
+        // Park the cursor with blank rows below it, which is what leaves room to strand.
+        terminal.Write("\u001b[24;1H");
+        terminal.Write("\u001b[6A");
+
+        var contentRow = terminal.Buffer.YBase + terminal.Buffer.Y;
+
+        terminal.Resize(40, 10);
+
+        // The cursor is still on its line...
+        Assert.Equal(contentRow, terminal.Buffer.YBase + terminal.Buffer.Y);
+
+        // ...and the screen reaches the end of the buffer, so nothing is below it.
+        Assert.Equal(terminal.Buffer.Lines.Length, terminal.Buffer.YBase + terminal.Rows);
+
+        // A viewport that was at the tail is still at the tail.
+        Assert.Equal(terminal.Buffer.YBase, terminal.Buffer.ViewportY);
+    }
+
+    /// <summary>
     /// A zero-row resize has no viewport to overflow out of, and must not scroll the buffer.
     /// </summary>
     /// <remarks>

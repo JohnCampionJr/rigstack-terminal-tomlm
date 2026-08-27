@@ -427,13 +427,23 @@ public class TerminalBuffer
         // resize that has no viewport at all.
         var newBottom = Math.Max(0, newRows - 1);
 
+        // The screen is the last `rows` lines of the buffer, so a shrink has to move the difference
+        // into scrollback. Shifting only enough to bring the cursor on screen left lines stranded
+        // BELOW the screen, where scrolling cannot reach them -- the viewport tops out at _yBase.
+        // So shift as far toward the tail as there is room for, stopping at the cursor: the cursor
+        // must not end up above the screen, and keeping it on its line is what this is all for.
         if (_y > newBottom)
         {
             var overflow = _y - newBottom;
             var room = Math.Max(0, _lines.Length - newRows - _yBase);
-            var shift = Math.Min(overflow, room);
-
             var wasFollowing = _yDisp == _yBase;
+
+            // At least enough to bring the cursor back on screen. But when the viewport was
+            // following the tail, take all the room there is -- bounded by the cursor, which must
+            // not end up above the screen. Shifting the bare minimum left lines stranded BELOW the
+            // screen, where scrolling cannot reach them, because the viewport tops out at _yBase.
+            var shift = Math.Min(room, wasFollowing ? _y : overflow);
+
             _yBase += shift;
             _y -= shift;
             if (wasFollowing)
