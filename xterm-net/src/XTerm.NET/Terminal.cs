@@ -190,7 +190,7 @@ public class Terminal
     /// <summary>
     /// Raised when an atomic update begins or ends, so a renderer can react without polling.
     /// </summary>
-    public event EventHandler<bool>? SynchronizedOutputChanged;
+    public event EventHandler<TerminalEvents.SynchronizedOutputEventArgs>? SynchronizedOutputChanged;
 
     internal void RaiseSynchronizedOutputChanged(bool active)
     {
@@ -198,7 +198,7 @@ public class Terminal
             return;
 
         SynchronizedOutput = active;
-        SynchronizedOutputChanged?.Invoke(this, active);
+        SynchronizedOutputChanged?.Invoke(this, new TerminalEvents.SynchronizedOutputEventArgs(active));
     }
 
     /// <summary>
@@ -451,6 +451,13 @@ public class Terminal
         MetaSendsEscape = false;  // Default is disabled
         AltSendsEscape = false;
         Win32InputMode = false;
+
+        // Through the raiser rather than assigned, so a renderer holding a frame is told it can
+        // stop -- and so the flag cannot be left set. It is also the dedupe key for the event, so a
+        // stale true would swallow the NEXT application's begin and leave its end raising a lone
+        // false: the transitions-only contract inverted and staying inverted. RIS is exactly how
+        // someone recovers from an application that set the mode and died.
+        RaiseSynchronizedOutputChanged(false);
 
         // Reset cursor
         _buffer.SetCursor(0, 0);

@@ -39,7 +39,7 @@ public class SynchronizedOutputTests
     {
         var terminal = Fresh();
         var edges = new List<bool>();
-        terminal.SynchronizedOutputChanged += (_, active) => edges.Add(active);
+        terminal.SynchronizedOutputChanged += (_, e) => edges.Add(e.Active);
 
         terminal.Write($"{Esc}[?2026h");
         terminal.Write($"{Esc}[?2026l");
@@ -80,6 +80,79 @@ public class SynchronizedOutputTests
         terminal.Write($"{Esc}[?2026l");
 
         Assert.Equal("hello", terminal.Buffer.Lines[0]!.TranslateToString(true).TrimEnd());
+    }
+
+    // ---- a reset has to clear it ----------------------------------------------------------------
+    //
+    // Raised in review. RIS is exactly how someone recovers from an application that began an update
+    // and then died, so it is the one path that must not leave the mode set.
+
+    [Fact]
+    public void A_full_reset_clears_the_mode()
+    {
+        var terminal = Fresh();
+        terminal.Write($"{Esc}[?2026h");
+
+        terminal.Write($"{Esc}c");   // RIS
+
+        Assert.False(terminal.SynchronizedOutput);
+    }
+
+    /// <summary>
+    /// The flag is also the event's dedupe key, so leaving it set does more than go stale: the next
+    /// application's begin is swallowed as "no change" and its end raises a lone false. The
+    /// transitions-only contract inverts, and stays inverted.
+    /// </summary>
+    [Fact]
+    public void Events_stay_paired_across_a_reset()
+    {
+        var terminal = Fresh();
+        terminal.Write($"{Esc}[?2026h");
+        terminal.Write($"{Esc}c");
+
+        var edges = new List<bool>();
+        terminal.SynchronizedOutputChanged += (_, e) => edges.Add(e.Active);
+
+        terminal.Write($"{Esc}[?2026h");
+        terminal.Write($"{Esc}[?2026l");
+
+        Assert.Equal(new[] { true, false }, edges);
+    }
+
+    /// <summary>
+    /// The worst of the three in the field: a client that probes before drawing is told a frame is
+    /// already open when none is.
+    /// </summary>
+    [Fact]
+    public void Decrqm_reports_reset_after_a_reset()
+    {
+        var terminal = Fresh();
+        terminal.Write($"{Esc}[?2026h");
+        terminal.Write($"{Esc}c");
+
+        var replies = new List<string>();
+        terminal.DataReceived += (_, e) => replies.Add(e.Data);
+        terminal.Write($"{Esc}[?2026$p");
+
+        Assert.Equal(new[] { $"{Esc}[?2026;2$y" }, replies);
+    }
+
+    /// <summary>
+    /// A renderer holding a frame has to be told it can stop, and RIS is the one case where nothing
+    /// else will tell it.
+    /// </summary>
+    [Fact]
+    public void A_reset_during_an_update_ends_it_for_a_listener()
+    {
+        var terminal = Fresh();
+        var edges = new List<bool>();
+
+        terminal.Write($"{Esc}[?2026h");
+        terminal.SynchronizedOutputChanged += (_, e) => edges.Add(e.Active);
+
+        terminal.Write($"{Esc}c");
+
+        Assert.Equal(new[] { false }, edges);
     }
 
     // ---- DECRQM, which is how an application discovers the mode exists --------------------------
