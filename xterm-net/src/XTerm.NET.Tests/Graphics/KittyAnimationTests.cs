@@ -538,4 +538,33 @@ public class KittyAnimationTests
 
         Assert.DoesNotContain(replies, r => r.Contains("EINVAL"));
     }
+
+    /// <summary>
+    /// The frames are counted against the image budget as well as the root picture, and the two are
+    /// summed as a long.
+    /// </summary>
+    /// <remarks>
+    /// This used to clamp the animation to <c>int.MaxValue</c> and then add the root in int
+    /// arithmetic, so the total wrapped negative at exactly the size the clamp existed to guard
+    /// against -- and a negative byte count makes the eviction sweep believe an image is free. The
+    /// overflow itself needs gigabytes to reach; what is checkable here is that the sum is a long
+    /// and that it counts both halves.
+    /// </remarks>
+    [Fact]
+    public void An_animation_counts_its_frames_against_the_budget()
+    {
+        var terminal = WithImage();
+        var image = Image(terminal);
+
+        var root = image.ByteCount;
+        Assert.Equal(4 * 4 * TerminalImage.BytesPerPixel, root);
+        Assert.Null(image.Animation);
+
+        terminal.Write(Apc("a=f,i=1,z=100,f=32,s=4,v=4,q=2", Rgba(4, 4, 0, 255, 0)));
+
+        // Both halves, added together rather than one of them clamped and then added.
+        Assert.NotNull(image.Animation);
+        Assert.Equal(root + image.Animation!.ByteCount, image.ByteCount);
+        Assert.True(image.ByteCount > root, "the frames have to reach the budget somehow");
+    }
 }

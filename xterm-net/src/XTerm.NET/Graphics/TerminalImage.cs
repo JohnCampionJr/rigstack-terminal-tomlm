@@ -64,7 +64,13 @@ public sealed class TerminalImage
     public int Rows { get; }
 
     /// <summary>Size of the pixel buffer, for accounting against an image memory budget.</summary>
-    public int ByteCount => _pixels.Length + (int)Math.Min(int.MaxValue, Animation?.ByteCount ?? 0);
+    /// <remarks>
+    /// A long, and summed as one. An animation's frames are counted here as well as the root
+    /// picture, and the two together can exceed what an int holds -- clamping the animation before
+    /// adding the root, as this used to, wrapped the total negative at exactly the point the clamp
+    /// existed to guard. Every consumer accumulates into a long already.
+    /// </remarks>
+    public long ByteCount => (long)_pixels.Length + (Animation?.ByteCount ?? 0);
 
     /// <summary>The backing array, so an animation can share the root frame without copying it.</summary>
     internal byte[] PixelArray => _pixels;

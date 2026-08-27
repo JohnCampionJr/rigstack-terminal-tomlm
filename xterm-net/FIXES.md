@@ -499,8 +499,9 @@ seam or overlap from rounding.
   oldest first.
 - **Crop rectangles are clamped, not rejected.** They come from another process; a `w` that runs off
   the right edge should show the part that exists rather than nothing at all.
-- **Interlaced PNG is refused rather than decoded.** Adam7 is rare from these tools, and a wrong
-  picture is worse than a reported failure.
+- **Interlaced PNG is decoded.** This began as a refusal -- Adam7 is rare from these tools, and a
+  wrong picture is worse than a reported failure -- but the passes turned out to be worth doing
+  properly rather than declining. See the Adam7 note further down for what makes them awkward.
 - **Nothing in the decoders throws.** As with Sixel: `PngDecoder.TryDecode` wraps its whole body, and
   `KittyCommand.Parse` cannot fail -- unknown keys are ignored, per spec. Note that a continuation
   chunk carries only `m=1`, so the action defaults to transmit only when no action key was seen at
