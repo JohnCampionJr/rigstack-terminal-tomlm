@@ -36,32 +36,9 @@
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Avalonia" Version="12.0.2" />
-    <PackageReference Include="Porta.Pty" Version="2.1.1" />
+    <PackageReference Include="Porta.Pty" Version="2.2.0" />
     <PackageReference Include="Unicode.net" Version="2.0.0" />
     <PackageReference Include="Wcwidth" Version="4.0.1" />
-  </ItemGroup>
-
-  <!--
-    XTerm.NET comes from a sibling checkout when there is one, and from nuget.org otherwise.
-
-    The point is being able to change the emulator and run this terminal against the change without
-    packing anything in between. A condition rather than a plain project reference is what keeps a
-    clone building: CI has no sibling checkout, and neither does anyone who only wants the package.
-
-    Set UseLocalXTerm=false to force the published package even with the sibling present, which is
-    worth doing before a release to build against exactly what will be restored.
-  -->
-  <PropertyGroup>
-    <LocalXTermProject>$(MSBuildThisFileDirectory)..\..\..\XTerm.NET\src\XTerm.NET\XTerm.NET.csproj</LocalXTermProject>
-    <UseLocalXTerm Condition="'$(UseLocalXTerm)' == '' AND Exists('$(LocalXTermProject)')">true</UseLocalXTerm>
-    <UseLocalXTerm Condition="'$(UseLocalXTerm)' == ''">false</UseLocalXTerm>
-  </PropertyGroup>
-
-  <ItemGroup Condition="'$(UseLocalXTerm)' == 'true'">
-    <ProjectReference Include="$(LocalXTermProject)" />
-  </ItemGroup>
-
-  <ItemGroup Condition="'$(UseLocalXTerm)' != 'true'">
-    <PackageReference Include="XTerm.NET" Version="2.0.0" />
+    <PackageReference Include="XTerm.NET" Version="2.0.0-rc001" />
   </ItemGroup>
 </Project>
