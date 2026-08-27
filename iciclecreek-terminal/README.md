@@ -242,10 +242,21 @@ Two things are handled for you and are worth knowing about:
 - One bitmap is uploaded per image and cached weakly against it, so a picture on screen is re-blitted
   rather than re-decoded on every frame, and the bitmap is released when the terminal drops the image.
 
-A run of adjacent cells belonging to the same strip of one *placement* is drawn in a single call
-rather than one per cell. Placement, not picture: Kitty can transmit an image once and show it in
-several places, and two appearances sitting side by side have to stay two draws. On a backend with no
-raster surface — Consolonia, for instance — images are skipped and the text still renders.
+One row of a picture is one draw. The emulator stores a picture as a run per line rather than
+scattering it through cells, so there is nothing to coalesce and no tile arithmetic to do — the run
+carries the source rectangle and the columns it covers, and the whole strip goes down in a single
+call. On a backend with no raster surface — Consolonia, for instance — images are skipped and the
+text still renders.
+
+Pictures may overlap, and a row is drawn one run at a time from the back forwards, with the text
+going down between the ones behind it and the ones in front. That ordering is the whole of the
+compositing: a translucent picture blends over whatever was drawn under it because it is drawn after
+it. A cell's own background is painted by the bottom-most picture covering it and by no other, since
+painting it again nearer the front would erase what is behind rather than let it show through.
+
+A run keeps its natural width even when the window is too narrow to show it, so the renderer draws as
+much as fits and narrows the source by the same proportion. Narrowing the window shows less of a
+picture and widening it shows more; nothing is destroyed in between.
 
 Either protocol can be turned off. Switching Sixel off also stops the terminal advertising it, so
 applications send text instead of pictures rather than pictures that get dropped:

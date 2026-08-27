@@ -206,15 +206,11 @@ namespace Iciclecreek.Terminal
             int StartX,
             int CellCount,
             IBrush? Background,
-            XT.Graphics.ImagePlacement? Placement = null,
-            int TileCol = 0,
-            int TileRow = 0)
+            XT.Graphics.LinePlacement? Placement = null,
+            XT.Graphics.TerminalImage? Image = null)
         {
-            /// <summary>
-            /// The pixels behind the placement, which is what a texture is cached against: two
-            /// appearances of one picture share them and should share one upload.
-            /// </summary>
-            public XT.Graphics.TerminalImage? Image => Placement?.Image;
+            /// <summary>Whether this run draws a picture rather than text.</summary>
+            public bool IsImage => Placement is not null && Image is not null;
         }
 
         // One bitmap per image, built on first sight and reused for the life of the picture.
@@ -4603,8 +4599,8 @@ namespace Iciclecreek.Terminal
                     if (run.Background is not null)
                         context.FillRectangle(run.Background, rect);
 
-                    if (run.Placement is not null)
-                        DrawImageRun(context, run, screenY, startYPos, scale);
+                    if (run.IsImage)
+                        DrawImageRun(context, run, startYPos, rowHeight, scale);
                     else if (run.Text is not null)
                         context.DrawText(run.Text, position);
                 }
@@ -4614,17 +4610,22 @@ namespace Iciclecreek.Terminal
             // Build and cache text runs for this line
             textRuns = new List<CachedTextRun>();
 
-            // Pictures BEHIND the text go down first, in a pass of their own. A cell showing one
-            // keeps its glyph -- that is what a negative z-index means -- so it has to go through
-            // the text machinery below as well, which it cannot do from inside a branch that
-            // consumes it. Runs are drawn in the order they are added, so listing the images here
-            // is what puts the text on top of them.
-            for (int x = 0; x < _terminal.Cols && x < line.Length;)
+            // The line's own runs, back to front. Every picture on the line is already one run per
+            // line, so there is nothing to collect and nothing to coalesce -- the emulator's storage
+            // is the draw list, and each run is a single blit.
+            //
+            // Runs are drawn in the order they are added, so appending the ones behind the text,
+            // then the text, then the ones in front is what makes the layers composite: a
+            // translucent picture blends over whatever was drawn under it.
+            var placements = OrderedPlacements(line);
+            var nextPlacement = 0;
+            var painted = new List<XT.Graphics.LinePlacement>();
+
+            for (; nextPlacement < placements.Count && placements[nextPlacement].ZIndex < 0; nextPlacement++)
             {
-                if (line[x].Placement is { ZIndex: < 0 })
-                    x = AppendImageRun(context, line, x, screenY, startYPos, rowHeight, scale, textRuns);
-                else
-                    x++;
+                AppendImageRun(context, line, placements[nextPlacement], startYPos, rowHeight, scale,
+                               textRuns, painted);
+                painted.Add(placements[nextPlacement]);
             }
 
             for (int x = 0; x < _terminal.Cols;)
@@ -4635,18 +4636,6 @@ namespace Iciclecreek.Terminal
                 string text = String.Empty;
                 int cellCount = 0;
                 int runStartX = 0;
-
-                // A cell showing part of a picture is a space as far as its content goes, so it would otherwise
-                // be swept into the text run beside it and never drawn. Take it first, and take as many adjacent
-                // tiles as belong to the same strip: one DrawImage per row of a picture rather than one per cell.
-                //
-                // Only pictures in FRONT of the text. The ones behind it were drawn by the pass above and their
-                // cells still carry a glyph, so they fall through here and are treated as the text they are.
-                if (cell.Placement is { ZIndex: >= 0 })
-                {
-                    x = AppendImageRun(context, line, x, screenY, startYPos, rowHeight, scale, textRuns);
-                    continue;
-                }
 
                 // Skip width-0 cells. There are TWO kinds, and only one of them is a placeholder.
                 //
@@ -4678,17 +4667,11 @@ namespace Iciclecreek.Terminal
 
                         // Stop if we hit a different attribute or a placeholder cell mid-run.
                         //
-                        // Also stop at a cell showing part of a picture. Those hold a space and usually the
-                        // same attributes as the text beside them, so without this they are collected into
-                        // the run as blanks and the picture is never drawn — but only when the run happens to
-                        // start on text, which is what makes it look like an intermittent fault rather than a
-                        // missing case.
-                        // A picture BEHIND the text is not a reason to stop: those cells carry a real
-                        // glyph and were already drawn as images by the earlier pass. Breaking on
-                        // them would end the run on its own first cell, leaving x where it was and
-                        // the outer loop spinning.
-                        if (currentCell.Width != 1 || currentCell.Attributes != cell.Attributes ||
-                            currentCell.Placement is { ZIndex: >= 0 })
+                        // A picture is no reason to stop. Pictures are not in cells any more, so a cell
+                        // under one carries whatever character was printed there and belongs in the run
+                        // like any other; the picture is drawn separately and the z-index decides which
+                        // of them a viewer ends up seeing.
+                        if (currentCell.Width != 1 || currentCell.Attributes != cell.Attributes)
                             break;
                         textBuilder.Append(currentCell.Content);
                         cellCount += currentCell.Width;
@@ -4747,72 +4730,116 @@ namespace Iciclecreek.Terminal
                 context.DrawText(formattedText, position);
             }
 
+            // And the pictures that cover the text, still back to front, now that it is down.
+            for (; nextPlacement < placements.Count; nextPlacement++)
+            {
+                AppendImageRun(context, line, placements[nextPlacement], startYPos, rowHeight, scale,
+                               textRuns, painted);
+                painted.Add(placements[nextPlacement]);
+            }
+
             // Cache the text runs (but not when ReverseVideo mode is active)
             if (!_terminal.ReverseVideo)
                 line.Cache = textRuns;
         }
 
         /// <summary>
-        /// Collects the run of image tiles starting at <paramref name="x"/>, draws it, and adds it to the row's
-        /// cache.
+        /// A line's picture runs, ordered back to front.
         /// </summary>
-        /// <returns>The column after the run.</returns>
         /// <remarks>
-        /// Cells continue a run while they show the next tile along of the same picture. Comparing the image by
-        /// reference is what keeps two pictures that happen to sit side by side apart, and comparing the tile
-        /// coordinates is what stops a run being drawn across a gap where something was typed over the middle of
-        /// one.
+        /// <para>Z-index first, then age, age being the order the emulator added the runs to the
+        /// line. <c>OrderBy</c> is stable, so sorting on z alone leaves equal depths in the order
+        /// they arrived — which is Kitty's rule that the placement made later is drawn on top.</para>
+        /// <para>Nothing is collected or coalesced: a picture is already one run per line, so the
+        /// emulator's storage IS the draw list and each run is a single blit. The list is copied
+        /// only because it has to be sorted, and only on a line that has a picture on it.</para>
         /// </remarks>
-        private int AppendImageRun(DrawingContext context, BufferLine line, int x, int screenY,
-                                   double startYPos, double rowHeight, double scale, List<CachedTextRun> textRuns)
+        private static List<XT.Graphics.LinePlacement> OrderedPlacements(BufferLine line)
         {
-            var first = line[x];
-            var placement = first.Placement!;
-            var tileRow = first.ImageRow;
-            var tileCol = first.ImageCol;
-            var runStartX = x;
+            if (!line.HasImages)
+                return EmptyPlacements;
 
-            int cellCount = 0;
-            while (x < line.Length && x < _terminal.Cols)
+            var placements = line.Placements;
+            if (placements.Count == 1)
+                return new List<XT.Graphics.LinePlacement>(placements);
+
+            return placements.OrderBy(p => p.ZIndex).ToList();
+        }
+
+        private static readonly List<XT.Graphics.LinePlacement> EmptyPlacements = new();
+
+        /// <summary>
+        /// The image a run shows, found among the ones its line holds.
+        /// </summary>
+        /// <remarks>
+        /// A run names its picture by id rather than holding it, because the line owns the pixels and
+        /// its death is what releases them. A line holds one or two images, so this is a scan of a
+        /// list that is almost always length one.
+        /// </remarks>
+        private static XT.Graphics.TerminalImage? ImageFor(BufferLine line, XT.Graphics.LinePlacement placement)
+        {
+            foreach (var image in line.Images)
             {
-                var current = line[x];
-
-                // The PLACEMENT, not the image behind it. Kitty transmits a picture once and may
-                // show it several times, so two appearances of one image can sit side by side --
-                // and comparing images would run a single strip straight across the join between
-                // them, drawing the wrong pixels in both.
-                if (!ReferenceEquals(current.Placement, placement) ||
-                    current.ImageRow != tileRow ||
-                    current.ImageCol != tileCol + cellCount)
-                    break;
-
-                cellCount++;
-                x++;
+                if (image.Id == placement.ImageId)
+                    return image;
             }
 
-            // Cannot happen -- the cell this was entered on matches by construction -- but a run of no cells
-            // would return x unadvanced and hang the caller's loop, which is too grim a failure to leave to
-            // reasoning about an invariant three call sites away.
-            if (cellCount == 0)
-                return x + 1;
+            return null;
+        }
 
-            // Image cells carry the pen that was active when the picture was placed, so a cell with a background
-            // of its own still paints it — underneath, where a transparent Sixel lets it through.
+        /// <summary>
+        /// Draws one picture run and adds it to the row's cache.
+        /// </summary>
+        /// <remarks>
+        /// One blit per run, which is one per row of a picture. There is no coalescing to do and no
+        /// tile arithmetic left: the run already carries the source rectangle and the columns it
+        /// covers, so the whole strip goes down in a single call.
+        /// </remarks>
+        private void AppendImageRun(DrawingContext context, BufferLine line,
+                                    XT.Graphics.LinePlacement placement,
+                                    double startYPos, double rowHeight, double scale,
+                                    List<CachedTextRun> textRuns,
+                                    List<XT.Graphics.LinePlacement> alreadyPainted)
+        {
+            var image = ImageFor(line, placement);
+            if (image is null)
+                return;
+
+            // Cols is the picture's NATURAL width and is deliberately not clipped by the emulator, so
+            // the clipping happens here: a narrow window shows less of the picture and a wider one
+            // shows more, without anything having been destroyed in between.
+            var start = Math.Max(0, placement.Column);
+            var end = Math.Min(placement.EndColumn, Math.Min(line.Length, _terminal.Cols));
+            var cellCount = end - start;
+            if (cellCount <= 0)
+                return;
+
+            // The cell's own background goes under the picture, which is what a Sixel drawn with
+            // background select 1 needs: its unset pixels are transparent and the cell colour is
+            // meant to show through them.
+            //
+            // Only where nothing has painted it already. Runs are drawn back to front, so a nearer
+            // picture repainting the background would erase the one behind it rather than blend over
+            // it -- which is the whole of what overlapping placements are for.
+            var first = line[start];
             var background = first.GetBackgroundBrush(_palette, this.Background);
-            var fill = first.GetBackgroundColor(_palette).HasValue ? background : null;
+            var fill = first.GetBackgroundColor(_palette).HasValue
+                       && !OverlapsAny(alreadyPainted, start, end)
+                       ? background
+                       : null;
 
-            var run = new CachedTextRun(null, runStartX, cellCount, fill, placement, tileCol, tileRow);
+            var run = new CachedTextRun(null, start, cellCount, fill, placement, image);
             textRuns.Add(run);
 
             if (fill is not null)
             {
-                var startX = Snap(runStartX * _charWidth, scale);
-                var endX = Snap((runStartX + cellCount) * _charWidth, scale);
-                context.FillRectangle(fill, new Rect(startX, startYPos, Math.Max(0, endX - startX), rowHeight));
+                var fillStart = Snap(start * _charWidth, scale);
+                var fillEnd = Snap(end * _charWidth, scale);
+                context.FillRectangle(fill, new Rect(fillStart, startYPos,
+                                                     Math.Max(0, fillEnd - fillStart), rowHeight));
             }
 
-            DrawImageRun(context, run, screenY, startYPos, scale);
-            return x;
+            DrawImageRun(context, run, startYPos, rowHeight, scale);
         }
 
         /// <summary>
@@ -4825,12 +4852,13 @@ namespace Iciclecreek.Terminal
         /// destination is scaled by how much of one the source actually holds -- stretching a half-tile over a
         /// whole cell is the difference between a picture and a smeared one.
         /// </remarks>
-        private void DrawImageRun(DrawingContext context, CachedTextRun run, int screenY, double startYPos, double scale)
+        private void DrawImageRun(DrawingContext context, CachedTextRun run,
+                                  double startYPos, double rowHeight, double scale)
         {
             if (_imageRenderingUnavailable)
                 return;
 
-            if (!TryPlanImageBlit(run, screenY, startYPos, _charWidth, _charHeight, scale,
+            if (!TryPlanImageBlit(run, startYPos, rowHeight, _charWidth, _charHeight, scale,
                                   out var source, out var destination))
                 return;
 
@@ -4880,81 +4908,85 @@ namespace Iciclecreek.Terminal
             => exception is NotImplementedException or PlatformNotSupportedException or NotSupportedException;
 
         /// <summary>
-        /// Works out which pixels of a picture go where on screen for one run of tiles.
+        /// Whether any run drawn earlier on this line covers part of this one's span.
+        /// </summary>
+        /// <remarks>
+        /// <para>What decides whether a run paints the cell background under itself. Runs go down
+        /// back to front, so a nearer picture repainting the background would erase the one behind
+        /// it rather than blend over it — which is the whole of what overlapping placements buy.
+        /// </para>
+        /// <para>The whole span rather than the columns actually uncovered, because the run's fill
+        /// is what its CACHED form replays: a rectangle over the run. A partial overlap therefore
+        /// costs the upper run's spare columns their background, which errs toward leaving a picture
+        /// alone rather than painting over one.</para>
+        /// </remarks>
+        private static bool OverlapsAny(List<XT.Graphics.LinePlacement> earlier, int start, int end)
+        {
+            foreach (var placement in earlier)
+            {
+                if (placement.Column < end && placement.EndColumn > start)
+                    return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Works out which pixels of a picture a run shows and where on screen they go.
         /// </summary>
         /// <remarks>
         /// <para>Separated from the drawing so the arithmetic can be asserted directly. It is the part with
         /// something to get wrong, and it cannot be observed through a rendered frame: the headless platform's
         /// recording context throws from DrawImage.</para>
-        /// <para>The destination comes off the cell grid rather than the picture's own pixel size, so an image
-        /// stays locked to the text it was placed among after a font or DPI change has moved the grid. Edge
-        /// tiles hold only part of a cell, so the destination is scaled by how much of one the source actually
-        /// covers -- stretching a half tile across a whole cell is the difference between a picture and a
-        /// smeared one.</para>
+        /// <para>The destination comes off the cell grid rather than the picture's own pixel size, so an
+        /// image stays locked to the text it was placed among after a font or DPI change has moved the
+        /// grid.</para>
+        /// <para>A run's <c>Cols</c> is its natural width and the caller has already clipped the columns to
+        /// what the line can show, so the SOURCE has to be narrowed by the same proportion — otherwise a
+        /// narrow window would squeeze the whole picture into fewer cells instead of showing less of it.</para>
         /// </remarks>
-        internal static bool TryPlanImageBlit(CachedTextRun run, int screenY, double startYPos,
+        internal static bool TryPlanImageBlit(CachedTextRun run, double startYPos, double rowHeight,
                                               double charWidth, double charHeight, double scale,
                                               out Rect source, out Rect destination)
         {
             source = default;
             destination = default;
 
-            var placement = run.Placement;
-            if (placement is null || run.CellCount <= 0 || charWidth <= 0 || charHeight <= 0)
+            if (run.Placement is not { } placement || run.Image is null)
+                return false;
+            if (run.CellCount <= 0 || charWidth <= 0 || charHeight <= 0)
+                return false;
+            if (placement.Cols <= 0 || placement.SrcWidth <= 0 || placement.SrcHeight <= 0)
                 return false;
 
-            // One call per tile gives both the pixels and where in the cell they go. A placement can
-            // be shifted within its first cell by Kitty's X and Y keys, and then the destination is
-            // no longer derivable from the source size alone -- the leading tile is both narrower
-            // AND starts partway across.
-            if (!placement.TryGetTileLayout(run.TileCol, run.TileRow, out var sourceX, out var sourceY,
-                                            out var tileWidth, out var tileHeight,
-                                            out var cellOffsetX, out var cellOffsetY,
-                                            out var firstCellsWide, out var cellsHigh))
+            // How much of the run's natural width is actually being drawn, and the slice of the
+            // source that corresponds to it.
+            var shown = Math.Min(run.CellCount, placement.Cols);
+            var sourceWidth = (double)placement.SrcWidth * shown / placement.Cols;
+            if (sourceWidth <= 0)
                 return false;
 
-            // The run spans several tiles, so its right edge is where the last one ends rather than
-            // a multiple of the first one's width -- under a stretched placement the tiles are not
-            // all the same size, because the source is divided across the cell box and the rounding
-            // has to land somewhere.
-            var lastTile = run.TileCol + run.CellCount - 1;
-            if (!placement.TryGetTileLayout(lastTile, run.TileRow, out var lastX, out _,
-                                            out var lastWidth, out _,
-                                            out var lastOffsetX, out _,
-                                            out var lastCellsWide, out _))
-                return false;
+            // The offsets shift the picture inside its first cell without enlarging the box, so what
+            // overflows the last cell is clipped. They are in image pixels, and the cell they shift
+            // within is a screen cell, so they cross over as a fraction of one.
+            var cell = run.Image.CellWidth > 0 ? run.Image.CellWidth : 1;
+            var cellHigh = run.Image.CellHeight > 0 ? run.Image.CellHeight : 1;
+            var offsetX = placement.OffsetX / (double)cell * charWidth;
+            var offsetY = placement.OffsetY / (double)cellHigh * charHeight;
 
-            var sourceWidth = lastX + lastWidth - sourceX;
-            var sourceHeight = tileHeight;
-            if (sourceWidth <= 0 || sourceHeight <= 0)
-                return false;
+            var startX = Snap(run.StartX * charWidth + offsetX, scale);
+            var endX = Snap((run.StartX + shown) * charWidth + offsetX, scale);
+            var topY = offsetY > 0 ? Snap(startYPos + offsetY, scale) : startYPos;
+            var endY = Snap(startYPos + offsetY + rowHeight, scale);
 
-            // Both edges in cells, measured from the run's first cell. With no offset the left edge
-            // is 0 and this is what it always was.
-            var left = cellOffsetX;
-            var right = run.CellCount == 1
-                ? cellOffsetX + firstCellsWide
-                : run.CellCount - 1 + lastOffsetX + lastCellsWide;
-
-            // Snapped the same way every other coordinate in this renderer is, or the picture shears against the
-            // grid by a fraction of a pixel per row.
-            var startX = Snap((run.StartX + left) * charWidth, scale);
-            var endX = Snap((run.StartX + right) * charWidth, scale);
-
-            // Left as it was when there is no vertical offset, so the existing geometry is untouched.
-            var topY = cellOffsetY > 0 ? Snap(startYPos + cellOffsetY * charHeight, scale) : startYPos;
-            var endY = Snap((screenY + cellOffsetY + cellsHigh) * charHeight, scale);
-
-            destination = new Rect(startX, topY,
-                                   Math.Max(0, endX - startX),
-                                   Math.Max(0, endY - topY));
+            destination = new Rect(startX, topY, Math.Max(0, endX - startX), Math.Max(0, endY - topY));
             if (destination.Width <= 0 || destination.Height <= 0)
             {
                 destination = default;
                 return false;
             }
 
-            source = new Rect(sourceX, sourceY, sourceWidth, sourceHeight);
+            source = new Rect(placement.SrcX, placement.SrcY, sourceWidth, placement.SrcHeight);
             return true;
         }
 
