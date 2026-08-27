@@ -229,6 +229,16 @@ namespace Iciclecreek.Terminal
         private sealed class CachedBitmap
         {
             public Bitmap? Bitmap;
+
+            /// <summary>
+            /// Which frame of the picture this bitmap holds.
+            /// </summary>
+            /// <remarks>
+            /// The cache is keyed on the image, which for an animation is not enough on its own --
+            /// the pixels move while the key stays the same. The emulator changes this number
+            /// whenever they do. A still picture leaves it at zero forever.
+            /// </remarks>
+            public int FrameSerial;
         }
 
         private readonly System.Runtime.CompilerServices.ConditionalWeakTable<XT.Graphics.TerminalImage, CachedBitmap> _imageBitmaps = new();
@@ -1026,8 +1036,71 @@ namespace Iciclecreek.Terminal
             };
             _cursorBlinkTimer.Tick += OnCursorBlinkTick;
 
+            // The animation clock. The emulator owns no timer -- it is driven entirely by Write --
+            // so somebody has to tell it how much time has gone by, and that is a job for the side
+            // with a render loop. It only runs while something is actually animating; see
+            // SyncAnimationClock.
+            _animationTimer = new DispatcherTimer
+            {
+                Interval = TimeSpan.FromMilliseconds(AnimationTickMilliseconds)
+            };
+            _animationTimer.Tick += OnAnimationTick;
+
             // Initialize IME client
             _inputMethodClient = new TerminalInputMethodClient(this);
+        }
+
+        /// <summary>
+        /// How often the animation clock ticks, in milliseconds.
+        /// </summary>
+        /// <remarks>
+        /// Finer than any plausible frame gap, because the emulator advances by ELAPSED time rather
+        /// than one frame per tick -- so this bounds the jitter of a frame change, not the speed the
+        /// animation runs at. A slow tick makes a 40ms animation stutter; it does not make it slow.
+        /// </remarks>
+        private const int AnimationTickMilliseconds = 16;
+
+        private DispatcherTimer _animationTimer;
+        private DateTime _lastAnimationTick = DateTime.UtcNow;
+
+        /// <summary>
+        /// Starts or stops the animation clock to match whether anything is animating.
+        /// </summary>
+        /// <remarks>
+        /// Called after output is processed, which is the only moment an animation can start or
+        /// stop. A terminal showing nothing but text keeps no timer running at all.
+        /// </remarks>
+        private void SyncAnimationClock()
+        {
+            var wanted = _terminal.HasRunningAnimations();
+
+            if (wanted == _animationTimer.IsEnabled)
+                return;
+
+            if (wanted)
+            {
+                // Reset the clock rather than counting the idle time: an animation started after a
+                // quiet minute should begin at its first frame, not a minute into itself.
+                _lastAnimationTick = DateTime.UtcNow;
+                _animationTimer.Start();
+            }
+            else
+            {
+                _animationTimer.Stop();
+            }
+        }
+
+        private void OnAnimationTick(object? sender, EventArgs e)
+        {
+            var now = DateTime.UtcNow;
+            var elapsed = now - _lastAnimationTick;
+            _lastAnimationTick = now;
+
+            if (_terminal.AdvanceAnimations(elapsed))
+                this.RequestInvalidate();
+
+            // An animation that ran out of loops stops on its own, so the clock has to notice.
+            SyncAnimationClock();
         }
 
         private void OnTerminalDirectoryChanged(object? sender, TerminalEvents.DirectoryChangeEventArgs e)
@@ -1564,6 +1637,11 @@ namespace Iciclecreek.Terminal
         private void OnUnloaded(object? sender, RoutedEventArgs e)
         {
             _cursorBlinkTimer.Stop();
+
+            // A view off the tree has nothing to repaint, and a timer left running would hold it
+            // alive through the dispatcher and go on advancing frames nobody can see.
+            _animationTimer.Stop();
+
             _isSelecting = false;
             _pendingSelectionStart = null;
         }
@@ -4068,6 +4146,11 @@ namespace Iciclecreek.Terminal
                     // Notify IME of cursor position change after terminal processes data
                     Dispatcher.UIThread.Post(() => _inputMethodClient?.NotifyCursorRectangleChanged());
 
+                    // Output is the only thing that can start or stop an animation, and the clock is
+                    // a dispatcher timer, so the decision has to be made on the UI thread. The check
+                    // behind it is a walk of a list that is empty for a terminal showing text.
+                    Dispatcher.UIThread.Post(SyncAnimationClock);
+
                     this.RequestInvalidate();
                 }
             }
@@ -4829,25 +4912,49 @@ namespace Iciclecreek.Terminal
         /// <summary>
         /// Gets the bitmap for a picture, uploading its pixels the first time it is seen.
         /// </summary>
-        private Bitmap? GetOrCreateBitmap(XT.Graphics.TerminalImage image)
+        /// <remarks>
+        /// Internal rather than private so the cache rule can be asserted directly. It cannot be
+        /// observed through a rendered frame -- the headless platform's recording context throws
+        /// from DrawImage -- and "re-uploads when the frame changes, and only then" is exactly the
+        /// kind of rule that silently stops holding.
+        /// </remarks>
+        internal Bitmap? GetOrCreateBitmap(XT.Graphics.TerminalImage image)
         {
             // A cached null is a remembered failure — worth keeping, so a picture that cannot be uploaded is not
             // retried thirty times a second.
             if (_imageBitmaps.TryGetValue(image, out var existing))
-                return existing.Bitmap;
+            {
+                // An animated picture changes under a cache keyed on the image. The emulator bumps a
+                // serial whenever the visible pixels move, so comparing that is enough to spot a
+                // stale upload without comparing the pixels themselves. A still picture never moves,
+                // and its serial stays zero, so this costs it an integer comparison per frame.
+                if (existing.FrameSerial == image.FrameSerial)
+                    return existing.Bitmap;
 
-            Bitmap? bitmap = null;
+                try { existing.Bitmap?.Dispose(); } catch { /* already gone; nothing to salvage */ }
+
+                existing.Bitmap = TryCreateBitmap(image);
+                existing.FrameSerial = image.FrameSerial;
+                return existing.Bitmap;
+            }
+
+            var bitmap = TryCreateBitmap(image);
+            _imageBitmaps.Add(image, new CachedBitmap { Bitmap = bitmap, FrameSerial = image.FrameSerial });
+            return bitmap;
+        }
+
+        /// <summary>Uploads a picture's current pixels, or remembers that it cannot be done.</summary>
+        private static Bitmap? TryCreateBitmap(XT.Graphics.TerminalImage image)
+        {
             try
             {
-                bitmap = CreateBitmap(image);
+                return CreateBitmap(image);
             }
             catch (Exception ex)
             {
                 Debug.WriteLine($"[TerminalView] could not upload image {image.Id}: {ex.Message}");
+                return null;
             }
-
-            _imageBitmaps.Add(image, new CachedBitmap { Bitmap = bitmap });
-            return bitmap;
         }
 
         /// <summary>
@@ -4910,8 +5017,13 @@ namespace Iciclecreek.Terminal
         {
             // The decoder hands over a plain array in the layout the bitmap wants, so this is a copy rather
             // than a conversion.
-            if (!MemoryMarshal.TryGetArray(image.Pixels, out ArraySegment<byte> source))
-                source = new ArraySegment<byte>(image.Pixels.ToArray());
+            //
+            // CurrentPixels rather than Pixels: for an animation those are the frame being shown, and for
+            // a still picture they are the same array. Uploading Pixels instead would draw every animation
+            // frozen on its first frame, which looks like the clock never firing rather than like the wrong
+            // buffer being read.
+            if (!MemoryMarshal.TryGetArray(image.CurrentPixels, out ArraySegment<byte> source))
+                source = new ArraySegment<byte>(image.CurrentPixels.ToArray());
 
             var sourceStride = image.Stride;
             if (destinationRowBytes == sourceStride)

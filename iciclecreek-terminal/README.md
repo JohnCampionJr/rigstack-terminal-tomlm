@@ -229,6 +229,11 @@ work with no configuration. An image behaves like terminal content rather than a
 over it replaces that part of the picture, `clear` removes it, and it scrolls with the text around it
 and is freed when it falls out of the scrollback.
 
+Animated Kitty images play on their own. The terminal runs a clock only while something is actually
+animating, advances by elapsed time rather than one frame per tick — so a late repaint stutters an
+animation rather than slowing it down — and re-uploads a picture's texture only when its frame
+actually changes.
+
 Two things are handled for you and are worth knowing about:
 
 - The cell size measured from your font is published to the emulator and is the answer given to a

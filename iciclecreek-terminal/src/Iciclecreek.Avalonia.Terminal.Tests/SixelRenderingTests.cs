@@ -833,4 +833,180 @@ public class SixelRenderingTests
         }
         finally { window.Close(); }
     }
+
+    // ---- animation ---------------------------------------------------------------------------------
+
+    /// <summary>Transmits a two frame animation under id 1 and places it at the cursor.</summary>
+    private static void PlaceAnimation(TerminalView view, int gap = 50)
+    {
+        view.Terminal.Options.CellWidthPixels = CellPixelWidth;
+        view.Terminal.Options.CellHeightPixels = CellPixelHeight;
+
+        var red = Convert.ToBase64String(Solid(4, 6, 0, 0, 255));      // BGRA: red
+        var green = Convert.ToBase64String(Solid(4, 6, 0, 255, 0));    // BGRA: green
+
+        view.Terminal.Write($"{Esc}_Ga=t,i=1,f=32,s=4,v=6,q=2;{red}{St}");
+        view.Terminal.Write($"{Esc}_Ga=f,i=1,c=1,z={gap},f=32,s=4,v=6,q=2;{green}{St}");
+        view.Terminal.Write($"{Esc}_Ga=a,i=1,r=1,z={gap},q=2{St}");
+        view.Terminal.Write($"{Esc}_Ga=a,i=1,s=3,q=2{St}");
+        view.Terminal.Write(Esc + "[1;1H");
+        view.Terminal.Write($"{Esc}_Ga=p,i=1,C=1,q=2{St}");
+    }
+
+    private static byte[] Solid(int width, int height, byte b, byte g, byte r)
+    {
+        var bytes = new byte[width * height * 4];
+        for (int i = 0; i < width * height; i++)
+        {
+            bytes[i * 4] = r;          // the protocol carries RGBA
+            bytes[i * 4 + 1] = g;
+            bytes[i * 4 + 2] = b;
+            bytes[i * 4 + 3] = 255;
+        }
+        return bytes;
+    }
+
+    /// <summary>
+    /// The bitmap cache is keyed on the image, and an animation's pixels move while that key stays
+    /// the same. Uploading the current frame is what the serial check is for.
+    /// </summary>
+    [AvaloniaTest]
+    public void An_advanced_animation_uploads_the_new_frame()
+    {
+        var (view, window) = Realised();
+        try
+        {
+            PlaceAnimation(view);
+
+            var image = view.Terminal.Buffer.Lines[view.Terminal.Buffer.ViewportY]![0].Image;
+            Assert.That(image, Is.Not.Null);
+
+            var first = TerminalView.CreateBitmap(image!);
+            Assert.That(first, Is.Not.Null);
+
+            Assert.That(view.Terminal.AdvanceAnimations(TimeSpan.FromMilliseconds(60)), Is.True);
+
+            // The pixels a fresh upload would read must now be the second frame's. Index 1 is the
+            // GREEN channel of BGRA: the two frames are red and green, and both have blue at zero,
+            // so comparing index 0 would compare a channel neither of them uses.
+            Assert.That(image!.CurrentPixels.Span[1], Is.Not.EqualTo(image.Pixels.Span[1]),
+                        "the current frame did not move off the root");
+            Assert.That(image.FrameSerial, Is.Not.Zero, "the serial did not change with the frame");
+        }
+        finally { window.Close(); }
+    }
+
+    /// <summary>
+    /// A picture that never moves must not make the renderer re-upload it. The serial stays zero for
+    /// a still image, so the cached bitmap is kept.
+    /// </summary>
+    /// <summary>
+    /// What actually reaches the bitmap has to be the CURRENT frame. Asserting on CurrentPixels
+    /// alone would leave the upload free to read the root and every animation would draw frozen on
+    /// its first frame -- which looks like a clock that never fires, not like the wrong buffer.
+    /// </summary>
+    [AvaloniaTest]
+    public void The_upload_reads_the_current_frame_not_the_root()
+    {
+        var (view, window) = Realised();
+        try
+        {
+            PlaceAnimation(view);
+
+            var image = view.Terminal.Buffer.Lines[view.Terminal.Buffer.ViewportY]![0].Image;
+            Assert.That(image, Is.Not.Null);
+
+            var rootUpload = CopyThrough(image!, image!.Stride);
+            view.Terminal.AdvanceAnimations(TimeSpan.FromMilliseconds(60));
+            var frameUpload = CopyThrough(image, image.Stride);
+
+            // Green channel: the frames are red and green, and both leave blue at zero.
+            Assert.That(rootUpload[1], Is.Not.EqualTo(frameUpload[1]),
+                        "the upload read the same pixels before and after the frame changed");
+            Assert.That(frameUpload[1], Is.EqualTo(255), "the second frame is the green one");
+        }
+        finally { window.Close(); }
+    }
+
+    /// <summary>
+    /// The bitmap cache is keyed on the image, so for an animation the key stays put while the
+    /// pixels move. It must re-upload when the frame changes -- and NOT re-upload when it has not,
+    /// or every still picture on screen is uploaded afresh sixty times a second.
+    /// </summary>
+    [AvaloniaTest]
+    public void The_cached_bitmap_is_replaced_only_when_the_frame_changes()
+    {
+        var (view, window) = Realised();
+        try
+        {
+            PlaceAnimation(view);
+
+            var image = view.Terminal.Buffer.Lines[view.Terminal.Buffer.ViewportY]![0].Image;
+            Assert.That(image, Is.Not.Null);
+
+            var first = view.GetOrCreateBitmap(image!);
+            Assert.That(first, Is.Not.Null);
+            Assert.That(view.GetOrCreateBitmap(image!), Is.SameAs(first),
+                        "an unchanged frame was uploaded twice");
+
+            view.Terminal.AdvanceAnimations(TimeSpan.FromMilliseconds(60));
+
+            var afterFrame = view.GetOrCreateBitmap(image!);
+            Assert.That(afterFrame, Is.Not.SameAs(first),
+                        "the new frame was not uploaded, so the animation would draw frozen");
+
+            // And the refresh must record which frame it uploaded. Without that the cache is stale
+            // on every look, so a running animation re-uploads on each of them -- which draws
+            // correctly and costs a full texture upload per frame, the kind of fault that shows up
+            // as heat rather than as a wrong pixel.
+            Assert.That(view.GetOrCreateBitmap(image!), Is.SameAs(afterFrame),
+                        "the refreshed upload was not recorded, so it uploads again every frame");
+        }
+        finally { window.Close(); }
+    }
+
+    [AvaloniaTest]
+    public void A_still_picture_keeps_a_frame_serial_of_zero()
+    {
+        var (view, window) = Realised();
+        try
+        {
+            PlaceImage(view);
+
+            var image = view.Terminal.Buffer.Lines[view.Terminal.Buffer.ViewportY]![0].Image;
+            Assert.That(image, Is.Not.Null);
+            Assert.That(image!.FrameSerial, Is.Zero);
+            Assert.That(image.CurrentPixels.Length, Is.EqualTo(image.Pixels.Length));
+        }
+        finally { window.Close(); }
+    }
+
+    /// <summary>
+    /// A terminal showing text keeps no animation clock running, so the common case costs nothing.
+    /// </summary>
+    [AvaloniaTest]
+    public void A_terminal_showing_text_reports_no_animation()
+    {
+        var (view, window) = Realised();
+        try
+        {
+            view.Terminal.Write("hello");
+
+            Assert.That(view.Terminal.HasRunningAnimations(), Is.False);
+        }
+        finally { window.Close(); }
+    }
+
+    [AvaloniaTest]
+    public void A_placed_animation_reports_itself_as_running()
+    {
+        var (view, window) = Realised();
+        try
+        {
+            PlaceAnimation(view);
+
+            Assert.That(view.Terminal.HasRunningAnimations(), Is.True);
+        }
+        finally { window.Close(); }
+    }
 }
