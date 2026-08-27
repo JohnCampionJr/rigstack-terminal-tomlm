@@ -10,19 +10,20 @@ namespace XTerm.Buffer;
 public struct AttributeData : IEquatable<AttributeData>
 {
     /// <summary>
-    /// Bit layout:
-    /// 0-8: Foreground color (9 bits)
-    /// 9-17: Background color (9 bits)
-    /// 18-26: Extended attributes (9 bits)
-    /// 27-31: Flags (5 bits)
+    /// Three ints, twelve bytes, in every cell of the buffer.
     /// </summary>
+    /// <remarks>
+    /// <para><c>Fg</c> and <c>Bg</c> each hold a colour in bits 0-24 and its mode above that.
+    /// <c>Extended</c> holds the boolean attributes in bits 0-8, the underline style in 9-11, and an
+    /// underline colour id in 12-31.</para>
+    /// <para>Underline colour is an id rather than a colour because a full RGB value plus its mode
+    /// does not fit in the bits left, and growing this struct grows every cell — the thing measured
+    /// as costing most on fills. See <see cref="Common.UnderlineColorTable"/> for why interning it
+    /// adds nothing to the write path, unlike interning a whole style.</para>
+    /// </remarks>
     public int Fg;
     public int Bg;
     public int Extended;
-
-    private const int FG_MASK = 0x1FF;
-    private const int BG_MASK = 0x1FF << 9;
-    private const int EXT_MASK = 0x1FF << 18;
 
     // Attribute flags stored in upper bits of fg/bg
     private const int BOLD = 1 << 0;
@@ -34,6 +35,13 @@ public struct AttributeData : IEquatable<AttributeData>
     private const int INVISIBLE = 1 << 6;
     private const int STRIKETHROUGH = 1 << 7;
     private const int OVERLINE = 1 << 8;
+
+    // Underline style in bits 9-11, underline colour id in 12-31. Both were free: Extended is a
+    // 32-bit field with nine flags in it.
+    private const int UNDERLINE_STYLE_SHIFT = 9;
+    private const int UNDERLINE_STYLE_MASK = 0x7 << UNDERLINE_STYLE_SHIFT;
+    private const int UNDERLINE_COLOR_SHIFT = 12;
+    private const uint UNDERLINE_COLOR_MASK = 0xFFFFFu << UNDERLINE_COLOR_SHIFT;
 
     public static AttributeData Default => new AttributeData
     {
@@ -69,7 +77,7 @@ public struct AttributeData : IEquatable<AttributeData>
     public bool IsBold() => (Extended & BOLD) != 0;
     public bool IsDim() => (Extended & DIM) != 0;
     public bool IsItalic() => (Extended & ITALIC) != 0;
-    public bool IsUnderline() => (Extended & UNDERLINE) != 0;
+    public bool IsUnderline() => GetUnderlineStyle() != Common.UnderlineStyle.None;
     public bool IsBlink() => (Extended & BLINK) != 0;
     public bool IsInverse() => (Extended & INVERSE) != 0;
     public bool IsInvisible() => (Extended & INVISIBLE) != 0;
@@ -79,7 +87,16 @@ public struct AttributeData : IEquatable<AttributeData>
     public void SetBold(bool value) => SetFlag(BOLD, value);
     public void SetDim(bool value) => SetFlag(DIM, value);
     public void SetItalic(bool value) => SetFlag(ITALIC, value);
-    public void SetUnderline(bool value) => SetFlag(UNDERLINE, value);
+    /// <summary>
+    /// Plain underline on or off, which is what SGR 4 and 24 mean.
+    /// </summary>
+    /// <remarks>
+    /// Turning it on sets the SINGLE style rather than a flag, so the style is the one source of
+    /// truth. Two places to say the same thing is how a cell ends up underlined by one and not the
+    /// other.
+    /// </remarks>
+    public void SetUnderline(bool value)
+        => SetUnderlineStyle(value ? Common.UnderlineStyle.Single : Common.UnderlineStyle.None);
     public void SetBlink(bool value) => SetFlag(BLINK, value);
     public void SetInverse(bool value) => SetFlag(INVERSE, value);
     public void SetInvisible(bool value) => SetFlag(INVISIBLE, value);
@@ -109,6 +126,43 @@ public struct AttributeData : IEquatable<AttributeData>
     {
         Bg = (mode << 25) | (color & 0x1FFFFFF);
     }
+
+    /// <summary>How this cell's underline is drawn.</summary>
+    public Common.UnderlineStyle GetUnderlineStyle()
+        => (Common.UnderlineStyle)((Extended & UNDERLINE_STYLE_MASK) >> UNDERLINE_STYLE_SHIFT);
+
+    public void SetUnderlineStyle(Common.UnderlineStyle style)
+        => Extended = (Extended & ~UNDERLINE_STYLE_MASK)
+                      | ((((int)style) << UNDERLINE_STYLE_SHIFT) & UNDERLINE_STYLE_MASK);
+
+    /// <summary>
+    /// The interned id of this cell's underline colour, or zero for "same as the foreground".
+    /// </summary>
+    public int GetUnderlineColorId()
+        => (int)(((uint)Extended & UNDERLINE_COLOR_MASK) >> UNDERLINE_COLOR_SHIFT);
+
+    /// <summary>
+    /// Sets the underline colour, interning it so the cell carries only an id.
+    /// </summary>
+    /// <remarks>
+    /// Full RGB is representable; it is the count of DISTINCT colours that is bounded, at about a
+    /// million. See <see cref="Common.UnderlineColorTable"/>.
+    /// </remarks>
+    public void SetUnderlineColor(int color, int mode)
+        => SetUnderlineColorId(Common.UnderlineColorTable.Intern(color, mode));
+
+    /// <summary>Clears the underline colour, so the underline follows the foreground again.</summary>
+    public void ResetUnderlineColor() => SetUnderlineColorId(Common.UnderlineColorTable.None);
+
+    private void SetUnderlineColorId(int id)
+        => Extended = (int)(((uint)Extended & ~UNDERLINE_COLOR_MASK)
+                            | (((uint)id << UNDERLINE_COLOR_SHIFT) & UNDERLINE_COLOR_MASK));
+
+    /// <summary>
+    /// The underline's colour, or false when it follows the foreground.
+    /// </summary>
+    public bool TryGetUnderlineColor(out int color, out int mode)
+        => Common.UnderlineColorTable.TryGet(GetUnderlineColorId(), out color, out mode);
 
     public bool Equals(AttributeData other)
     {

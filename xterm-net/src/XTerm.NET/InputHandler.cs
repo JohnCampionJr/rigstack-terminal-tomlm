@@ -1771,8 +1771,11 @@ public class InputHandler
                 case 3: // Italic
                     _curAttr.SetItalic(true);
                     break;
-                case 4: // Underline
-                    _curAttr.SetUnderline(true);
+                case 21: // Double underline
+                    _curAttr.SetUnderlineStyle(UnderlineStyle.Double);
+                    break;
+                case 4: // Underline, with an optional style as a sub-parameter
+                    _curAttr.SetUnderlineStyle(ReadUnderlineStyle(parameters, i));
                     break;
                 case 5: // Blink
                     _curAttr.SetBlink(true);
@@ -1811,6 +1814,12 @@ public class InputHandler
                 case >= 30 and <= 37: // Foreground color
                     _curAttr.SetFgColor(param - 30);
                     break;
+                case 58: // Underline colour
+                    i = HandleUnderlineColor(parameters, i);
+                    break;
+                case 59: // Underline colour back to the foreground
+                    _curAttr.ResetUnderlineColor();
+                    break;
                 case 38: // Extended foreground color
                     i = HandleExtendedColor(parameters, i, true);
                     break;
@@ -1834,6 +1843,92 @@ public class InputHandler
                     break;
             }
         }
+    }
+
+    /// <summary>
+    /// The underline style from SGR 4, which may carry it as a sub-parameter: <c>4:3</c> is curly.
+    /// </summary>
+    /// <remarks>
+    /// Plain <c>SGR 4</c> with no sub-parameter is a single underline, which is what it has always
+    /// meant. The sub-parameters were already being parsed and then discarded, so a program asking
+    /// for a curly underline — which is how an LSP marks an error — got a straight one.
+    /// </remarks>
+    private static UnderlineStyle ReadUnderlineStyle(Params parameters, int index)
+    {
+        var sub = parameters.GetSubParams(index);
+        if (sub is null || sub.Count == 0)
+            return UnderlineStyle.Single;
+
+        return sub[0] switch
+        {
+            0 => UnderlineStyle.None,
+            1 => UnderlineStyle.Single,
+            2 => UnderlineStyle.Double,
+            3 => UnderlineStyle.Curly,
+            4 => UnderlineStyle.Dotted,
+            5 => UnderlineStyle.Dashed,
+
+            // An unknown style is still an underline. Drawing a plain one is closer to what the
+            // program asked for than drawing nothing.
+            _ => UnderlineStyle.Single,
+        };
+    }
+
+    /// <summary>
+    /// SGR 58 — the underline's own colour, in the same forms as 38 and 48.
+    /// </summary>
+    /// <remarks>
+    /// Accepts the colour as sub-parameters (<c>58:2::r:g:b</c>) as well as separate parameters
+    /// (<c>58;2;r;g;b</c>), because both are in use and a terminal that takes only one of them looks
+    /// broken to half its callers.
+    /// </remarks>
+    private int HandleUnderlineColor(Params parameters, int index)
+    {
+        var sub = parameters.GetSubParams(index);
+
+        if (sub is { Count: > 0 })
+        {
+            // 58:2::r:g:b — the empty slot is a colour space id nobody uses.
+            if (sub[0] == 2 && sub.Count >= 4)
+            {
+                var offset = sub.Count >= 5 ? 2 : 1;
+                var rgb = (sub[offset] << 16) | (sub[offset + 1] << 8) | sub[offset + 2];
+                _curAttr.SetUnderlineColor(rgb, 1);
+                return index;
+            }
+
+            // 58:5:n
+            if (sub[0] == 5 && sub.Count >= 2)
+            {
+                _curAttr.SetUnderlineColor(sub[1], 0);
+                return index;
+            }
+
+            return index;
+        }
+
+        if (index + 1 >= parameters.Length)
+            return index;
+
+        var kind = parameters.GetParam(index + 1, 0);
+
+        if (kind == 2 && index + 4 < parameters.Length)
+        {
+            var rgb = (parameters.GetParam(index + 2, 0) << 16)
+                      | (parameters.GetParam(index + 3, 0) << 8)
+                      | parameters.GetParam(index + 4, 0);
+
+            _curAttr.SetUnderlineColor(rgb, 1);
+            return index + 4;
+        }
+
+        if (kind == 5 && index + 2 < parameters.Length)
+        {
+            _curAttr.SetUnderlineColor(parameters.GetParam(index + 2, 0), 0);
+            return index + 2;
+        }
+
+        return index;
     }
 
     private int HandleExtendedColor(Params parameters, int index, bool isForeground)
