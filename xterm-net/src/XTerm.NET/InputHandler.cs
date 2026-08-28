@@ -804,13 +804,11 @@ public class InputHandler
                 break;
 
             case CsiCommand.ScrollUp:
-                // "CSI ? ... S" is XTSMGRAPHICS, not SCROLL UP. They share a final character, and
-                // the identifier has its private marker stripped before the lookup, so without
-                // this guard a Sixel program's opening capability query scrolled the screen.
-                if (isPrivate)
-                    GraphicsAttributes(parameters);
-                else
-                    ScrollUp(parameters);
+                ScrollUp(parameters);
+                break;
+
+            case CsiCommand.GraphicsAttributes:
+                GraphicsAttributes(parameters);
                 break;
 
             case CsiCommand.ScrollDown:
@@ -871,14 +869,18 @@ public class InputHandler
                 break;
 
             case CsiCommand.SelectCursorStyle:
-                // "CSI > Ps q" is XTVERSION, not DECSCUSR. They share a final character, and the
-                // identifier has its private marker stripped before the lookup, so without this
-                // guard a terminal version query reshaped the cursor instead of being answered --
-                // a program that asks on startup left the user in a cursor they never chose.
+                // "CSI > Ps q" is XTVERSION, not DECSCUSR. They share a final character, so ">q"
+                // is listed alongside " q" in the command map and the two are told apart here --
+                // without that a terminal version query reshaped the cursor instead of being
+                // answered, and a program that asks on startup left the user in a cursor they
+                // never chose. It is the one place a CsiCommand is deliberately shared by two
+                // sequences: the map decides everything else on the exact identifier.
                 //
-                // The marker itself is read rather than isPrivate, which is also true for '?': a
-                // "CSI ? Ps q" is neither of these sequences, and answering it as XTVERSION would
-                // be a second wrong reading of the same character.
+                // The marker is read rather than isPrivate because isPrivate is true for '?' as
+                // well as '>', and "CSI ? Ps q" is neither of these sequences. The map is what
+                // keeps it out -- "?q" is not a key, so it resolves to Unknown and never reaches
+                // this case. The switch below is defence in depth, not a live guard: the only
+                // identifiers that arrive are " q" and ">q".
                 switch (identifier.PrivateMarker())
                 {
                     case '>':
@@ -887,8 +889,9 @@ public class InputHandler
                     case '\0':
                         SelectCursorStyle(parameters);
                         break;
-                    // Any other marker is a sequence we do not implement. Ignored, since the
-                    // alternative is reshaping the cursor on some unrelated query's behalf.
+                    // Unreachable while the map lists only those two. Falling through rather than
+                    // defaulting to SelectCursorStyle means a marked form added to the map later
+                    // is ignored instead of reshaping the cursor on some unrelated query's behalf.
                 }
                 break;
 
@@ -3358,11 +3361,11 @@ public class InputHandler
 
         // Any other prefix is left unanswered. "?c" is the one that used to go wrong: it is not the
         // secondary DA, but it sets isPrivate, so it was handed the secondary reply -- the answer to
-        // a question the program had not asked, while it was still waiting for the one it had. The
-        // tertiary DA, "=c", never reaches this method at all, because ToCsiCommand strips only "?"
-        // and ">" before the lookup and so resolves it to Unknown. Silence is the right outcome for
-        // it regardless: it asks for a unit ID this terminal does not have, and terminals without
-        // DECRPTUI say nothing.
+        // a question the program had not asked, while it was still waiting for the one it had.
+        // Neither it nor the tertiary DA, "=c", reaches this method any more: the lookup matches the
+        // whole identifier and only "c" and ">c" are listed, so both resolve to Unknown. Silence is
+        // the right outcome for the tertiary regardless: it asks for a unit ID this terminal does
+        // not have, and terminals without DECRPTUI say nothing.
     }
 
     /// <summary>
@@ -3383,10 +3386,10 @@ public class InputHandler
     /// XTSMGRAPHICS -- CSI ? Pi ; Pa ; Pv S. Reports the terminal's graphics limits.
     /// </summary>
     /// <remarks>
-    /// <para>This shares its final character with SCROLL UP, and <c>ToCsiCommand</c> strips the
-    /// private marker before looking the command up, so until this existed a graphics query
-    /// scrolled the screen instead of being answered. Every Sixel-capable program sends one during
-    /// startup, which made the damage routine rather than obscure.</para>
+    /// <para>This shares its final character with SCROLL UP, and <c>ToCsiCommand</c> used to strip
+    /// the private marker before looking the command up, so a graphics query scrolled the screen
+    /// instead of being answered. Every Sixel-capable program sends one during startup, which made
+    /// the damage routine rather than obscure. The lookup now matches "?S" on its own.</para>
     /// <para>Only the read operations are answered. The limits are fixed, so accepting a request
     /// to change them and quietly not doing it would be worse than refusing outright.</para>
     /// </remarks>
