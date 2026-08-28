@@ -130,6 +130,11 @@ public enum CsiCommand
     DeviceStatusReport,
     
     /// <summary>
+    /// Repeat the preceding graphic character (CSI Pn b), REP.
+    /// </summary>
+    RepeatPrecedingCharacter,
+
+    /// <summary>
     /// Set Top and Bottom Margins (CSI r).
     /// </summary>
     SetScrollRegion,

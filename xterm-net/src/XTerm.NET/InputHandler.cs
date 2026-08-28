@@ -313,9 +313,46 @@ public class InputHandler
         if (cell.CodePoint is var cp && IsRegionalIndicator(cp))
             _regionalPending = (_buffer.Y + _buffer.YBase, _buffer.X, _buffer.X + width);
 
+        // Guarded at the CALL, not only inside a helper: this runs per printed character, the
+        // helper is not reliably inlined, and the same unguarded-call shape cost alt-redraw 12%
+        // once already. The common case -- no link in force, none on the line -- pays two reads.
+        if (line is not null && (_linkUrl is not null || line.HasLinks))
+            line.NoteLinkRun(_buffer.X, width, _linkUrl, _linkId);
+
         // Use MoveCursor to allow X to be one past the last column (pending wrap)
         _buffer.SetCursorRaw(_buffer.X + width, _buffer.Y);
+
+        RememberForRepeat(cell.CodePoint, cell.ClusterId);
     }
+
+    /// <summary>
+    /// Records the character just printed, and where it left the cursor, for <c>REP</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>Two things guard the record, and they catch different intrusions. Any control, CSI,
+    /// ESC, OSC or DCS between the print and the REP FORGETS it, cleared at the dispatch points
+    /// rather than from every handler -- which is how xterm.js does it (its parser zeroes
+    /// <c>precedingJoinState</c> after every dispatch), and is the version that does not rot,
+    /// because a new handler cannot forget to cancel what the dispatcher already cancelled.
+    /// That is what catches a cursor moved away and back: the position afterwards is the same,
+    /// but a sequence intervened, so there is no preceding character any more.</para>
+    /// <para>The stored position is the second guard, for movement that arrives through no
+    /// sequence at all -- the host calling a public cursor API between writes.</para>
+    /// <para>REP itself is exempt from the clearing, so a chain of REPs keeps repeating: after a
+    /// REP the character it printed IS the preceding graphic character (ECMA-48's reading).
+    /// xterm.js happens to cancel there, but only because its parser clears after the handler
+    /// returns; nothing in the spec asks for that.</para>
+    /// </remarks>
+    private void RememberForRepeat(int codePoint, int clusterId)
+    {
+        _lastPrinted = (_buffer.Y + _buffer.YBase, _buffer.X, codePoint, clusterId);
+    }
+
+    /// <summary>Forgets the preceding character. See <see cref="RememberForRepeat"/> for when.</summary>
+    internal void CancelRepeat() => _lastPrinted = null;
+
+    /// <summary>The character last printed, and the cursor position it left behind. See <see cref="RememberForRepeat"/>.</summary>
+    private (int Row, int CursorCol, int CodePoint, int ClusterId)? _lastPrinted;
 
     /// <summary>
     /// Joins a second regional indicator to the one already at <paramref name="cellX"/>, making the pair a
@@ -416,7 +453,18 @@ public class InputHandler
 
             var take = Math.Min(_terminal.Cols - _buffer.X, data.Length);
             line.SetSingleWidthRun(_buffer.X, data[..take], _curAttr);
+
+            // This path bypasses Print, so it keeps the link bookkeeping itself -- otherwise a link
+            // would cover the text or not depending on which writer took it. Guarded here, not in a
+            // helper, for the same reason as in Print.
+            if (_linkUrl is not null || line.HasLinks)
+                line.NoteLinkRun(_buffer.X, take, _linkUrl, _linkId);
+
             _buffer.SetCursorRaw(_buffer.X + take, _buffer.Y);
+
+            // This path bypasses Print, so it has to keep REP's record itself -- otherwise the same
+            // input would repeat or not depending on which writer took it.
+            RememberForRepeat(data[take - 1], ClusterTable.None);
 
             data = data[take..];
         }
@@ -476,8 +524,15 @@ public class InputHandler
             var take = Math.Min(_terminal.Cols - _buffer.X, remaining);
             line.SetSingleWidthRun(_buffer.X, data.AsSpan(pos, take), _curAttr);
 
+            // As above: bypassing Print means keeping the link bookkeeping here as well.
+            if (_linkUrl is not null || line.HasLinks)
+                line.NoteLinkRun(_buffer.X, take, _linkUrl, _linkId);
+
             // SetCursorRaw, as Print uses, so X may land one past the last column pending a wrap.
             _buffer.SetCursorRaw(_buffer.X + take, _buffer.Y);
+
+            // As above: bypassing Print means keeping REP's record here as well.
+            RememberForRepeat(data[pos + take - 1], ClusterTable.None);
 
             pos += take;
             remaining -= take;
@@ -636,6 +691,12 @@ public class InputHandler
             }
         }
 
+        // The preceding character is now the COMBINED one -- repeating the base letter without its
+        // marks would be a different character from the one on screen. Recorded AFTER the width
+        // adjustments above, which can move the cursor: recorded any earlier, a variation selector
+        // that widened the cell left the saved position stale and silently cancelled the next REP.
+        _lastPrinted = (_buffer.Y + _buffer.YBase, _buffer.X, updatedCell.CodePoint, updatedCell.ClusterId);
+
         return true;
     }
 
@@ -647,8 +708,17 @@ public class InputHandler
         bool isPrivate = identifier.IsPrivateMode();
         var command = identifier.ToCsiCommand();
 
+        // Any sequence between a print and a REP means there is no preceding character any more.
+        // REP is the one exemption: the character IT prints becomes the preceding one.
+        if (command != CsiCommand.RepeatPrecedingCharacter)
+            CancelRepeat();
+
         switch (command)
         {
+            case CsiCommand.RepeatPrecedingCharacter:
+                RepeatPrecedingCharacter(parameters);
+                break;
+
             case CsiCommand.InsertChars:
                 InsertChars(parameters);
                 break;
@@ -812,6 +882,8 @@ public class InputHandler
     /// </summary>
     public void HandleEsc(string finalChar, string collected)
     {
+        CancelRepeat();
+
         switch (finalChar)
         {
             case "D": // IND - Index
@@ -948,6 +1020,7 @@ public class InputHandler
     /// </remarks>
     public void HandleDcsHook(string identifier, Params parameters)
     {
+        CancelRepeat();
         _sixelDecoder = null;
 
         if (identifier != "q" || !_terminal.Options.SixelEnabled)
@@ -1077,6 +1150,7 @@ public class InputHandler
     /// </remarks>
     public void HandleApcHook(char introducer)
     {
+        CancelRepeat();
         _ = introducer;
         _apcPayload.Clear();
     }
@@ -2078,6 +2152,7 @@ public class InputHandler
     /// </summary>
     public void HandleOsc(string data)
     {
+        CancelRepeat();
         var parts = data.Split(new[] { ';' }, 2);
         if (parts.Length == 0)
             return;
@@ -2336,9 +2411,30 @@ public class InputHandler
             _terminal.LastCommandExitCode = exitCode;
         }
 
+        // Anchor it. The event says a mark happened; the line says where, which is the half every
+        // use of shell integration actually needs -- jumping to the previous prompt, selecting a
+        // command's output, putting an exit status beside the command that produced it.
+        //
+        // Deliberately NOT cleared by erasing the cells it sits among. A mark records a position in
+        // the history rather than anything about the content there, and a shell redrawing its prompt
+        // with EL -- which is most of them -- would otherwise destroy the A mark it had just
+        // emitted, a moment before the prompt it marks is even printed.
+        var line = _buffer.Lines[_buffer.Y + _buffer.YBase];
+        line?.AddMark(new Buffer.LineMark(_buffer.X, mark, exitCode));
+
         _terminal.ShellIntegrationState = mark;
         _terminal.RaiseShellIntegrationMark(mark, exitCode);
     }
+
+    /// <summary>
+    /// The link in force, mirrored here from the terminal.
+    /// </summary>
+    /// <remarks>
+    /// Fields rather than a property call, because the print path reads this for every character it
+    /// writes and the answer is null for essentially all of them.
+    /// </remarks>
+    private string? _linkUrl;
+    private string? _linkId;
 
     private void HandleHyperlink(string data)
     {
@@ -2357,12 +2453,19 @@ public class InputHandler
                 // End hyperlink
                 _terminal.CurrentHyperlink = null;
                 _terminal.HyperlinkId = null;
+                _linkUrl = null;
+                _linkId = null;
                 _terminal.RaiseHyperlinkChanged(null);
             }
             else
             {
-                // Start hyperlink
+                // Start hyperlink. The id resets BEFORE the parameters are parsed: a client can
+                // open a new link without closing the last, and one that sends no id= must not
+                // inherit the previous link's -- that would join two unrelated links into one.
                 _terminal.CurrentHyperlink = uri;
+                _terminal.HyperlinkId = null;
+                _linkUrl = uri;
+                _linkId = null;
 
                 // Parse params for id= parameter
                 if (!string.IsNullOrEmpty(params_))
@@ -2373,6 +2476,7 @@ public class InputHandler
                         if (p.StartsWith("id="))
                         {
                             _terminal.HyperlinkId = p.Substring(3);
+                            _linkId = _terminal.HyperlinkId;
                         }
                     }
                 }
@@ -2620,6 +2724,47 @@ public class InputHandler
                 line.Fill(emptyCell);
                 break;
         }
+    }
+
+    /// <summary>
+    /// REP (<c>CSI Pn b</c>) — repeat the preceding graphic character <c>Pn</c> times.
+    /// </summary>
+    /// <remarks>
+    /// <para>Some programs use it to compress runs of one character, so a terminal without it draws
+    /// a single character where a line of them belongs.</para>
+    /// <para>"Preceding" is meant literally: it repeats the last character printed, and only while
+    /// the cursor is still where printing it left the cursor. Anything that moved the cursor in
+    /// between — a control character, a cursor sequence, a scroll — means there is no preceding
+    /// character any more and this does nothing, which is what xterm does and is the only reading
+    /// that does not quietly invent a character out of whatever happens to be nearby.</para>
+    /// <para>The count is clamped to one screenful. It arrives from the hosted program, so
+    /// <c>CSI 2000000000 b</c> is a hang otherwise; and past a screenful the result is
+    /// indistinguishable anyway, since every repeat beyond that scrolls the earlier ones away.</para>
+    /// </remarks>
+    private void RepeatPrecedingCharacter(Params parameters)
+    {
+        if (_lastPrinted is not { } last)
+            return;
+
+        if (last.Row != _buffer.Y + _buffer.YBase || last.CursorCol != _buffer.X)
+            return;
+
+        // Math.Max as every other count in this file does it: a literal zero means one.
+        var requested = Math.Max(parameters.GetParam(0, 1), 1);
+        var count = Math.Min(requested, Math.Max(1, _terminal.Cols * _terminal.Rows));
+
+        var text = last.ClusterId != ClusterTable.None
+            ? ClusterTable.Get(last.ClusterId)
+            : CodePointText.Get(last.CodePoint);
+
+        if (string.IsNullOrEmpty(text))
+            return;
+
+        // Through Print rather than straight into the buffer: the repeated character wraps, scrolls
+        // and takes the current attributes exactly as it did the first time, and Print keeps the
+        // record above current so each repeat is itself the preceding character for the next.
+        for (var i = 0; i < count; i++)
+            Print(text);
     }
 
     private void InsertLines(Params parameters)
