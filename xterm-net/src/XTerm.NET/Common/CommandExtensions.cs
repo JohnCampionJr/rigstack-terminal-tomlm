@@ -65,6 +65,26 @@ public static class CsiCommandExtensions
     {
         return identifier.StartsWith('?') || identifier.StartsWith('>');
     }
+
+    /// <summary>
+    /// Returns the private marker a CSI identifier carries -- '&lt;', '=', '&gt;' or '?' -- or the
+    /// null character when it carries none.
+    /// </summary>
+    /// <remarks>
+    /// <c>IsPrivateMode</c> answers "is there a marker at all", which is enough wherever only one
+    /// marker is ever seen on a given final character. It is not enough where two different
+    /// sequences share a final character and are told apart by which marker they carry:
+    /// "CSI &gt; Ps q" is XTVERSION while "CSI Ps SP q" is DECSCUSR, so a handler that asks only
+    /// whether a marker is present answers one as the other.
+    /// </remarks>
+    /// <param name="identifier">The CSI identifier</param>
+    /// <returns>The leading private marker, or '\0' if the identifier has none</returns>
+    public static char PrivateMarker(this string identifier)
+    {
+        return identifier.Length > 0 && identifier[0] is '<' or '=' or '>' or '?'
+            ? identifier[0]
+            : '\0';
+    }
 }
 
 /// <summary>
