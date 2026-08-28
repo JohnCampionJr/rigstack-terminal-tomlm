@@ -838,7 +838,13 @@ public class InputHandler
                 break;
 
             case CsiCommand.SelectCursorStyle:
-                SelectCursorStyle(parameters);
+                // "CSI > ... q" is XTVERSION, not DECSCUSR. They share a final character, and the
+                // identifier has its private marker stripped before the lookup, so without this
+                // guard a terminal version query reshaped the cursor instead of being answered.
+                if (isPrivate)
+                    ReportVersion(parameters);
+                else
+                    SelectCursorStyle(parameters);
                 break;
 
             case CsiCommand.RequestMode:
@@ -2989,6 +2995,23 @@ public class InputHandler
                 break;
         }
     }
+
+    /// <summary>
+    /// XTVERSION -- CSI > Ps q. Reports the terminal name and version.
+    /// </summary>
+    private void ReportVersion(Params parameters)
+    {
+        if (parameters.GetParam(0, 0) != 0)
+            return;
+
+        var version = typeof(InputHandler).Assembly.GetName().Version;
+        var versionText = version is null
+            ? "0.0.0"
+            : $"{version.Major}.{version.Minor}.{Math.Max(0, version.Build)}";
+
+        _terminal.RaiseDataReceived($"\u001bP>|XTerm.NET({versionText})\u001b\\");
+    }
+
     private void DeviceStatusReport(Params parameters, bool isPrivate)
     {
         // DSR - Device Status Report (CSI n or CSI ? n)
