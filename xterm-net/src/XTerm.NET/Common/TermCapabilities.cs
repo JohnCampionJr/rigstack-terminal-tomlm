@@ -303,18 +303,22 @@ internal static class TermCapabilities
     };
 
     /// <summary>
-    /// Hex-encodes a capability value, two digits per character.
+    /// Hex-encodes a capability value, two digits per byte.
     /// </summary>
     /// <remarks>
     /// A value is a terminfo string and so is bytes, not text: it holds ESC, BEL and DEL, and the
-    /// point of the encoding is that those survive a transport that would otherwise act on them.
-    /// Nothing here produces a character above U+00FF, so a character is a byte.
+    /// point of the encoding is that those survive a transport that would otherwise act on them. The
+    /// bytes are the UTF-8 ones, because the reader is decoding two digits at a time and a character
+    /// above U+00FF would otherwise arrive as four digits and be read as two characters. Every value
+    /// in the table is ASCII, where the two encodings agree; the one that need not be is
+    /// <c>TermName</c>, which the host sets and so is not ours to assume anything about.
     /// </remarks>
     private static string EncodeHex(string value)
     {
-        var builder = new System.Text.StringBuilder(value.Length * 2);
-        foreach (var c in value)
-            builder.Append(((int)c).ToString("X2"));
+        var bytes = System.Text.Encoding.UTF8.GetBytes(value);
+        var builder = new System.Text.StringBuilder(bytes.Length * 2);
+        foreach (var b in bytes)
+            builder.Append(b.ToString("X2"));
 
         return builder.ToString();
     }

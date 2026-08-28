@@ -241,6 +241,20 @@ public class XtGetTcapTests
         Assert.Equal(new[] { $"{Esc}P1+r{Hex("kcuu1")}=1B4F41{St}" }, replies);
     }
 
+    [Fact]
+    public void A_value_that_is_not_ASCII_goes_out_as_bytes_rather_than_as_characters()
+    {
+        // The reader takes the value two digits at a time, so a value is bytes and the bytes are
+        // UTF-8 ones: U+00E9 goes out as C3 A9, not as the single byte E9, and a character past
+        // U+00FF goes out as its bytes rather than as four digits the reader would split in half.
+        // Every value in the table is ASCII, where that distinction does not arise; TermName is the
+        // one the host fills in, and so the one this is not ours to assume about.
+        var eAcute = ((char)0x00E9).ToString();
+        var replies = Ask(Fresh(o => o.TermName = "xterm-" + eAcute), Hex("TN"));
+
+        Assert.Equal(new[] { $"{Esc}P1+r{Hex("TN")}={Hex("xterm-")}C3A9{St}" }, replies);
+    }
+
     // ---- The neighbour: DCS q is still DECSIXEL -------------------------------------------------
 
     [Fact]
