@@ -44,5 +44,5 @@ jobs:
           # is unverified reasoning about code it never executed.
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
-          claude_args: '--allowedTools "Bash(dotnet build:*),Bash(dotnet test:*),Bash(dotnet restore:*)"'
+          claude_args: '--allowedTools "Bash(dotnet:*)"'
 
