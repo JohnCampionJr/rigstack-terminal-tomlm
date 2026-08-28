@@ -104,8 +104,8 @@ public class SixelRenderingTests
 
             Assert.That(runs.Count, Is.EqualTo(1), "two adjacent tiles should be one draw, not two");
             Assert.That(runs[0].CellCount, Is.EqualTo(2));
-            Assert.That(runs[0].TileCol, Is.Zero);
-            Assert.That(runs[0].TileRow, Is.Zero);
+            Assert.That(runs[0].Placement!.Value.SrcX, Is.Zero);
+            Assert.That(runs[0].Placement!.Value.SrcY, Is.Zero);
         }
         finally { window.Close(); }
     }
@@ -122,7 +122,8 @@ public class SixelRenderingTests
             {
                 var runs = ImageRuns(view, row);
                 Assert.That(runs.Count, Is.EqualTo(1), $"row {row}");
-                Assert.That(runs[0].TileRow, Is.EqualTo(row), $"row {row} drew the wrong strip");
+                Assert.That(runs[0].Placement!.Value.SrcY, Is.EqualTo(row * CellPixelHeight),
+                            $"row {row} drew the wrong strip");
             }
         }
         finally { window.Close(); }
@@ -132,6 +133,78 @@ public class SixelRenderingTests
     /// An image cell holds a space, so without an explicit break it would be swallowed by the text run beside
     /// it and never drawn.
     /// </summary>
+    /// <summary>
+    /// A Sixel replaced what was under it, so the text it covered is not drawn.
+    /// </summary>
+    /// <remarks>
+    /// <para>The emulator does not clear the cells a Sixel covers — placing one only adds a run —
+    /// so they still hold whatever was printed there. Drawing them puts that text under the
+    /// picture: invisible beneath an opaque one, and showing through a Sixel drawn with background
+    /// select 1, whose unset pixels are transparent precisely so the cell's own colour comes
+    /// through. The cell's colour, not the previous screen's text.</para>
+    /// <para>The contrast is <c>A_front_picture_leaves_no_text_over_it</c>, where a Kitty placement
+    /// over the same text keeps it: that one is an overlay and the z-index decides what is seen.
+    /// The two together are the whole of why the renderer has to tell the protocols apart.</para>
+    /// </remarks>
+    [AvaloniaTest]
+    public void Text_a_sixel_covered_is_not_drawn_under_it()
+    {
+        var (view, window) = Realised();
+        try
+        {
+            view.Terminal.Write("XY");
+            view.Terminal.Write(Esc + "[1;1H");
+            PlaceImage(view);
+
+            var runs = RunsForRow(view, 0);
+
+            Assert.That(runs.Any(r => r.IsImage), Is.True, "the picture should be drawn");
+            Assert.That(runs.Where(r => r.Text is not null).Any(r => r.StartX < 2 && r.StartX + r.CellCount > 0),
+                        Is.False,
+                        "the text the picture covered should not be drawn underneath it");
+        }
+        finally { window.Close(); }
+    }
+
+    /// <summary>
+    /// Narrowing the window draws less of a picture, and widening it draws the rest back.
+    /// </summary>
+    /// <remarks>
+    /// <para>The end-to-end half of what <c>A_clipped_run_narrows_the_source_by_the_same_proportion</c>
+    /// asserts about the arithmetic. That one hands the blit a run already clipped to two columns;
+    /// this one narrows an actual terminal and checks that a clipped run is what comes out, and that
+    /// widening restores the picture whole.</para>
+    /// <para>Worth having as its own test because it is the claim the placement model exists for, and
+    /// it is the half that used to be false. When a picture was scattered across cells, narrowing the
+    /// window destroyed the cells past the edge and there was nothing left to widen back into -- the
+    /// picture returned with a piece missing, and that was taken to be inherent. A run keeping its
+    /// NATURAL width is what makes the resize a no-op, and nothing else here would notice if that
+    /// stopped being true.</para>
+    /// </remarks>
+    [AvaloniaTest]
+    public void Narrowing_shows_less_of_a_picture_and_widening_shows_it_again()
+    {
+        var (view, window) = Realised();
+        try
+        {
+            PlaceImage(view);
+            Assert.That(ImageRuns(view, 0)[0].CellCount, Is.EqualTo(2), "the picture starts two columns wide");
+
+            view.Terminal.Resize(1, view.Terminal.Rows);
+            var narrowed = ImageRuns(view, 0);
+            Assert.That(narrowed.Count, Is.EqualTo(1), "the picture should still be there, only narrower");
+            Assert.That(narrowed[0].CellCount, Is.EqualTo(1), "only one column can be shown");
+            Assert.That(narrowed[0].Placement!.Value.Cols, Is.EqualTo(2),
+                "the run keeps its natural width -- that is what there is to widen back into");
+
+            view.Terminal.Resize(20, view.Terminal.Rows);
+            var widened = ImageRuns(view, 0);
+            Assert.That(widened.Count, Is.EqualTo(1));
+            Assert.That(widened[0].CellCount, Is.EqualTo(2), "the second column should come back");
+        }
+        finally { window.Close(); }
+    }
+
     [AvaloniaTest]
     public void An_image_does_not_join_the_text_run_beside_it()
     {
@@ -174,6 +247,45 @@ public class SixelRenderingTests
         finally { window.Close(); }
     }
 
+    /// <summary>
+    /// Two appearances of the SAME picture, side by side, must stay two runs.
+    /// </summary>
+    /// <remarks>
+    /// <para>This could not happen with Sixel: every decode makes a fresh image and shows it once,
+    /// so comparing images was enough to keep neighbours apart. Kitty transmits a picture once and
+    /// places it as often as it likes, and then two adjacent appearances share an image object.</para>
+    /// <para>Coalescing on the image would run one strip across the join and blit the wrong pixels
+    /// into both halves -- the second placement's tiles would be read from wherever the first one's
+    /// numbering happened to continue.</para>
+    /// </remarks>
+    [AvaloniaTest]
+    public void Two_placements_of_one_image_are_not_coalesced()
+    {
+        var (view, window) = Realised();
+        try
+        {
+            view.Terminal.Options.CellWidthPixels = CellPixelWidth;
+            view.Terminal.Options.CellHeightPixels = CellPixelHeight;
+
+            // Transmit once under an id, then show it twice, adjacent, on the same row.
+            var pixels = Convert.ToBase64String(new byte[4 * 6 * 4]);
+            view.Terminal.Write($"{Esc}_Ga=t,i=1,f=32,s=4,v=6,q=2;{pixels}{St}");
+            view.Terminal.Write(Esc + "[1;1H");
+            view.Terminal.Write($"{Esc}_Ga=p,i=1,C=1,q=2{St}");
+            view.Terminal.Write(Esc + "[1;3H");
+            view.Terminal.Write($"{Esc}_Ga=p,i=1,C=1,q=2{St}");
+
+            var runs = ImageRuns(view, 0);
+
+            Assert.That(runs.Count, Is.EqualTo(2),
+                "two appearances of one picture were merged into a single strip");
+            Assert.That(runs[0].Image, Is.SameAs(runs[1].Image), "they do share the pixels");
+            Assert.That(runs[0].Placement, Is.Not.SameAs(runs[1].Placement), "but not the placement");
+            Assert.That(runs[1].Placement!.Value.SrcX, Is.Zero,
+                        "the second appearance starts at its own first pixel");
+        }
+        finally { window.Close(); }
+    }
     /// <summary>Typing over part of a strip takes that cell back rather than drawing across the gap.</summary>
     [AvaloniaTest]
     public void Typing_over_a_tile_takes_that_cell_back()
@@ -189,7 +301,7 @@ public class SixelRenderingTests
             var runs = ImageRuns(view, 0);
             Assert.That(runs.Count, Is.EqualTo(1));
             Assert.That(runs[0].CellCount, Is.EqualTo(1), "only the untouched tile should be left");
-            Assert.That(runs[0].TileCol, Is.EqualTo(1));
+            Assert.That(runs[0].Placement!.Value.SrcX, Is.EqualTo(1 * CellPixelWidth));
         }
         finally { window.Close(); }
     }
@@ -258,10 +370,26 @@ public class SixelRenderingTests
 
     // ---- the blit arithmetic ----------------------------------------------------------------------
 
-    private static TerminalView.CachedTextRun Run(TerminalImage image, int startX, int cellCount, int tileCol, int tileRow)
-        => new(null, startX, cellCount, null, image, tileCol, tileRow);
+    /// <summary>
+    /// A run of a picture on one line, which is what the emulator now stores.
+    /// </summary>
+    private static TerminalView.CachedTextRun Run(TerminalImage image, int column, int cols,
+                                                  int srcX, int srcY, int srcWidth, int srcHeight,
+                                                  int cellCount = -1,
+                                                  short offsetX = 0, short offsetY = 0)
+        => new(null, column, cellCount < 0 ? cols : cellCount, null,
+               new LinePlacement(image.Id, column, cols, srcX, srcY, srcWidth, srcHeight,
+                                 PlacementKind.Sixel, offsetX: offsetX, offsetY: offsetY),
+               image);
 
-    /// <summary>Pixels that divide evenly into cells: 8x6 over 2x3 cells is four by two tiles.</summary>
+    /// <summary>The image showing at a screen position, now that cells carry none.</summary>
+    private static TerminalImage? ImageAt(TerminalView view, int col, int screenRow)
+    {
+        var line = view.Terminal.Buffer.Lines[view.Terminal.Buffer.ViewportY + screenRow];
+        return line is not null && line.TryGetImageAt(col, out var image) ? image : null;
+    }
+
+    /// <summary>Pixels that divide evenly into cells: 8x6 over 2x3 cells is four columns by two rows.</summary>
     private static TerminalImage EvenImage()
         => new(new byte[8 * 6 * 4], 8, 6, CellPixelWidth, CellPixelHeight);
 
@@ -270,19 +398,23 @@ public class SixelRenderingTests
     {
         var image = EvenImage();
 
-        Assert.That(TerminalView.TryPlanImageBlit(Run(image, 0, 4, 0, 0), 0, 0, 10, 20, 1.0,
+        Assert.That(TerminalView.TryPlanImageBlit(Run(image, 0, 4, 0, 0, 8, 3), 0, 20, 10, 20, 1.0,
             out var source, out var destination), Is.True);
 
         Assert.That(source, Is.EqualTo(new Rect(0, 0, 8, 3)));
         Assert.That(destination, Is.EqualTo(new Rect(0, 0, 40, 20)));
     }
 
+    /// <summary>
+    /// A row further down the picture is a different run with its own slice of the source, so the
+    /// strip it reads is carried rather than computed.
+    /// </summary>
     [AvaloniaTest]
     public void A_strip_further_down_reads_from_further_down_the_picture()
     {
         var image = EvenImage();
 
-        Assert.That(TerminalView.TryPlanImageBlit(Run(image, 0, 4, 0, 1), 1, 20, 10, 20, 1.0,
+        Assert.That(TerminalView.TryPlanImageBlit(Run(image, 0, 4, 0, 3, 8, 3), 20, 20, 10, 20, 1.0,
             out var source, out var destination), Is.True);
 
         Assert.That(source, Is.EqualTo(new Rect(0, 3, 8, 3)));
@@ -290,11 +422,11 @@ public class SixelRenderingTests
     }
 
     [AvaloniaTest]
-    public void A_run_starting_partway_across_is_offset_in_both_rectangles()
+    public void A_run_starting_partway_across_is_offset_on_screen()
     {
         var image = EvenImage();
 
-        Assert.That(TerminalView.TryPlanImageBlit(Run(image, 5, 2, 2, 0), 0, 0, 10, 20, 1.0,
+        Assert.That(TerminalView.TryPlanImageBlit(Run(image, 5, 2, 4, 0, 4, 3), 0, 20, 10, 20, 1.0,
             out var source, out var destination), Is.True);
 
         Assert.That(source, Is.EqualTo(new Rect(4, 0, 4, 3)));
@@ -302,47 +434,53 @@ public class SixelRenderingTests
     }
 
     /// <summary>
-    /// The case that separates a picture from a smeared one: a tile holding half a cell's worth of pixels has
-    /// to cover half a cell, not be stretched across a whole one.
+    /// A run clipped by a narrow line shows LESS of the picture rather than squeezing all of it into
+    /// fewer cells. That is the whole point of a run keeping its natural width: nothing was
+    /// destroyed by the narrowing, and widening the window shows the rest again.
     /// </summary>
     [AvaloniaTest]
-    public void A_clipped_edge_tile_covers_only_the_fraction_of_a_cell_it_holds()
+    public void A_clipped_run_narrows_the_source_by_the_same_proportion()
     {
-        // Seven pixels wide over two-pixel cells: four columns, the last holding a single pixel.
-        var image = new TerminalImage(new byte[7 * 6 * 4], 7, 6, CellPixelWidth, CellPixelHeight);
+        var image = EvenImage();
 
-        Assert.That(TerminalView.TryPlanImageBlit(Run(image, 0, 4, 0, 0), 0, 0, 10, 20, 1.0,
+        // Four columns wide, but only two of them fit on the line.
+        Assert.That(TerminalView.TryPlanImageBlit(Run(image, 0, 4, 0, 0, 8, 3, cellCount: 2), 0, 20, 10, 20, 1.0,
             out var source, out var destination), Is.True);
 
-        Assert.That(source.Width, Is.EqualTo(7), "the source cannot extend past the picture");
-        Assert.That(destination.Width, Is.EqualTo(35),
-            "three and a half cells of pixels should cover three and a half cells of screen");
+        Assert.That(source, Is.EqualTo(new Rect(0, 0, 4, 3)), "half the columns is half the source");
+        Assert.That(destination, Is.EqualTo(new Rect(0, 0, 20, 20)));
     }
 
+    /// <summary>
+    /// A short bottom row still fills its row on screen. A run occupies whole cells by construction —
+    /// its height is one row — so the fraction lives in the source rather than the destination.
+    /// </summary>
     [AvaloniaTest]
-    public void A_clipped_bottom_tile_covers_only_the_fraction_of_a_row_it_holds()
+    public void A_short_bottom_row_still_covers_its_row()
     {
         // Eight pixels tall over three-pixel cells: three rows, the last holding two pixels.
         var image = new TerminalImage(new byte[8 * 8 * 4], 8, 8, CellPixelWidth, CellPixelHeight);
 
-        Assert.That(TerminalView.TryPlanImageBlit(Run(image, 0, 4, 0, 2), 2, 40, 10, 20, 1.0,
+        Assert.That(TerminalView.TryPlanImageBlit(Run(image, 0, 4, 0, 6, 8, 2), 40, 20, 10, 20, 1.0,
             out var source, out var destination), Is.True);
 
         Assert.That(source, Is.EqualTo(new Rect(0, 6, 8, 2)));
-
-        // Two thirds of a 20-unit row, snapped to the device grid.
-        Assert.That(destination.Height, Is.EqualTo(Math.Round(20.0 * 2 / 3)).Within(0.0001));
+        Assert.That(destination.Height, Is.EqualTo(20));
     }
 
+    /// <summary>The X and Y keys shift a picture inside its first cell without enlarging the box.</summary>
     [AvaloniaTest]
-    public void A_tile_outside_the_picture_is_refused()
+    public void A_pixel_offset_moves_the_blit_inside_the_cell()
     {
         var image = EvenImage();
 
-        Assert.That(TerminalView.TryPlanImageBlit(Run(image, 0, 1, 9, 0), 0, 0, 10, 20, 1.0, out _, out _),
-            Is.False);
-        Assert.That(TerminalView.TryPlanImageBlit(Run(image, 0, 1, 0, 9), 0, 0, 10, 20, 1.0, out _, out _),
-            Is.False);
+        // One pixel of a two-pixel cell across, one of a three-pixel cell down: half a cell and a third.
+        Assert.That(TerminalView.TryPlanImageBlit(
+            Run(image, 0, 4, 0, 0, 8, 3, offsetX: 1, offsetY: 1), 0, 20, 10, 20, 1.0,
+            out _, out var destination), Is.True);
+
+        Assert.That(destination.X, Is.EqualTo(5), "half a cell across");
+        Assert.That(destination.Y, Is.EqualTo(Math.Round(20.0 / 3)).Within(1.0), "a third of a row down");
     }
 
     [AvaloniaTest]
@@ -350,8 +488,8 @@ public class SixelRenderingTests
     {
         var image = EvenImage();
 
-        Assert.That(TerminalView.TryPlanImageBlit(Run(image, 0, 0, 0, 0), 0, 0, 10, 20, 1.0, out _, out _),
-            Is.False);
+        Assert.That(TerminalView.TryPlanImageBlit(Run(image, 0, 4, 0, 0, 8, 3, cellCount: 0), 0, 20, 10, 20, 1.0,
+            out _, out _), Is.False);
     }
 
     [AvaloniaTest]
@@ -359,7 +497,7 @@ public class SixelRenderingTests
     {
         var run = new TerminalView.CachedTextRun(null, 0, 2, null);
 
-        Assert.That(TerminalView.TryPlanImageBlit(run, 0, 0, 10, 20, 1.0, out _, out _), Is.False);
+        Assert.That(TerminalView.TryPlanImageBlit(run, 0, 20, 10, 20, 1.0, out _, out _), Is.False);
     }
 
     /// <summary>
@@ -372,7 +510,7 @@ public class SixelRenderingTests
         var image = EvenImage();
 
         // A fractional cell width at 1.5x scaling: unsnapped, these edges land off the device grid.
-        Assert.That(TerminalView.TryPlanImageBlit(Run(image, 3, 4, 0, 0), 0, 0, 8.35, 20, 1.5,
+        Assert.That(TerminalView.TryPlanImageBlit(Run(image, 3, 4, 0, 0, 8, 3), 0, 20, 8.35, 20, 1.5,
             out _, out var destination), Is.True);
 
         Assert.That(destination.X * 1.5, Is.EqualTo(Math.Round(destination.X * 1.5)).Within(0.0001));
@@ -612,6 +750,433 @@ public class SixelRenderingTests
             Assert.That(height, Is.GreaterThan(0));
             Assert.That(width, Is.LessThanOrEqualTo((int)Math.Round(window.Width * window.RenderScaling)),
                 "the reported width included chrome that is not part of the text area");
+        }
+        finally { window.Close(); }
+    }
+
+    // ---- pixel offsets within the first cell ------------------------------------------------------
+
+    // ---- pictures behind the text -----------------------------------------------------------------
+
+    /// <summary>Transmits a 4x6 picture under an id and places it at the cursor with a given depth.</summary>
+    private static void PlaceWithDepth(TerminalView view, int z)
+    {
+        view.Terminal.Options.CellWidthPixels = CellPixelWidth;
+        view.Terminal.Options.CellHeightPixels = CellPixelHeight;
+
+        var pixels = Convert.ToBase64String(new byte[4 * 6 * 4]);
+        view.Terminal.Write($"{Esc}_Ga=t,i=1,f=32,s=4,v=6,q=2;{pixels}{St}");
+        view.Terminal.Write(Esc + "[1;1H");
+        view.Terminal.Write($"{Esc}_Ga=p,i=1,z={z},C=1,q=2{St}");
+    }
+
+    /// <summary>
+    /// A picture at negative z is drawn AND its cells still carry text, so the row emits both an
+    /// image run and a text run -- the image first, because runs are drawn in the order they are
+    /// listed and the text belongs on top.
+    /// </summary>
+    [AvaloniaTest]
+    public void A_background_picture_is_drawn_under_its_text()
+    {
+        var (view, window) = Realised();
+        try
+        {
+            PlaceWithDepth(view, z: -1);
+            view.Terminal.Write(Esc + "[1;1HXY");
+
+            var runs = RunsForRow(view, 0).ToList();
+            var imageAt = runs.FindIndex(r => r.Placement is not null);
+
+            // The run covering column 0 specifically -- not merely "some text run", which the blanks
+            // further along the row would satisfy whether or not the glyphs survived.
+            var textAt = runs.FindIndex(r => r.Text is not null
+                                             && r.StartX <= 0 && r.StartX + r.CellCount > 0);
+
+            Assert.That(imageAt, Is.GreaterThanOrEqualTo(0), "the background picture was not drawn");
+            Assert.That(textAt, Is.GreaterThanOrEqualTo(0), "the text over the background was not drawn");
+            Assert.That(imageAt, Is.LessThan(textAt), "the text must be drawn after the picture");
+        }
+        finally { window.Close(); }
+    }
+
+    /// <summary>
+    /// A picture in front of the text replaces it, so the row has an image run and no text over it.
+    /// This is what every image did before z existed.
+    /// </summary>
+    [AvaloniaTest]
+    public void A_front_picture_leaves_no_text_over_it()
+    {
+        var (view, window) = Realised();
+        try
+        {
+            PlaceWithDepth(view, z: 0);
+            view.Terminal.Write(Esc + "[1;1HXY");
+
+            var runs = RunsForRow(view, 0);
+
+            // The character lands and the picture stays: a Kitty placement is an overlay, and the
+            // z-index rather than the buffer decides which of them ends up visible.
+            Assert.That(runs.Any(r => r.Text is not null), Is.True);
+            Assert.That(runs.Any(r => r.IsImage), Is.True,
+                        "typing over a front picture should not have removed it");
+        }
+        finally { window.Close(); }
+    }
+
+    /// <summary>
+    /// Text sitting on a background must not paint an opaque rectangle over it. A cell with no
+    /// background colour of its own fills nothing, which is what lets the picture show through.
+    /// </summary>
+    [AvaloniaTest]
+    public void Text_on_a_background_picture_paints_no_fill_over_it()
+    {
+        var (view, window) = Realised();
+        try
+        {
+            PlaceWithDepth(view, z: -1);
+            view.Terminal.Write(Esc + "[1;1HXY");
+
+            // Only the runs actually sitting on the picture; blanks past its right edge prove nothing.
+            var overPicture = RunsForRow(view, 0)
+                .Where(r => r.Text is not null && r.StartX < 2 && r.StartX + r.CellCount > 0)
+                .ToList();
+
+            Assert.That(overPicture, Is.Not.Empty, "no text run was drawn over the picture");
+            Assert.That(overPicture.All(r => r.Background is null), Is.True,
+                        "a text run over a background picture painted a fill and hid it");
+        }
+        finally { window.Close(); }
+    }
+
+    /// <summary>
+    /// A row whose text sits on a background must still terminate. The run builder used to stop at
+    /// any cell holding a picture, which on a background cell ends the run on its own first cell and
+    /// leaves the column index where it was -- a spin, not a wrong pixel.
+    /// </summary>
+    [AvaloniaTest]
+    public void A_row_of_text_over_a_background_completes()
+    {
+        var (view, window) = Realised();
+        try
+        {
+            PlaceWithDepth(view, z: -1);
+            view.Terminal.Write(Esc + "[1;1HXY");
+
+            var covered = new HashSet<int>();
+            foreach (var run in RunsForRow(view, 0).Where(r => r.Text is not null))
+                for (int i = 0; i < run.CellCount; i++)
+                    covered.Add(run.StartX + i);
+
+            // Both characters were emitted, so the builder advanced past the background cells rather
+            // than ending the run on the first of them and leaving the column index where it was.
+            Assert.That(covered.Contains(0), Is.True, "column 0 produced no text run");
+            Assert.That(covered.Contains(1), Is.True, "column 1 produced no text run");
+        }
+        finally { window.Close(); }
+    }
+
+    // ---- animation ---------------------------------------------------------------------------------
+
+    /// <summary>Transmits a two frame animation under id 1 and places it at the cursor.</summary>
+    private static void PlaceAnimation(TerminalView view, int gap = 50)
+    {
+        view.Terminal.Options.CellWidthPixels = CellPixelWidth;
+        view.Terminal.Options.CellHeightPixels = CellPixelHeight;
+
+        var red = Convert.ToBase64String(Solid(4, 6, 0, 0, 255));      // BGRA: red
+        var green = Convert.ToBase64String(Solid(4, 6, 0, 255, 0));    // BGRA: green
+
+        view.Terminal.Write($"{Esc}_Ga=t,i=1,f=32,s=4,v=6,q=2;{red}{St}");
+        view.Terminal.Write($"{Esc}_Ga=f,i=1,c=1,z={gap},f=32,s=4,v=6,q=2;{green}{St}");
+        view.Terminal.Write($"{Esc}_Ga=a,i=1,r=1,z={gap},q=2{St}");
+        view.Terminal.Write($"{Esc}_Ga=a,i=1,s=3,q=2{St}");
+        view.Terminal.Write(Esc + "[1;1H");
+        view.Terminal.Write($"{Esc}_Ga=p,i=1,C=1,q=2{St}");
+    }
+
+    private static byte[] Solid(int width, int height, byte b, byte g, byte r)
+    {
+        var bytes = new byte[width * height * 4];
+        for (int i = 0; i < width * height; i++)
+        {
+            bytes[i * 4] = r;          // the protocol carries RGBA
+            bytes[i * 4 + 1] = g;
+            bytes[i * 4 + 2] = b;
+            bytes[i * 4 + 3] = 255;
+        }
+        return bytes;
+    }
+
+    /// <summary>
+    /// The bitmap cache is keyed on the image, and an animation's pixels move while that key stays
+    /// the same. Uploading the current frame is what the serial check is for.
+    /// </summary>
+    [AvaloniaTest]
+    public void An_advanced_animation_uploads_the_new_frame()
+    {
+        var (view, window) = Realised();
+        try
+        {
+            PlaceAnimation(view);
+
+            var image = ImageAt(view, 0, 0);
+            Assert.That(image, Is.Not.Null);
+
+            var first = TerminalView.CreateBitmap(image!);
+            Assert.That(first, Is.Not.Null);
+
+            Assert.That(view.Terminal.AdvanceAnimations(TimeSpan.FromMilliseconds(60)), Is.True);
+
+            // The pixels a fresh upload would read must now be the second frame's. Index 1 is the
+            // GREEN channel of BGRA: the two frames are red and green, and both have blue at zero,
+            // so comparing index 0 would compare a channel neither of them uses.
+            Assert.That(image!.CurrentPixels.Span[1], Is.Not.EqualTo(image.Pixels.Span[1]),
+                        "the current frame did not move off the root");
+            Assert.That(image.FrameSerial, Is.Not.Zero, "the serial did not change with the frame");
+        }
+        finally { window.Close(); }
+    }
+
+    /// <summary>
+    /// A picture that never moves must not make the renderer re-upload it. The serial stays zero for
+    /// a still image, so the cached bitmap is kept.
+    /// </summary>
+    /// <summary>
+    /// What actually reaches the bitmap has to be the CURRENT frame. Asserting on CurrentPixels
+    /// alone would leave the upload free to read the root and every animation would draw frozen on
+    /// its first frame -- which looks like a clock that never fires, not like the wrong buffer.
+    /// </summary>
+    [AvaloniaTest]
+    public void The_upload_reads_the_current_frame_not_the_root()
+    {
+        var (view, window) = Realised();
+        try
+        {
+            PlaceAnimation(view);
+
+            var image = ImageAt(view, 0, 0);
+            Assert.That(image, Is.Not.Null);
+
+            var rootUpload = CopyThrough(image!, image!.Stride);
+            view.Terminal.AdvanceAnimations(TimeSpan.FromMilliseconds(60));
+            var frameUpload = CopyThrough(image, image.Stride);
+
+            // Green channel: the frames are red and green, and both leave blue at zero.
+            Assert.That(rootUpload[1], Is.Not.EqualTo(frameUpload[1]),
+                        "the upload read the same pixels before and after the frame changed");
+            Assert.That(frameUpload[1], Is.EqualTo(255), "the second frame is the green one");
+        }
+        finally { window.Close(); }
+    }
+
+    /// <summary>
+    /// The bitmap cache is keyed on the image, so for an animation the key stays put while the
+    /// pixels move. It must re-upload when the frame changes -- and NOT re-upload when it has not,
+    /// or every still picture on screen is uploaded afresh sixty times a second.
+    /// </summary>
+    [AvaloniaTest]
+    public void The_cached_bitmap_is_replaced_only_when_the_frame_changes()
+    {
+        var (view, window) = Realised();
+        try
+        {
+            PlaceAnimation(view);
+
+            var image = ImageAt(view, 0, 0);
+            Assert.That(image, Is.Not.Null);
+
+            var first = view.GetOrCreateBitmap(image!);
+            Assert.That(first, Is.Not.Null);
+            Assert.That(view.GetOrCreateBitmap(image!), Is.SameAs(first),
+                        "an unchanged frame was uploaded twice");
+
+            view.Terminal.AdvanceAnimations(TimeSpan.FromMilliseconds(60));
+
+            var afterFrame = view.GetOrCreateBitmap(image!);
+            Assert.That(afterFrame, Is.Not.SameAs(first),
+                        "the new frame was not uploaded, so the animation would draw frozen");
+
+            // And the refresh must record which frame it uploaded. Without that the cache is stale
+            // on every look, so a running animation re-uploads on each of them -- which draws
+            // correctly and costs a full texture upload per frame, the kind of fault that shows up
+            // as heat rather than as a wrong pixel.
+            Assert.That(view.GetOrCreateBitmap(image!), Is.SameAs(afterFrame),
+                        "the refreshed upload was not recorded, so it uploads again every frame");
+        }
+        finally { window.Close(); }
+    }
+
+    [AvaloniaTest]
+    public void A_still_picture_keeps_a_frame_serial_of_zero()
+    {
+        var (view, window) = Realised();
+        try
+        {
+            PlaceImage(view);
+
+            var image = ImageAt(view, 0, 0);
+            Assert.That(image, Is.Not.Null);
+            Assert.That(image!.FrameSerial, Is.Zero);
+            Assert.That(image.CurrentPixels.Length, Is.EqualTo(image.Pixels.Length));
+        }
+        finally { window.Close(); }
+    }
+
+    /// <summary>
+    /// A terminal showing text keeps no animation clock running, so the common case costs nothing.
+    /// </summary>
+    [AvaloniaTest]
+    public void A_terminal_showing_text_reports_no_animation()
+    {
+        var (view, window) = Realised();
+        try
+        {
+            view.Terminal.Write("hello");
+
+            Assert.That(view.Terminal.HasRunningAnimations(), Is.False);
+        }
+        finally { window.Close(); }
+    }
+
+    [AvaloniaTest]
+    public void A_placed_animation_reports_itself_as_running()
+    {
+        var (view, window) = Realised();
+        try
+        {
+            PlaceAnimation(view);
+
+            Assert.That(view.Terminal.HasRunningAnimations(), Is.True);
+        }
+        finally { window.Close(); }
+    }
+
+    // ---- overlapping pictures ---------------------------------------------------------------------
+
+    /// <summary>
+    /// Transmits two 4x6 pictures under ids 1 and 2 so they can be told apart, ready to be placed.
+    /// </summary>
+    private static void TransmitTwo(TerminalView view)
+    {
+        view.Terminal.Options.CellWidthPixels = CellPixelWidth;
+        view.Terminal.Options.CellHeightPixels = CellPixelHeight;
+
+        var pixels = Convert.ToBase64String(new byte[4 * 6 * 4]);
+        view.Terminal.Write($"{Esc}_Ga=t,i=1,f=32,s=4,v=6,q=2;{pixels}{St}");
+        view.Terminal.Write($"{Esc}_Ga=t,i=2,f=32,s=4,v=6,q=2;{pixels}{St}");
+    }
+
+    private static void PlaceAt(TerminalView view, int id, int col, int z)
+    {
+        view.Terminal.Write($"{Esc}[1;{col + 1}H");
+        view.Terminal.Write($"{Esc}_Ga=p,i={id},z={z},C=1,q=2{St}");
+    }
+
+    /// <summary>
+    /// Two pictures over one cell are both drawn, and the deeper one goes down first. Order is the
+    /// whole of what compositing is here: Avalonia blends a translucent bitmap over whatever is
+    /// already in the buffer, so getting the sequence right is what makes the blend right.
+    /// </summary>
+    [AvaloniaTest]
+    public void Overlapping_pictures_are_drawn_back_to_front()
+    {
+        var (view, window) = Realised();
+        try
+        {
+            TransmitTwo(view);
+            PlaceAt(view, 1, col: 0, z: 5);
+            PlaceAt(view, 2, col: 0, z: 1);
+
+            var runs = RunsForRow(view, 0).ToList();
+            var backAt = runs.FindIndex(r => r.Placement is { ZIndex: (short)1 });
+            var frontAt = runs.FindIndex(r => r.Placement is { ZIndex: (short)5 });
+
+            Assert.That(backAt, Is.GreaterThanOrEqualTo(0), "the covered picture was never drawn");
+            Assert.That(frontAt, Is.GreaterThanOrEqualTo(0), "the front picture was never drawn");
+            Assert.That(backAt, Is.LessThan(frontAt), "the deeper picture must be drawn first");
+        }
+        finally { window.Close(); }
+    }
+
+    /// <summary>
+    /// The cell background goes down once, under the whole stack. A nearer picture painting it again
+    /// would erase the one behind it instead of blending over it — which would make overlapping
+    /// placements pointless while still looking almost right, since the top picture would be correct.
+    /// </summary>
+    /// <remarks>
+    /// The background belongs to the CELLS, and a picture no longer writes any: placing one leaves
+    /// the cells exactly as they were. So the colour has to be put there by text before the pictures
+    /// go over it, which is also the only way a real session produces one.
+    /// </remarks>
+    [AvaloniaTest]
+    public void Only_the_bottom_picture_paints_the_cell_background()
+    {
+        var (view, window) = Realised();
+        try
+        {
+            TransmitTwo(view);
+
+            // Red-backed blanks for the pictures to sit on.
+            view.Terminal.Write($"{Esc}[1;1H{Esc}[41m        {Esc}[0m");
+
+            PlaceAt(view, 1, col: 0, z: 1);
+            PlaceAt(view, 2, col: 0, z: 5);
+
+            var filled = RunsForRow(view, 0)
+                .Where(r => r.IsImage && r.Background is not null)
+                .ToList();
+
+            Assert.That(filled.Count, Is.EqualTo(1),
+                        "the cell background belongs to the bottom picture alone");
+            Assert.That(filled[0].Placement!.Value.ZIndex, Is.EqualTo(1));
+        }
+        finally { window.Close(); }
+    }
+
+    /// <summary>
+    /// A picture covered over part of itself is still drawn whole, and still as strips rather than
+    /// one blit per cell -- the run follows one layer through cells where it is not on top.
+    /// </summary>
+    [AvaloniaTest]
+    public void A_partly_covered_picture_is_still_drawn_in_full()
+    {
+        var (view, window) = Realised();
+        try
+        {
+            TransmitTwo(view);
+            PlaceAt(view, 1, col: 0, z: 1);          // columns 0-1
+            PlaceAt(view, 2, col: 1, z: 5);          // columns 1-2, over its second cell
+
+            var back = RunsForRow(view, 0).Where(r => r.Placement is { ZIndex: (short)1 }).ToList();
+
+            // One run, not two. The lower picture is the bottom layer of both its cells -- being
+            // covered does not change that -- so nothing splits the strip.
+            Assert.That(back.Count, Is.EqualTo(1), "the covered picture should still be one strip");
+            Assert.That(back[0].CellCount, Is.EqualTo(2),
+                        "both of the lower picture's columns should still be drawn");
+            Assert.That(back[0].Placement!.Value.SrcX, Is.Zero,
+                        "the strip should start at the picture's own first pixel");
+        }
+        finally { window.Close(); }
+    }
+
+    /// <summary>
+    /// An unlayered picture is still one draw per strip. The per-placement sweep replaced a
+    /// per-cell walk, and coalescing is the thing most easily lost in that kind of rewrite.
+    /// </summary>
+    [AvaloniaTest]
+    public void A_picture_with_nothing_over_it_is_still_one_run_per_strip()
+    {
+        var (view, window) = Realised();
+        try
+        {
+            TransmitTwo(view);
+            PlaceAt(view, 1, col: 0, z: 0);
+
+            var runs = ImageRuns(view, 0);
+
+            Assert.That(runs.Count, Is.EqualTo(1), "two adjacent tiles should be one draw, not two");
+            Assert.That(runs[0].CellCount, Is.EqualTo(2));
         }
         finally { window.Close(); }
     }

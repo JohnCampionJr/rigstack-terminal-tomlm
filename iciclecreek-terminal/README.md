@@ -20,7 +20,7 @@ A cross-platform XTerm terminal emulator control for [Avalonia UI](https://avalo
 - Terminal window manipulation commands (resize, move, minimize, maximize, etc.)
 - Dynamic title updates from terminal escape sequences
 - Customizable fonts, colors, and styling
-- [Sixel graphics](#sixel-graphics) 
+- [Graphics](#graphics) 
 
 ## Installation
 
@@ -222,12 +222,18 @@ of the app — a terminal streaming build output at 10 FPS is still perfectly re
 invalidations. Because the frame is shared, the setting is global rather than per-terminal: it applies to every
 terminal already open, from the next frame scheduled. Safe to set from any thread.
 
-### Sixel graphics
+### Graphics
 
-Sixel images (`ESC P … q … ESC \`) are decoded by XTerm.NET and drawn by the terminal — `img2sixel`,
-`chafa`, `lsix` and `timg` work with no configuration. An image behaves like terminal content rather
-than an overlay: typing over it replaces that part of the picture, `clear` removes it, and it scrolls
-with the text around it and is freed when it falls out of the scrollback.
+Two image protocols are decoded by XTerm.NET and drawn by the terminal — Sixel (`ESC P … q … ESC \`)
+and Kitty (`ESC _ G … ESC \`). `img2sixel`, `chafa`, `lsix`, `timg`, `icat`, `yazi` and `image.nvim`
+work with no configuration. An image behaves like terminal content rather than an overlay: typing
+over it replaces that part of the picture, `clear` removes it, and it scrolls with the text around it
+and is freed when it falls out of the scrollback.
+
+Animated Kitty images play on their own. The terminal runs a clock only while something is actually
+animating, advances by elapsed time rather than one frame per tick — so a late repaint stutters an
+animation rather than slowing it down — and re-uploads a picture's texture only when its frame
+actually changes.
 
 Two things are handled for you and are worth knowing about:
 
@@ -237,16 +243,33 @@ Two things are handled for you and are worth knowing about:
 - One bitmap is uploaded per image and cached weakly against it, so a picture on screen is re-blitted
   rather than re-decoded on every frame, and the bitmap is released when the terminal drops the image.
 
-A run of adjacent cells belonging to the same strip of a picture is drawn in a single call rather than
-one per cell. On a backend with no raster surface — Consolonia, for instance — images are skipped and
-the text still renders.
+One row of a picture is one draw. The emulator stores a picture as a run per line rather than
+scattering it through cells, so there is nothing to coalesce and no tile arithmetic to do — the run
+carries the source rectangle and the columns it covers, and the whole strip goes down in a single
+call. On a backend with no raster surface — Consolonia, for instance — images are skipped and the
+text still renders.
 
-Sixel can be turned off, which also stops the terminal advertising it, so applications send text
-instead of pictures rather than pictures that get dropped:
+Pictures may overlap, and a row is drawn one run at a time from the back forwards, with the text
+going down between the ones behind it and the ones in front. That ordering is the whole of the
+compositing: a translucent picture blends over whatever was drawn under it because it is drawn after
+it. A cell's own background is painted by the bottom-most picture covering it and by no other, since
+painting it again nearer the front would erase what is behind rather than let it show through.
+
+A run keeps its natural width even when the window is too narrow to show it, so the renderer draws as
+much as fits and narrows the source by the same proportion. Narrowing the window shows less of a
+picture and widening it shows more; nothing is destroyed in between.
+
+Either protocol can be turned off. Switching Sixel off also stops the terminal advertising it, so
+applications send text instead of pictures rather than pictures that get dropped:
 
 ```csharp
 terminalControl.Terminal.Options.SixelEnabled = false;
+terminalControl.Terminal.Options.KittyGraphicsEnabled = false;
 ```
+
+Kitty's file, temp-file and shared-memory transmission media (`t=f`, `t=t`, `t=s`) are deliberately
+refused — they would have the terminal open a path chosen by the process it is hosting. Clients are
+told so and fall back to sending the pixels directly.
 
 
 ## Links

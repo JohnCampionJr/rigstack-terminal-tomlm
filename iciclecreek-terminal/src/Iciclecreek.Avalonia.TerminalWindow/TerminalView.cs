@@ -206,9 +206,12 @@ namespace Iciclecreek.Terminal
             int StartX,
             int CellCount,
             IBrush? Background,
-            XT.Graphics.TerminalImage? Image = null,
-            int TileCol = 0,
-            int TileRow = 0);
+            XT.Graphics.LinePlacement? Placement = null,
+            XT.Graphics.TerminalImage? Image = null)
+        {
+            /// <summary>Whether this run draws a picture rather than text.</summary>
+            public bool IsImage => Placement is not null && Image is not null;
+        }
 
         // One bitmap per image, built on first sight and reused for the life of the picture.
         //
@@ -222,6 +225,16 @@ namespace Iciclecreek.Terminal
         private sealed class CachedBitmap
         {
             public Bitmap? Bitmap;
+
+            /// <summary>
+            /// Which frame of the picture this bitmap holds.
+            /// </summary>
+            /// <remarks>
+            /// The cache is keyed on the image, which for an animation is not enough on its own --
+            /// the pixels move while the key stays the same. The emulator changes this number
+            /// whenever they do. A still picture leaves it at zero forever.
+            /// </remarks>
+            public int FrameSerial;
         }
 
         private readonly System.Runtime.CompilerServices.ConditionalWeakTable<XT.Graphics.TerminalImage, CachedBitmap> _imageBitmaps = new();
@@ -657,9 +670,35 @@ namespace Iciclecreek.Terminal
         /// writing <c>Environment.GetEnvironmentVariable(...)</c> would get a compile error rather than the
         /// framework. <c>ProcessStartInfo.EnvironmentVariables</c> is the established .NET name for exactly
         /// this concept.</para>
-        /// <para><c>TERM</c> does not need setting here: the PTY layer already gives the child
-        /// <c>TERM=xterm-256color</c> on both Windows and Unix.</para>
+        /// <para><c>TERM</c> and <c>COLORTERM</c> are supplied automatically (as <c>xterm-256color</c> and
+        /// <c>truecolor</c>) when this dictionary does not carry them, because nothing else does — the PTY
+        /// layer sets neither, and on Windows there is none in the environment to inherit. Put either in
+        /// here to override it.</para>
         /// </remarks>
+        /// <summary>
+        /// The <c>TERM</c> given to a launched process when the caller supplies none.
+        /// </summary>
+        /// <remarks>
+        /// What this terminal actually behaves like. Overridden by putting <c>TERM</c> in
+        /// <see cref="EnvironmentVariables"/>.
+        /// </remarks>
+        public const string DefaultTermType = "xterm-256color";
+
+        /// <summary>
+        /// The <c>COLORTERM</c> given to a launched process when the caller supplies none.
+        /// </summary>
+        /// <remarks>
+        /// <para>Not a contradiction of <see cref="DefaultTermType"/>. The two answer different questions:
+        /// <c>TERM</c> names a terminfo entry, and <c>xterm-256color</c> describes the 256-entry indexed
+        /// palette that terminfo can express; <c>COLORTERM</c> advertises DIRECT 24-bit colour, which
+        /// terminfo has no standard way to state. Every modern terminal sets both -- Windows Terminal,
+        /// kitty, alacritty and iTerm2 among them.</para>
+        /// <para>Without it a program reads the terminfo entry, concludes 256 colours, and quantises its
+        /// output to the palette. This terminal takes full RGB, so that would be throwing away colour it
+        /// could have shown.</para>
+        /// </remarks>
+        public const string DefaultColorTerm = "truecolor";
+
         public static readonly StyledProperty<IDictionary<string, string>?> EnvironmentVariablesProperty =
             AvaloniaProperty.Register<TerminalView, IDictionary<string, string>?>(
                 nameof(EnvironmentVariables),
@@ -1019,8 +1058,80 @@ namespace Iciclecreek.Terminal
             };
             _cursorBlinkTimer.Tick += OnCursorBlinkTick;
 
+            // The animation clock. The emulator owns no timer -- it is driven entirely by Write --
+            // so somebody has to tell it how much time has gone by, and that is a job for the side
+            // with a render loop. It only runs while something is actually animating; see
+            // SyncAnimationClock.
+            _animationTimer = new DispatcherTimer
+            {
+                Interval = TimeSpan.FromMilliseconds(AnimationTickMilliseconds)
+            };
+            _animationTimer.Tick += OnAnimationTick;
+
             // Initialize IME client
             _inputMethodClient = new TerminalInputMethodClient(this);
+        }
+
+        /// <summary>
+        /// How often the animation clock ticks, in milliseconds.
+        /// </summary>
+        /// <remarks>
+        /// Finer than any plausible frame gap, because the emulator advances by ELAPSED time rather
+        /// than one frame per tick -- so this bounds the jitter of a frame change, not the speed the
+        /// animation runs at. A slow tick makes a 40ms animation stutter; it does not make it slow.
+        /// </remarks>
+        private const int AnimationTickMilliseconds = 16;
+
+        private DispatcherTimer _animationTimer;
+
+        /// <summary>
+        /// Elapsed time since the last animation tick.
+        /// </summary>
+        /// <remarks>
+        /// A stopwatch rather than two readings of the wall clock, because the wall clock is not
+        /// monotonic: an NTP correction stepping it backwards would hand the emulator a negative
+        /// interval to advance by. Nothing here needs to know what time it is, only how much of it
+        /// has gone by, which is the question a stopwatch answers.
+        /// </remarks>
+        private readonly Stopwatch _animationClock = new();
+
+        /// <summary>
+        /// Starts or stops the animation clock to match whether anything is animating.
+        /// </summary>
+        /// <remarks>
+        /// Called after output is processed, which is the only moment an animation can start or
+        /// stop. A terminal showing nothing but text keeps no timer running at all.
+        /// </remarks>
+        private void SyncAnimationClock()
+        {
+            var wanted = _terminal.HasRunningAnimations();
+
+            if (wanted == _animationTimer.IsEnabled)
+                return;
+
+            if (wanted)
+            {
+                // Reset the clock rather than counting the idle time: an animation started after a
+                // quiet minute should begin at its first frame, not a minute into itself.
+                _animationClock.Restart();
+                _animationTimer.Start();
+            }
+            else
+            {
+                _animationTimer.Stop();
+            }
+        }
+
+        private void OnAnimationTick(object? sender, EventArgs e)
+        {
+            var elapsed = _animationClock.Elapsed;
+            _animationClock.Restart();
+
+            if (_terminal.AdvanceAnimations(elapsed))
+                this.RequestInvalidate();
+
+            // An animation that ran out of loops stops on its own, so the clock has to notice.
+            SyncAnimationClock();
         }
 
         private void OnTerminalDirectoryChanged(object? sender, TerminalEvents.DirectoryChangeEventArgs e)
@@ -1552,11 +1663,22 @@ namespace Iciclecreek.Terminal
             {
                 _cursorBlinkTimer.Start();
             }
+
+            // And the animation clock, which OnUnloaded stopped. Output is the only other thing
+            // that starts it, so without this a view detached and re-attached -- a tab switched
+            // away and back -- comes back with its animation frozen until something writes, which
+            // at an idle prompt is never.
+            SyncAnimationClock();
         }
 
         private void OnUnloaded(object? sender, RoutedEventArgs e)
         {
             _cursorBlinkTimer.Stop();
+
+            // A view off the tree has nothing to repaint, and a timer left running would hold it
+            // alive through the dispatcher and go on advancing frames nobody can see.
+            _animationTimer.Stop();
+
             _isSelecting = false;
             _pendingSelectionStart = null;
         }
@@ -3765,12 +3887,35 @@ namespace Iciclecreek.Terminal
                 };
 
                 // Merged by the PTY layer into the environment the child would otherwise inherit, so a caller
-                // adding one variable does not have to rebuild the rest. Left unset when null so the launch
-                // path is byte-for-byte what it was before this existed.
-                if (EnvironmentVariables != null)
-                {
-                    options.Environment = EnvironmentVariables;
-                }
+                // adding one variable does not have to rebuild the rest.
+                //
+                // TERM is set here because nothing else sets it. The PTY layer does not, and on Windows the
+                // environment has none to inherit, so the child was being launched with TERM absent entirely
+                // -- which every curses-based program then has to guess around. `ucs-detect` reported this
+                // terminal as "vtwin10", which is not something the terminal said: it is blessed's Windows
+                // fallback for "no TERM, assume a Win10 console", and it costs the program every capability
+                // it would otherwise have used.
+                //
+                // xterm-256color and not xterm-kitty. TERM is a claim about the WHOLE terminal, and
+                // xterm-kitty asserts the keyboard protocol, notifications, text sizing and clipboard as well
+                // as the graphics. The keyboard protocol matters most: it changes how applications SEND input,
+                // so claiming it without answering risks breaking key handling to win a format negotiation
+                // that already falls back correctly.
+                var environment = EnvironmentVariables is null
+                    ? new Dictionary<string, string>()
+                    : new Dictionary<string, string>(EnvironmentVariables);
+
+                if (!environment.ContainsKey("TERM"))
+                    environment["TERM"] = DefaultTermType;
+
+                // COLORTERM alongside it, because TERM cannot carry this. A terminfo entry describes an
+                // indexed palette, so xterm-256color says "256 colours" and a program quantises to them --
+                // this terminal takes full RGB, and that would be discarding colour it could have shown.
+                // It is the first thing consulted by everything that looks, ahead of terminfo entirely.
+                if (!environment.ContainsKey("COLORTERM"))
+                    environment["COLORTERM"] = DefaultColorTerm;
+
+                options.Environment = environment;
 
 
                 // Add arguments if provided
@@ -4060,6 +4205,11 @@ namespace Iciclecreek.Terminal
 
                     // Notify IME of cursor position change after terminal processes data
                     Dispatcher.UIThread.Post(() => _inputMethodClient?.NotifyCursorRectangleChanged());
+
+                    // Output is the only thing that can start or stop an animation, and the clock is
+                    // a dispatcher timer, so the decision has to be made on the UI thread. The check
+                    // behind it is a walk of a list that is empty for a terminal showing text.
+                    Dispatcher.UIThread.Post(SyncAnimationClock);
 
                     this.RequestInvalidate();
                 }
@@ -4464,8 +4614,8 @@ namespace Iciclecreek.Terminal
                     if (run.Background is not null)
                         context.FillRectangle(run.Background, rect);
 
-                    if (run.Image is not null)
-                        DrawImageRun(context, run, screenY, startYPos, scale);
+                    if (run.IsImage)
+                        DrawImageRun(context, run, startYPos, rowHeight, scale);
                     else if (run.Text is not null)
                         context.DrawText(run.Text, position);
                 }
@@ -4474,6 +4624,24 @@ namespace Iciclecreek.Terminal
 
             // Build and cache text runs for this line
             textRuns = new List<CachedTextRun>();
+
+            // The line's own runs, back to front. Every picture on the line is already one run per
+            // line, so there is nothing to collect and nothing to coalesce -- the emulator's storage
+            // is the draw list, and each run is a single blit.
+            //
+            // Runs are drawn in the order they are added, so appending the ones behind the text,
+            // then the text, then the ones in front is what makes the layers composite: a
+            // translucent picture blends over whatever was drawn under it.
+            var placements = OrderedPlacements(line);
+            var nextPlacement = 0;
+            var painted = new List<XT.Graphics.LinePlacement>();
+
+            for (; nextPlacement < placements.Count && placements[nextPlacement].ZIndex < 0; nextPlacement++)
+            {
+                AppendImageRun(context, line, placements[nextPlacement], startYPos, rowHeight, scale,
+                               textRuns, painted);
+                painted.Add(placements[nextPlacement]);
+            }
 
             for (int x = 0; x < _terminal.Cols;)
             {
@@ -4484,12 +4652,10 @@ namespace Iciclecreek.Terminal
                 int cellCount = 0;
                 int runStartX = 0;
 
-                // A cell showing part of a picture is a space as far as its content goes, so it would otherwise
-                // be swept into the text run beside it and never drawn. Take it first, and take as many adjacent
-                // tiles as belong to the same strip: one DrawImage per row of a picture rather than one per cell.
-                if (cell.Image is not null)
+                // Nothing is drawn where a Sixel covers, because a Sixel REPLACED what was there.
+                if (CoveredBySixel(line, x))
                 {
-                    x = AppendImageRun(context, line, x, screenY, startYPos, rowHeight, scale, textRuns);
+                    x++;
                     continue;
                 }
 
@@ -4523,13 +4689,11 @@ namespace Iciclecreek.Terminal
 
                         // Stop if we hit a different attribute or a placeholder cell mid-run.
                         //
-                        // Also stop at a cell showing part of a picture. Those hold a space and usually the
-                        // same attributes as the text beside them, so without this they are collected into
-                        // the run as blanks and the picture is never drawn — but only when the run happens to
-                        // start on text, which is what makes it look like an intermittent fault rather than a
-                        // missing case.
-                        if (currentCell.Width != 1 || currentCell.Attributes != cell.Attributes ||
-                            currentCell.Image is not null)
+                        // A KITTY picture is no reason to stop: it is an overlay, the cell under it
+                        // still carries whatever was printed there, and the z-index decides which of
+                        // them a viewer sees. A SIXEL is not -- see CoveredBySixel.
+                        if (currentCell.Width != 1 || currentCell.Attributes != cell.Attributes
+                            || CoveredBySixel(line, x))
                             break;
                         textBuilder.Append(currentCell.Content);
                         cellCount += currentCell.Width;
@@ -4588,67 +4752,116 @@ namespace Iciclecreek.Terminal
                 context.DrawText(formattedText, position);
             }
 
+            // And the pictures that cover the text, still back to front, now that it is down.
+            for (; nextPlacement < placements.Count; nextPlacement++)
+            {
+                AppendImageRun(context, line, placements[nextPlacement], startYPos, rowHeight, scale,
+                               textRuns, painted);
+                painted.Add(placements[nextPlacement]);
+            }
+
             // Cache the text runs (but not when ReverseVideo mode is active)
             if (!_terminal.ReverseVideo)
                 line.Cache = textRuns;
         }
 
         /// <summary>
-        /// Collects the run of image tiles starting at <paramref name="x"/>, draws it, and adds it to the row's
-        /// cache.
+        /// A line's picture runs, ordered back to front.
         /// </summary>
-        /// <returns>The column after the run.</returns>
         /// <remarks>
-        /// Cells continue a run while they show the next tile along of the same picture. Comparing the image by
-        /// reference is what keeps two pictures that happen to sit side by side apart, and comparing the tile
-        /// coordinates is what stops a run being drawn across a gap where something was typed over the middle of
-        /// one.
+        /// <para>Z-index first, then age, age being the order the emulator added the runs to the
+        /// line. <c>OrderBy</c> is stable, so sorting on z alone leaves equal depths in the order
+        /// they arrived — which is Kitty's rule that the placement made later is drawn on top.</para>
+        /// <para>Nothing is collected or coalesced: a picture is already one run per line, so the
+        /// emulator's storage IS the draw list and each run is a single blit. The list is copied
+        /// only because it has to be sorted, and only on a line that has a picture on it.</para>
         /// </remarks>
-        private int AppendImageRun(DrawingContext context, BufferLine line, int x, int screenY,
-                                   double startYPos, double rowHeight, double scale, List<CachedTextRun> textRuns)
+        private static List<XT.Graphics.LinePlacement> OrderedPlacements(BufferLine line)
         {
-            var first = line[x];
-            var image = first.Image!;
-            var tileRow = first.ImageRow;
-            var tileCol = first.ImageCol;
-            var runStartX = x;
+            if (!line.HasImages)
+                return EmptyPlacements;
 
-            int cellCount = 0;
-            while (x < line.Length && x < _terminal.Cols)
+            var placements = line.Placements;
+            if (placements.Count == 1)
+                return new List<XT.Graphics.LinePlacement>(placements);
+
+            return placements.OrderBy(p => p.ZIndex).ToList();
+        }
+
+        private static readonly List<XT.Graphics.LinePlacement> EmptyPlacements = new();
+
+        /// <summary>
+        /// The image a run shows, found among the ones its line holds.
+        /// </summary>
+        /// <remarks>
+        /// A run names its picture by id rather than holding it, because the line owns the pixels and
+        /// its death is what releases them. A line holds one or two images, so this is a scan of a
+        /// list that is almost always length one.
+        /// </remarks>
+        private static XT.Graphics.TerminalImage? ImageFor(BufferLine line, XT.Graphics.LinePlacement placement)
+        {
+            foreach (var image in line.Images)
             {
-                var current = line[x];
-                if (!ReferenceEquals(current.Image, image) ||
-                    current.ImageRow != tileRow ||
-                    current.ImageCol != tileCol + cellCount)
-                    break;
-
-                cellCount++;
-                x++;
+                if (image.Id == placement.ImageId)
+                    return image;
             }
 
-            // Cannot happen -- the cell this was entered on matches by construction -- but a run of no cells
-            // would return x unadvanced and hang the caller's loop, which is too grim a failure to leave to
-            // reasoning about an invariant three call sites away.
-            if (cellCount == 0)
-                return x + 1;
+            return null;
+        }
 
-            // Image cells carry the pen that was active when the picture was placed, so a cell with a background
-            // of its own still paints it — underneath, where a transparent Sixel lets it through.
+        /// <summary>
+        /// Draws one picture run and adds it to the row's cache.
+        /// </summary>
+        /// <remarks>
+        /// One blit per run, which is one per row of a picture. There is no coalescing to do and no
+        /// tile arithmetic left: the run already carries the source rectangle and the columns it
+        /// covers, so the whole strip goes down in a single call.
+        /// </remarks>
+        private void AppendImageRun(DrawingContext context, BufferLine line,
+                                    XT.Graphics.LinePlacement placement,
+                                    double startYPos, double rowHeight, double scale,
+                                    List<CachedTextRun> textRuns,
+                                    List<XT.Graphics.LinePlacement> alreadyPainted)
+        {
+            var image = ImageFor(line, placement);
+            if (image is null)
+                return;
+
+            // Cols is the picture's NATURAL width and is deliberately not clipped by the emulator, so
+            // the clipping happens here: a narrow window shows less of the picture and a wider one
+            // shows more, without anything having been destroyed in between.
+            var start = Math.Max(0, placement.Column);
+            var end = Math.Min(placement.EndColumn, Math.Min(line.Length, _terminal.Cols));
+            var cellCount = end - start;
+            if (cellCount <= 0)
+                return;
+
+            // The cell's own background goes under the picture, which is what a Sixel drawn with
+            // background select 1 needs: its unset pixels are transparent and the cell colour is
+            // meant to show through them.
+            //
+            // Only where nothing has painted it already. Runs are drawn back to front, so a nearer
+            // picture repainting the background would erase the one behind it rather than blend over
+            // it -- which is the whole of what overlapping placements are for.
+            var first = line[start];
             var background = first.GetBackgroundBrush(_palette, this.Background);
-            var fill = first.GetBackgroundColor(_palette).HasValue ? background : null;
+            var fill = first.GetBackgroundColor(_palette).HasValue
+                       && !OverlapsAny(alreadyPainted, start, end)
+                       ? background
+                       : null;
 
-            var run = new CachedTextRun(null, runStartX, cellCount, fill, image, tileCol, tileRow);
+            var run = new CachedTextRun(null, start, cellCount, fill, placement, image);
             textRuns.Add(run);
 
             if (fill is not null)
             {
-                var startX = Snap(runStartX * _charWidth, scale);
-                var endX = Snap((runStartX + cellCount) * _charWidth, scale);
-                context.FillRectangle(fill, new Rect(startX, startYPos, Math.Max(0, endX - startX), rowHeight));
+                var fillStart = Snap(start * _charWidth, scale);
+                var fillEnd = Snap(end * _charWidth, scale);
+                context.FillRectangle(fill, new Rect(fillStart, startYPos,
+                                                     Math.Max(0, fillEnd - fillStart), rowHeight));
             }
 
-            DrawImageRun(context, run, screenY, startYPos, scale);
-            return x;
+            DrawImageRun(context, run, startYPos, rowHeight, scale);
         }
 
         /// <summary>
@@ -4661,12 +4874,13 @@ namespace Iciclecreek.Terminal
         /// destination is scaled by how much of one the source actually holds -- stretching a half-tile over a
         /// whole cell is the difference between a picture and a smeared one.
         /// </remarks>
-        private void DrawImageRun(DrawingContext context, CachedTextRun run, int screenY, double startYPos, double scale)
+        private void DrawImageRun(DrawingContext context, CachedTextRun run,
+                                  double startYPos, double rowHeight, double scale)
         {
             if (_imageRenderingUnavailable)
                 return;
 
-            if (!TryPlanImageBlit(run, screenY, startYPos, _charWidth, _charHeight, scale,
+            if (!TryPlanImageBlit(run, startYPos, rowHeight, _charWidth, _charHeight, scale,
                                   out var source, out var destination))
                 return;
 
@@ -4716,81 +4930,162 @@ namespace Iciclecreek.Terminal
             => exception is NotImplementedException or PlatformNotSupportedException or NotSupportedException;
 
         /// <summary>
-        /// Works out which pixels of a picture go where on screen for one run of tiles.
+        /// Whether any run drawn earlier on this line covers part of this one's span.
+        /// </summary>
+        /// <remarks>
+        /// <para>What decides whether a run paints the cell background under itself. Runs go down
+        /// back to front, so a nearer picture repainting the background would erase the one behind
+        /// it rather than blend over it — which is the whole of what overlapping placements buy.
+        /// </para>
+        /// <para>The whole span rather than the columns actually uncovered, because the run's fill
+        /// is what its CACHED form replays: a rectangle over the run. A partial overlap therefore
+        /// costs the upper run's spare columns their background, which errs toward leaving a picture
+        /// alone rather than painting over one.</para>
+        /// </remarks>
+        /// <summary>
+        /// Whether a Sixel covers this column, and so has replaced whatever text was under it.
+        /// </summary>
+        /// <remarks>
+        /// <para>The one place the two protocols have to be told apart. A Kitty placement is an
+        /// OVERLAY: the cell keeps its character, both are drawn, and the z-index decides which one
+        /// is seen. A Sixel is CONTENT: it replaced what was there, which is why the emulator splits
+        /// a Sixel run when something prints over it and leaves a Kitty run alone.</para>
+        /// <para>The emulator does not clear the cells a Sixel covers -- placing one only adds a run
+        /// -- so they keep whatever was on screen beforehand. Drawing them puts that text under the
+        /// picture: invisible beneath an opaque one, and showing through a Sixel drawn with
+        /// background select 1, whose unset pixels are transparent so that the cell's own colour
+        /// comes through. The cell's colour, not the previous screen's text.</para>
+        /// </remarks>
+        private static bool CoveredBySixel(BufferLine line, int column)
+        {
+            if (!line.HasImages)
+                return false;
+
+            foreach (var placement in line.Placements)
+            {
+                if (placement.Kind == XT.Graphics.PlacementKind.Sixel && placement.Covers(column))
+                    return true;
+            }
+
+            return false;
+        }
+
+        private static bool OverlapsAny(List<XT.Graphics.LinePlacement> earlier, int start, int end)
+        {
+            foreach (var placement in earlier)
+            {
+                if (placement.Column < end && placement.EndColumn > start)
+                    return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Works out which pixels of a picture a run shows and where on screen they go.
         /// </summary>
         /// <remarks>
         /// <para>Separated from the drawing so the arithmetic can be asserted directly. It is the part with
         /// something to get wrong, and it cannot be observed through a rendered frame: the headless platform's
         /// recording context throws from DrawImage.</para>
-        /// <para>The destination comes off the cell grid rather than the picture's own pixel size, so an image
-        /// stays locked to the text it was placed among after a font or DPI change has moved the grid. Edge
-        /// tiles hold only part of a cell, so the destination is scaled by how much of one the source actually
-        /// covers -- stretching a half tile across a whole cell is the difference between a picture and a
-        /// smeared one.</para>
+        /// <para>The destination comes off the cell grid rather than the picture's own pixel size, so an
+        /// image stays locked to the text it was placed among after a font or DPI change has moved the
+        /// grid.</para>
+        /// <para>A run's <c>Cols</c> is its natural width and the caller has already clipped the columns to
+        /// what the line can show, so the SOURCE has to be narrowed by the same proportion — otherwise a
+        /// narrow window would squeeze the whole picture into fewer cells instead of showing less of it.</para>
         /// </remarks>
-        internal static bool TryPlanImageBlit(CachedTextRun run, int screenY, double startYPos,
+        internal static bool TryPlanImageBlit(CachedTextRun run, double startYPos, double rowHeight,
                                               double charWidth, double charHeight, double scale,
                                               out Rect source, out Rect destination)
         {
             source = default;
             destination = default;
 
-            var image = run.Image;
-            if (image is null || run.CellCount <= 0 || charWidth <= 0 || charHeight <= 0)
+            if (run.Placement is not { } placement || run.Image is null)
+                return false;
+            if (run.CellCount <= 0 || charWidth <= 0 || charHeight <= 0)
+                return false;
+            if (placement.Cols <= 0 || placement.SrcWidth <= 0 || placement.SrcHeight <= 0)
                 return false;
 
-            if (!image.TryGetTileSource(run.TileCol, run.TileRow, out var sourceX, out var sourceY, out _, out var sourceHeight))
+            // How much of the run's natural width is actually being drawn, and the slice of the
+            // source that corresponds to it.
+            var shown = Math.Min(run.CellCount, placement.Cols);
+            var sourceWidth = (double)placement.SrcWidth * shown / placement.Cols;
+            if (sourceWidth <= 0)
                 return false;
 
-            // The run's width in source pixels, clipped at the right edge of the picture.
-            var sourceWidth = Math.Min(run.CellCount * image.CellWidth, image.PixelWidth - sourceX);
-            if (sourceWidth <= 0 || sourceHeight <= 0)
-                return false;
+            // The offsets shift the picture inside its first cell without enlarging the box, so what
+            // overflows the last cell is clipped. They are in image pixels, and the cell they shift
+            // within is a screen cell, so they cross over as a fraction of one.
+            var cell = run.Image.CellWidth > 0 ? run.Image.CellWidth : 1;
+            var cellHigh = run.Image.CellHeight > 0 ? run.Image.CellHeight : 1;
+            var offsetX = placement.OffsetX / (double)cell * charWidth;
+            var offsetY = placement.OffsetY / (double)cellHigh * charHeight;
 
-            var cellsWide = sourceWidth / (double)image.CellWidth;
-            var cellsHigh = sourceHeight / (double)image.CellHeight;
+            var startX = Snap(run.StartX * charWidth + offsetX, scale);
+            var endX = Snap((run.StartX + shown) * charWidth + offsetX, scale);
+            var topY = offsetY > 0 ? Snap(startYPos + offsetY, scale) : startYPos;
+            var endY = Snap(startYPos + offsetY + rowHeight, scale);
 
-            // Snapped the same way every other coordinate in this renderer is, or the picture shears against the
-            // grid by a fraction of a pixel per row.
-            var startX = Snap(run.StartX * charWidth, scale);
-            var endX = Snap((run.StartX + cellsWide) * charWidth, scale);
-            var endY = Snap((screenY + cellsHigh) * charHeight, scale);
-
-            destination = new Rect(startX, startYPos,
-                                   Math.Max(0, endX - startX),
-                                   Math.Max(0, endY - startYPos));
+            destination = new Rect(startX, topY, Math.Max(0, endX - startX), Math.Max(0, endY - topY));
             if (destination.Width <= 0 || destination.Height <= 0)
             {
                 destination = default;
                 return false;
             }
 
-            source = new Rect(sourceX, sourceY, sourceWidth, sourceHeight);
+            source = new Rect(placement.SrcX, placement.SrcY, sourceWidth, placement.SrcHeight);
             return true;
         }
 
         /// <summary>
         /// Gets the bitmap for a picture, uploading its pixels the first time it is seen.
         /// </summary>
-        private Bitmap? GetOrCreateBitmap(XT.Graphics.TerminalImage image)
+        /// <remarks>
+        /// Internal rather than private so the cache rule can be asserted directly. It cannot be
+        /// observed through a rendered frame -- the headless platform's recording context throws
+        /// from DrawImage -- and "re-uploads when the frame changes, and only then" is exactly the
+        /// kind of rule that silently stops holding.
+        /// </remarks>
+        internal Bitmap? GetOrCreateBitmap(XT.Graphics.TerminalImage image)
         {
             // A cached null is a remembered failure — worth keeping, so a picture that cannot be uploaded is not
             // retried thirty times a second.
             if (_imageBitmaps.TryGetValue(image, out var existing))
-                return existing.Bitmap;
+            {
+                // An animated picture changes under a cache keyed on the image. The emulator bumps a
+                // serial whenever the visible pixels move, so comparing that is enough to spot a
+                // stale upload without comparing the pixels themselves. A still picture never moves,
+                // and its serial stays zero, so this costs it an integer comparison per frame.
+                if (existing.FrameSerial == image.FrameSerial)
+                    return existing.Bitmap;
 
-            Bitmap? bitmap = null;
+                try { existing.Bitmap?.Dispose(); } catch { /* already gone; nothing to salvage */ }
+
+                existing.Bitmap = TryCreateBitmap(image);
+                existing.FrameSerial = image.FrameSerial;
+                return existing.Bitmap;
+            }
+
+            var bitmap = TryCreateBitmap(image);
+            _imageBitmaps.Add(image, new CachedBitmap { Bitmap = bitmap, FrameSerial = image.FrameSerial });
+            return bitmap;
+        }
+
+        /// <summary>Uploads a picture's current pixels, or remembers that it cannot be done.</summary>
+        private static Bitmap? TryCreateBitmap(XT.Graphics.TerminalImage image)
+        {
             try
             {
-                bitmap = CreateBitmap(image);
+                return CreateBitmap(image);
             }
             catch (Exception ex)
             {
                 Debug.WriteLine($"[TerminalView] could not upload image {image.Id}: {ex.Message}");
+                return null;
             }
-
-            _imageBitmaps.Add(image, new CachedBitmap { Bitmap = bitmap });
-            return bitmap;
         }
 
         /// <summary>
@@ -4853,8 +5148,13 @@ namespace Iciclecreek.Terminal
         {
             // The decoder hands over a plain array in the layout the bitmap wants, so this is a copy rather
             // than a conversion.
-            if (!MemoryMarshal.TryGetArray(image.Pixels, out ArraySegment<byte> source))
-                source = new ArraySegment<byte>(image.Pixels.ToArray());
+            //
+            // CurrentPixels rather than Pixels: for an animation those are the frame being shown, and for
+            // a still picture they are the same array. Uploading Pixels instead would draw every animation
+            // frozen on its first frame, which looks like the clock never firing rather than like the wrong
+            // buffer being read.
+            if (!MemoryMarshal.TryGetArray(image.CurrentPixels, out ArraySegment<byte> source))
+                source = new ArraySegment<byte>(image.CurrentPixels.ToArray());
 
             var sourceStride = image.Stride;
             if (destinationRowBytes == sourceStride)
