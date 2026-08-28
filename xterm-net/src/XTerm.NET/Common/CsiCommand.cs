@@ -86,7 +86,13 @@ public enum CsiCommand
     /// Scroll Up (CSI S).
     /// </summary>
     ScrollUp,
-    
+
+    /// <summary>
+    /// Graphics Attributes (XTSMGRAPHICS, CSI ? Pi ; Pa ; Pv S). Shares its final character with
+    /// <see cref="ScrollUp"/> and is a separate command, not a variant of it.
+    /// </summary>
+    GraphicsAttributes,
+
     /// <summary>
     /// Scroll Down (CSI T).
     /// </summary>
@@ -110,10 +116,10 @@ public enum CsiCommand
     TabClear,
     
     /// <summary>
-    /// Device Attributes (CSI c).
+    /// Device Attributes (CSI c is the primary request, CSI &gt; c the secondary).
     /// </summary>
     DeviceAttributes,
-    
+
     /// <summary>
     /// Line Position Absolute (CSI d).
     /// </summary>
@@ -173,6 +179,26 @@ public enum CsiCommand
     /// Request Mode (DECRQM, CSI ? Ps $ p) — asks whether a mode is supported and what it is set to.
     /// </summary>
     RequestMode,
+
+    /// <summary>
+    /// Set Kitty keyboard protocol flags (CSI = Ps ; Pm u).
+    /// </summary>
+    KittyKeyboardSet,
+
+    /// <summary>
+    /// Query Kitty keyboard protocol flags (CSI ? u) — the terminal answers CSI ? flags u.
+    /// </summary>
+    KittyKeyboardQuery,
+
+    /// <summary>
+    /// Push Kitty keyboard flags onto the stack and set new ones (CSI > Ps u).
+    /// </summary>
+    KittyKeyboardPush,
+
+    /// <summary>
+    /// Pop Kitty keyboard flags from the stack (CSI < Ps u).
+    /// </summary>
+    KittyKeyboardPop,
 
     /// <summary>
     /// Unknown or unsupported command.

@@ -44,6 +44,7 @@ public class RequestModeTests
         (int)TerminalMode.ShowCursor,
         (int)TerminalMode.ReverseWraparound,
         (int)TerminalMode.AppKeypad,
+        (int)TerminalMode.LeftRightMargin,
         (int)TerminalMode.SixelDisplayMode,
         (int)TerminalMode.SixelPrivateColorRegisters,
         (int)TerminalMode.SixelCursorRight,
