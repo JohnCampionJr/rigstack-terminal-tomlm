@@ -3511,31 +3511,64 @@ public class InputHandler
     }
 
     /// <summary>
-    /// DECRQM — reports whether a mode is recognised and what it is set to.
+    /// DECRQM — reports whether a DEC private mode is recognised and what it is set to.
     /// </summary>
-    /// <remarks>
-    /// <para>This is how an application finds out whether synchronized output is worth using: it
-    /// asks, and a terminal that says nothing is one that does not support the query. Emitting the
-    /// mode without answering for it would leave well-behaved applications never using it.</para>
-    /// <para>Deliberately answers for 2026 alone. The reply codes distinguish "set" and "reset" from
-    /// "not recognised", and this terminal keeps mode state as individual properties rather than a
-    /// registry — so answering for everything would mean a switch mapping every mode back to its
-    /// property, and getting one wrong tells an application a feature is missing when it is not.
-    /// Staying silent for the rest is exactly the behaviour before this change, so nothing regresses
-    /// while the one mode that needs an answer gets a correct one.</para>
-    /// </remarks>
     private void HandleRequestMode(Params parameters, bool isPrivate)
     {
         if (!isPrivate)
             return;
 
         var mode = parameters.GetParam(0, 0);
-        if (mode != (int)TerminalMode.SynchronizedOutput)
+        if (!TryGetPrivateModeState(mode, out var set))
             return;
 
         // DECRPM: 1 = set, 2 = reset.
-        var state = _terminal.SynchronizedOutput ? 1 : 2;
+        var state = set ? 1 : 2;
         _terminal.RaiseDataReceived($"\u001b[?{mode};{state}$y");
+    }
+
+    private bool TryGetPrivateModeState(int mode, out bool set)
+    {
+        var mouseTracker = _terminal.GetMouseTracker();
+        switch (mode)
+        {
+            case (int)TerminalMode.AppCursorKeys:
+                set = _terminal.ApplicationCursorKeys;
+                return true;
+            case (int)TerminalMode.Origin:
+                set = _terminal.OriginMode;
+                return true;
+            case (int)TerminalMode.Wraparound:
+                set = _terminal.Options.Wraparound;
+                return true;
+            case (int)TerminalMode.ShowCursor:
+                set = _terminal.CursorVisible;
+                return true;
+            case (int)TerminalMode.MouseReportNormal:
+                set = mouseTracker.TrackingMode == MouseTrackingMode.VT200;
+                return true;
+            case (int)TerminalMode.MouseReportButtonEvent:
+                set = mouseTracker.TrackingMode == MouseTrackingMode.ButtonEvent;
+                return true;
+            case (int)TerminalMode.MouseReportAnyEvent:
+                set = mouseTracker.TrackingMode == MouseTrackingMode.AnyEvent;
+                return true;
+            case (int)TerminalMode.MouseReportSgr:
+                set = mouseTracker.Encoding == MouseEncoding.SGR;
+                return true;
+            case (int)TerminalMode.AltBufferFull:
+                set = _terminal.IsAlternateBufferActive;
+                return true;
+            case (int)TerminalMode.BracketedPasteMode:
+                set = _terminal.BracketedPasteMode;
+                return true;
+            case (int)TerminalMode.SynchronizedOutput:
+                set = _terminal.SynchronizedOutput;
+                return true;
+            default:
+                set = false;
+                return false;
+        }
     }
 
     private void SetCSIModeParameters(Params parameters, bool isPrivate)
