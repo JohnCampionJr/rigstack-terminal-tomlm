@@ -61,6 +61,10 @@ public static class CsiCommandExtensions
         { "s", CsiCommand.SaveCursorAnsi },
         { "t", CsiCommand.WindowManipulation },
         { "u", CsiCommand.RestoreCursorAnsi },
+        { "=u", CsiCommand.KittyKeyboardSet },    // Kitty keyboard protocol - set flags
+        { "?u", CsiCommand.KittyKeyboardQuery },  // Kitty keyboard protocol - query flags
+        { ">u", CsiCommand.KittyKeyboardPush },   // Kitty keyboard protocol - push flags
+        { "<u", CsiCommand.KittyKeyboardPop },    // Kitty keyboard protocol - pop flags
         { " q", CsiCommand.SelectCursorStyle },
         { "$p", CsiCommand.RequestMode },   // DECRQM - ANSI mode
         { "?$p", CsiCommand.RequestMode },  // DECRQM - DEC private mode

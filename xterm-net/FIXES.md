@@ -729,9 +729,14 @@ new one for every final character the two namespaces share.
 ## What is mapped now
 
 Private identifiers are listed explicitly: `?J` (DECSED), `?K` (DECSEL), `?S` (XTSMGRAPHICS), `?h`
-(DECSET), `?l` (DECRST), `?n` (DEC DSR), `>c` (secondary DA) and `?$p` (private DECRQM). `?c` was
-dropped: `CSI ? c` is not a sequence, and answering it as a secondary DA was an artefact of the
-stripping rather than a decision.
+(DECSET), `?l` (DECRST), `?n` (DEC DSR), `>c` (secondary DA), `?$p` (private DECRQM) and the four
+Kitty keyboard forms `=u`, `?u`, `>u` and `<u`. `?c` was dropped: `CSI ? c` is not a sequence, and
+answering it as a secondary DA was an artefact of the stripping rather than a decision.
+
+The Kitty keyboard protocol landed on `main` while this branch was open, and it is the case that
+shows why an exact match is the right shape: `?u` and `>u` are the query and the push, `<u` is the
+pop, and each is a different command from `u` (RESTORE CURSOR). Under the old lookup two of them
+moved the cursor and the third was silently unknown.
 
 `XTSMGRAPHICS` gets its own `CsiCommand.GraphicsAttributes` instead of borrowing `ScrollUp`, so the
 dispatcher no longer needs to re-decide which command it is holding.

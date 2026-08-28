@@ -48,8 +48,10 @@ public class PrivateCsiDispatchTests
     }
 
     /// <summary>
-    /// The Kitty keyboard protocol. Both the push ("CSI &gt; 1 u") and the query ("CSI ? u") used
-    /// to land on RESTORE CURSOR and teleport the cursor to wherever it was last saved.
+    /// The Kitty keyboard protocol. The push ("CSI &gt; 1 u") and the query ("CSI ? u") used to
+    /// land on RESTORE CURSOR and teleport the cursor to wherever it was last saved. They now
+    /// reach the Kitty handler, which does not touch the cursor -- and neither does the pop
+    /// ("CSI &lt; u"), whose marker was never stripped.
     /// </summary>
     [Theory]
     [InlineData(">1u")]

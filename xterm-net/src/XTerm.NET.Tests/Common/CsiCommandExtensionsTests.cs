@@ -39,6 +39,10 @@ public class CsiCommandExtensionsTests
     [InlineData("?n", CsiCommand.DeviceStatusReport)] // DEC DSR
     [InlineData(">c", CsiCommand.DeviceAttributes)]   // DA2
     [InlineData("?$p", CsiCommand.RequestMode)]       // DECRQM, private
+    [InlineData("=u", CsiCommand.KittyKeyboardSet)]   // Kitty keyboard, set flags
+    [InlineData("?u", CsiCommand.KittyKeyboardQuery)] // Kitty keyboard, query flags
+    [InlineData(">u", CsiCommand.KittyKeyboardPush)]  // Kitty keyboard, push flags
+    [InlineData("<u", CsiCommand.KittyKeyboardPop)]   // Kitty keyboard, pop flags
     public void ToCsiCommand_MapsExplicitPrivateIdentifiers(string identifier, CsiCommand command)
     {
         Assert.Equal(command, identifier.ToCsiCommand());
@@ -49,8 +53,6 @@ public class CsiCommandExtensionsTests
     /// command the old strip-then-match lookup ran instead.
     /// </summary>
     [Theory]
-    [InlineData("?u")]  // Kitty keyboard query -> restored the cursor
-    [InlineData(">u")]  // Kitty keyboard push -> restored the cursor
     [InlineData("?s")]  // XTSAVE -> saved the cursor
     [InlineData("?r")]  // XTRESTORE -> reset the scroll region and homed the cursor
     [InlineData(">m")]  // XTMODKEYS -> applied its arguments as SGR
@@ -65,10 +67,15 @@ public class CsiCommandExtensionsTests
         Assert.Equal(CsiCommand.Unknown, identifier.ToCsiCommand());
     }
 
-    /// <summary>'&lt;' and '=' were never stripped, and are still not recognised.</summary>
+    /// <summary>
+    /// '&lt;' and '=' were never stripped, so they are recognised only where the map lists them --
+    /// the Kitty keyboard pop and set forms, and nothing else.
+    /// </summary>
     [Theory]
-    [InlineData("<u")]
     [InlineData("=c")]
+    [InlineData("<c")]
+    [InlineData("=S")]
+    [InlineData("<m")]
     public void ToCsiCommand_OtherPrivateMarkers_ReturnUnknown(string identifier)
     {
         Assert.Equal(CsiCommand.Unknown, identifier.ToCsiCommand());
