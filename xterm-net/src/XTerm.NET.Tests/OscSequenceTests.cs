@@ -364,6 +364,27 @@ public class OscSequenceTests
     }
 
     [Fact]
+    public void OscKittyClipboard_WriteAlias_RaisesRequestWithTargetData()
+    {
+        // Arrange
+        var terminal = CreateTerminal();
+        var requests = new List<TerminalEvents.ClipboardWriteEventArgs>();
+        terminal.ClipboardWriteRequested += (_, e) => requests.Add(e);
+
+        // Act
+        terminal.Write("\x1B]5522;type=write\x1B\\");
+        terminal.Write("\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;dGV4dA==\x1B\\");
+        terminal.Write("\x1B]5522;type=walias:mime=dGV4dC9wbGFpbg==;VVRGOF9TVFJJTkc=\x1B\\");
+        terminal.Write("\x1B]5522;type=wdata\x1B\\");
+
+        // Assert
+        Assert.Collection(
+            requests,
+            request => { Assert.Equal("text/plain", request.MimeType); Assert.Equal("text", request.Text); },
+            request => { Assert.Equal("UTF8_STRING", request.MimeType); Assert.Equal("text", request.Text); });
+    }
+
+    [Fact]
     public void OscKittyClipboard_WriteError_EchoesIdAndIgnoresStrayData()
     {
         // Arrange

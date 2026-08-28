@@ -20,6 +20,7 @@ public class InputHandler
     private readonly Dictionary<CharsetMode, Dictionary<char, string>?> _charsets;
     private Dictionary<string, List<byte>>? _kittyClipboardData;
     private Dictionary<string, StringBuilder>? _kittyClipboardBase64;
+    private List<(string Alias, string Target)>? _kittyClipboardAliases;
     private string? _kittyClipboardTarget;
     private string? _kittyClipboardMimeType;
     private string? _kittyClipboardId;
@@ -2596,6 +2597,7 @@ public class InputHandler
 
         _kittyClipboardData = [];
         _kittyClipboardBase64 = [];
+        _kittyClipboardAliases = [];
         _kittyClipboardTarget = target;
         _kittyClipboardId = id;
     }
@@ -2617,8 +2619,24 @@ public class InputHandler
                 return;
             }
 
+            foreach (var (alias, target) in _kittyClipboardAliases!)
+            {
+                if (!_kittyClipboardData.ContainsKey(target))
+                {
+                    ResetKittyClipboard();
+                    RaiseKittyClipboardResponse("write", "EINVAL", id);
+                    return;
+                }
+            }
             foreach (var (completedMimeType, clipboardData) in _kittyClipboardData)
                 _terminal.RaiseClipboardWriteRequested(_kittyClipboardTarget!, completedMimeType, [.. clipboardData]);
+            foreach (var (alias, target) in _kittyClipboardAliases)
+            {
+                if (_kittyClipboardData.TryGetValue(target, out var clipboardData))
+                {
+                    _terminal.RaiseClipboardWriteRequested(_kittyClipboardTarget!, alias, [.. clipboardData]);
+                }
+            }
             ResetKittyClipboard();
             RaiseKittyClipboardResponse("write", "DONE", id);
             return;
@@ -2646,6 +2664,13 @@ public class InputHandler
         var base64 = base64Chunks.GetValueOrDefault(mimeType);
         if (base64 is null)
         {
+            if (TransferSize + mimeType.Length + ClipboardEntryOverhead > MaxClipboardBytes)
+            {
+                var id = _kittyClipboardId;
+                ResetKittyClipboard();
+                RaiseKittyClipboardResponse("write", "EFBIG", id);
+                return;
+            }
             base64 = new StringBuilder();
             base64Chunks[mimeType] = base64;
             _kittyClipboardData![mimeType] = [];
@@ -2663,7 +2688,7 @@ public class InputHandler
             _kittyClipboardData[mimeType].AddRange(chunk);
             base64.Clear();
         }
-        else if (base64.Length > MaxClipboardBytes * 4 / 3 + 4)
+        else if (TransferSize > MaxClipboardBytes * 4 / 3 + 4)
         {
             var id = _kittyClipboardId;
             ResetKittyClipboard();
@@ -2675,6 +2700,11 @@ public class InputHandler
     }
 
     private long MaxClipboardBytes => Math.Max(1, _terminal.Options.MaxClipboardBytes);
+    private const int ClipboardEntryOverhead = 256;
+    private long TransferSize =>
+        _kittyClipboardData!.Values.Sum(data => (long)data.Count)
+        + _kittyClipboardBase64!.Values.Sum(data => (long)data.Length)
+        + _kittyClipboardAliases!.Sum(alias => (long)alias.Alias.Length + alias.Target.Length + ClipboardEntryOverhead);
 
     private void HandleKittyClipboardRead(string target, string id, string? payload)
     {
@@ -2725,13 +2755,27 @@ public class InputHandler
         if (_kittyClipboardData is null || payload is null
             || !TryGetKittyMetadataValue(metadata, "mime", out var encodedMime)
             || !TryDecodeBase64(encodedMime, out var mimeBytes)
-            || !TryGetMimeType(mimeBytes, out _)
-            || !TryDecodeBase64(payload, out _))
+            || !TryGetMimeType(mimeBytes, out var target)
+            || !TryDecodeBase64(payload, out var aliasBytes))
         {
             var id = _kittyClipboardId;
             ResetKittyClipboard();
             RaiseKittyClipboardResponse("write", "EINVAL", id);
+            return;
         }
+
+        var aliases = Encoding.UTF8.GetString(aliasBytes).Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (aliases.Length == 0 || aliases.Any(alias => !TryGetMimeType(Encoding.UTF8.GetBytes(alias), out _))
+            || aliases.Any(alias => _kittyClipboardAliases!.Any(existing => existing.Alias == alias))
+            || TransferSize + aliases.Sum(alias => (long)alias.Length + ClipboardEntryOverhead) > MaxClipboardBytes)
+        {
+            var id = _kittyClipboardId;
+            ResetKittyClipboard();
+            RaiseKittyClipboardResponse("write", "EINVAL", id);
+            return;
+        }
+
+        _kittyClipboardAliases!.AddRange(aliases.Select(alias => (alias, target)));
     }
 
     private static bool TryParseKittyClipboardMetadata(string metadata, out string type, out string target, out string id)
@@ -2808,6 +2852,7 @@ public class InputHandler
     {
         _kittyClipboardData = null;
         _kittyClipboardBase64 = null;
+        _kittyClipboardAliases = null;
         _kittyClipboardTarget = null;
         _kittyClipboardMimeType = null;
         _kittyClipboardId = null;
