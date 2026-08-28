@@ -4072,17 +4072,20 @@ public class InputHandler
     }
 
     /// <summary>
-    /// DECRQM — reports whether a DEC private mode is recognised and what it is set to.
+    /// DECRQM — reports the current state of a private mode this terminal tracks, and answers
+    /// nothing for the rest.
     /// </summary>
     /// <remarks>
     /// <para>This is how an application finds out whether a feature is worth using: it asks, and a
     /// terminal that says nothing is one that does not support the query. Emitting a mode without
     /// answering for it would leave well-behaved applications never using it.</para>
-    /// <para>Answers for every private mode this terminal keeps state for, and stays silent for the
-    /// rest. Silence is what an unsupported query has always got here, and it is the honest answer
-    /// for the modes that are accepted but not stored — DECSET 8 (auto-repeat) and its like change
-    /// nothing, so there is no state to read back and a "reset" reply would be a guess. Telling an
-    /// application a mode is reset when it has just set it is worse than not replying at all.</para>
+    /// <para>The reply only ever carries 1 (set) or 2 (reset). DEC's other two values — 0 for "not
+    /// recognised" and 4 for "permanently reset" — are never sent, so a mode this terminal keeps no
+    /// state for is answered by silence rather than by a report. That costs an application asking
+    /// about such a mode its read timeout, where xterm replies 0 straight away, and it is
+    /// deliberate: see issue #55. Reporting "reset" for a mode that was accepted and ignored would
+    /// be worse, because an application that had just set it would be told its request did not
+    /// take.</para>
     /// </remarks>
     private void HandleRequestMode(Params parameters, bool isPrivate)
     {
