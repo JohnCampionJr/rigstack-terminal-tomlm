@@ -2704,6 +2704,7 @@ public class InputHandler
     private long TransferSize =>
         _kittyClipboardData!.Values.Sum(data => (long)data.Count)
         + _kittyClipboardBase64!.Values.Sum(data => (long)data.Length)
+        + _kittyClipboardData.Keys.Sum(mimeType => (long)mimeType.Length + ClipboardEntryOverhead)
         + _kittyClipboardAliases!.Sum(alias => (long)alias.Alias.Length + alias.Target.Length + ClipboardEntryOverhead);
 
     private void HandleKittyClipboardRead(string target, string id, string? payload)
@@ -2766,12 +2767,19 @@ public class InputHandler
 
         var aliases = Encoding.UTF8.GetString(aliasBytes).Split(' ', StringSplitOptions.RemoveEmptyEntries);
         if (aliases.Length == 0 || aliases.Any(alias => !TryGetMimeType(Encoding.UTF8.GetBytes(alias), out _))
-            || aliases.Any(alias => _kittyClipboardAliases!.Any(existing => existing.Alias == alias))
-            || TransferSize + aliases.Sum(alias => (long)alias.Length + ClipboardEntryOverhead) > MaxClipboardBytes)
+            || aliases.Any(alias => _kittyClipboardAliases!.Any(existing => existing.Alias == alias)))
         {
             var id = _kittyClipboardId;
             ResetKittyClipboard();
             RaiseKittyClipboardResponse("write", "EINVAL", id);
+            return;
+        }
+
+        if (TransferSize + aliases.Sum(alias => (long)alias.Length + target.Length + ClipboardEntryOverhead) > MaxClipboardBytes)
+        {
+            var id = _kittyClipboardId;
+            ResetKittyClipboard();
+            RaiseKittyClipboardResponse("write", "EFBIG", id);
             return;
         }
 

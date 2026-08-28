@@ -418,6 +418,40 @@ public class OscSequenceTests
     }
 
     [Fact]
+    public void OscKittyClipboard_AliasLimitReturnsEfbig()
+    {
+        // Arrange
+        var terminal = new Terminal(new TerminalOptions { MaxClipboardBytes = 1 });
+        string? response = null;
+        terminal.DataReceived += (_, e) => response = e.Data;
+
+        // Act
+        terminal.Write("\x1B]5522;type=write:id=w1\x1B\\");
+        terminal.Write("\x1B]5522;type=walias:mime=dGV4dC9wbGFpbg==;VVRGOF9TVFJJTkc=\x1B\\");
+
+        // Assert
+        Assert.Equal("\x1B]5522;type=write:status=EFBIG:id=w1\x1B\\", response);
+    }
+
+    [Fact]
+    public void OscKittyClipboard_MimeEntriesCountAgainstTransferLimit()
+    {
+        // Arrange
+        var terminal = new Terminal(new TerminalOptions { MaxClipboardBytes = 600 });
+        string? response = null;
+        terminal.DataReceived += (_, e) => response = e.Data;
+
+        // Act
+        terminal.Write("\x1B]5522;type=write:id=w1\x1B\\");
+        terminal.Write("\x1B]5522;type=wdata:mime=dGV4dC9h;\x1B\\");
+        terminal.Write("\x1B]5522;type=wdata:mime=dGV4dC9i;\x1B\\");
+        terminal.Write("\x1B]5522;type=wdata:mime=dGV4dC9j;\x1B\\");
+
+        // Assert
+        Assert.Equal("\x1B]5522;type=write:status=EFBIG:id=w1\x1B\\", response);
+    }
+
+    [Fact]
     public void OscKittyClipboard_Read_RequiresOptInAndReturnsHostData()
     {
         // Arrange
