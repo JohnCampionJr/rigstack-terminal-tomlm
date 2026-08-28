@@ -4072,47 +4072,171 @@ public class InputHandler
     }
 
     /// <summary>
-    /// DECRQM — reports whether a mode is recognised and what it is set to.
+    /// DECRQM — reports the current state of a mode this terminal tracks, and answers nothing for
+    /// the rest.
     /// </summary>
     /// <remarks>
-    /// <para>This is how an application finds out whether synchronized output is worth using: it
-    /// asks, and a terminal that says nothing is one that does not support the query. Emitting the
-    /// mode without answering for it would leave well-behaved applications never using it.</para>
-    /// <para>Deliberately answers only for the modes an application changes its behaviour on —
-    /// 2026 (synchronized output) and 69 (DECSLRM). The reply codes distinguish "set" and "reset"
-    /// from "not recognised", and this terminal keeps mode state as individual properties rather
-    /// than a registry — so answering for everything would mean a switch mapping every mode back to
-    /// its property, and getting one wrong tells an application a feature is missing when it is
-    /// not. Staying silent for the rest is exactly the behaviour before these modes were added, so
-    /// nothing regresses while the modes that need an answer get correct ones.</para>
+    /// <para>This is how an application finds out whether a feature is worth using: it asks, and a
+    /// terminal that says nothing is one that does not support the query. Emitting a mode without
+    /// answering for it would leave well-behaved applications never using it.</para>
+    /// <para>The reply only ever carries 1 (set) or 2 (reset). DEC's other two values — 0 for "not
+    /// recognised" and 4 for "permanently reset" — are never sent, so a mode this terminal keeps no
+    /// state for is answered by silence rather than by a report. That costs an application asking
+    /// about such a mode its read timeout, where xterm replies 0 straight away, and it is
+    /// deliberate: see issue #55. Reporting "reset" for a mode that was accepted and ignored would
+    /// be worse, because an application that had just set it would be told its request did not
+    /// take.</para>
+    /// <para>The private and ANSI forms are separate questions with separate answers — the private
+    /// report carries the '?' back, the ANSI one does not — so each has its own lookup.</para>
     /// </remarks>
     private void HandleRequestMode(Params parameters, bool isPrivate)
     {
-        if (!isPrivate)
-            return;
-
         var mode = parameters.GetParam(0, 0);
 
-        // DECRPM: 1 = set, 2 = reset.
-        int state;
-        switch ((TerminalMode)mode)
+        bool set;
+        if (isPrivate)
         {
-            case TerminalMode.SynchronizedOutput:
-                state = _terminal.SynchronizedOutput ? 1 : 2;
-                break;
-
-            // Worth answering, because an application that cannot ask will not use the feature: the
-            // whole point of DECSLRM is a layout that behaves differently when margins are available,
-            // and a well-behaved one checks before relying on them.
-            case TerminalMode.LeftRightMargin:
-                state = _terminal.LeftRightMarginMode ? 1 : 2;
-                break;
-
-            default:
+            if (!TryGetPrivateModeState(mode, out set))
                 return;
         }
+        else if (!TryGetAnsiModeState(mode, out set))
+        {
+            return;
+        }
 
-        _terminal.RaiseDataReceived($"\u001b[?{mode};{state}$y");
+        // DECRPM: 1 = set, 2 = reset. The marker is echoed back so the reply answers the question
+        // that was asked -- CSI ? 4 ; 1 $ y is DECSCLM, CSI 4 ; 1 $ y is IRM.
+        var state = set ? 1 : 2;
+        var marker = isPrivate ? "?" : string.Empty;
+        _terminal.RaiseDataReceived($"\u001b[{marker}{mode};{state}$y");
+    }
+
+    /// <summary>
+    /// Reads back the current state of a DEC private mode, or reports that this terminal keeps no
+    /// state for it.
+    /// </summary>
+    /// <remarks>
+    /// The mouse modes are the entries worth reading twice. Tracking level and encoding are each a
+    /// single selection rather than a set of independent flags — setting 1003 replaces 1002, and
+    /// resetting any of them returns the selection to none — so a mouse mode is "set" exactly when
+    /// it is the one currently selected. The three alternate-buffer modes all read the same flag,
+    /// because they differ only in the cursor and erase work they do on the way in and out.
+    /// </remarks>
+    private bool TryGetPrivateModeState(int mode, out bool set)
+    {
+        var mouseTracker = _terminal.GetMouseTracker();
+        switch (mode)
+        {
+            case (int)TerminalMode.AppCursorKeys:
+                set = _terminal.ApplicationCursorKeys;
+                return true;
+            case (int)TerminalMode.ReverseVideo:
+                set = _terminal.ReverseVideo;
+                return true;
+            case (int)TerminalMode.Origin:
+                set = _terminal.OriginMode;
+                return true;
+            case (int)TerminalMode.Wraparound:
+                set = _terminal.Options.Wraparound;
+                return true;
+            case (int)TerminalMode.ShowCursor:
+                set = _terminal.CursorVisible;
+                return true;
+            case (int)TerminalMode.ReverseWraparound:
+                set = _terminal.ReverseWraparound;
+                return true;
+            case (int)TerminalMode.AppKeypad:
+                set = _terminal.ApplicationKeypad;
+                return true;
+            // The whole point of DECSLRM is a layout that behaves differently when margins are
+            // available, and a well-behaved application checks before relying on them.
+            case (int)TerminalMode.LeftRightMargin:
+                set = _terminal.LeftRightMarginMode;
+                return true;
+            case (int)TerminalMode.SixelDisplayMode:
+                set = _terminal.SixelDisplayMode;
+                return true;
+            case (int)TerminalMode.SixelPrivateColorRegisters:
+                set = _terminal.SixelPrivateColorRegisters;
+                return true;
+            case (int)TerminalMode.SixelCursorRight:
+                set = _terminal.SixelCursorRight;
+                return true;
+            case (int)TerminalMode.MouseReportClick:
+                set = mouseTracker.TrackingMode == MouseTrackingMode.X10;
+                return true;
+            case (int)TerminalMode.MouseReportNormal:
+                set = mouseTracker.TrackingMode == MouseTrackingMode.VT200;
+                return true;
+            case (int)TerminalMode.MouseReportButtonEvent:
+                set = mouseTracker.TrackingMode == MouseTrackingMode.ButtonEvent;
+                return true;
+            case (int)TerminalMode.MouseReportAnyEvent:
+                set = mouseTracker.TrackingMode == MouseTrackingMode.AnyEvent;
+                return true;
+            case (int)TerminalMode.MouseReportUtf8:
+                set = mouseTracker.Encoding == MouseEncoding.Utf8;
+                return true;
+            case (int)TerminalMode.MouseReportSgr:
+                set = mouseTracker.Encoding == MouseEncoding.SGR;
+                return true;
+            case (int)TerminalMode.MouseReportUrxvt:
+                set = mouseTracker.Encoding == MouseEncoding.URXVT;
+                return true;
+            case (int)TerminalMode.SendFocusEvents:
+                set = _terminal.SendFocusEvents;
+                return true;
+            case (int)TerminalMode.AltBuffer:
+            case (int)TerminalMode.AltBufferCursor:
+            case (int)TerminalMode.AltBufferFull:
+                set = _terminal.IsAlternateBufferActive;
+                return true;
+            case (int)TerminalMode.EightBitInput:
+                set = _terminal.EightBitInput;
+                return true;
+            case (int)TerminalMode.MetaSendsEscape:
+                set = _terminal.MetaSendsEscape;
+                return true;
+            case (int)TerminalMode.AltSendsEscape:
+                set = _terminal.AltSendsEscape;
+                return true;
+            case (int)TerminalMode.BracketedPasteMode:
+                set = _terminal.BracketedPasteMode;
+                return true;
+            case (int)TerminalMode.SynchronizedOutput:
+                set = _terminal.SynchronizedOutput;
+                return true;
+            case (int)TerminalMode.Win32InputMode:
+                set = _terminal.Win32InputMode;
+                return true;
+            default:
+                set = false;
+                return false;
+        }
+    }
+
+    /// <summary>
+    /// Reads back the current state of an ANSI mode, or reports that this terminal keeps no state
+    /// for it.
+    /// </summary>
+    /// <remarks>
+    /// IRM is the one ANSI mode this terminal implements: SM 4 sets <see cref="Terminal.InsertMode"/>
+    /// and printing shifts the rest of the line right on the strength of it, so an application can
+    /// usefully ask about it. KAM, SRM and LNM are neither stored nor acted on and get the same
+    /// silence as an untracked private mode. Note the numbers overlap the private ones and mean
+    /// something else — 4 here is IRM, not DECSCLM — which is why this is a separate lookup.
+    /// </remarks>
+    private bool TryGetAnsiModeState(int mode, out bool set)
+    {
+        switch (mode)
+        {
+            case (int)TerminalMode.InsertMode:
+                set = _terminal.InsertMode;
+                return true;
+            default:
+                set = false;
+                return false;
+        }
     }
 
     /// <summary>
