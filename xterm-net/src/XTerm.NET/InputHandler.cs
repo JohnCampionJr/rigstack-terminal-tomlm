@@ -870,14 +870,17 @@ public class InputHandler
 
             case CsiCommand.SelectCursorStyle:
                 // "CSI > Ps q" is XTVERSION, not DECSCUSR. They share a final character, so ">q"
-                // is listed alongside "q" in the command map and the two are told apart here --
+                // is listed alongside " q" in the command map and the two are told apart here --
                 // without that a terminal version query reshaped the cursor instead of being
                 // answered, and a program that asks on startup left the user in a cursor they
-                // never chose.
+                // never chose. It is the one place a CsiCommand is deliberately shared by two
+                // sequences: the map decides everything else on the exact identifier.
                 //
-                // The marker itself is read rather than isPrivate, which is also true for '?': a
-                // "CSI ? Ps q" is neither of these sequences, and answering it as XTVERSION would
-                // be a second wrong reading of the same character.
+                // The marker is read rather than isPrivate because isPrivate is true for '?' as
+                // well as '>', and "CSI ? Ps q" is neither of these sequences. The map is what
+                // keeps it out -- "?q" is not a key, so it resolves to Unknown and never reaches
+                // this case. The switch below is defence in depth, not a live guard: the only
+                // identifiers that arrive are " q" and ">q".
                 switch (identifier.PrivateMarker())
                 {
                     case '>':
@@ -886,8 +889,9 @@ public class InputHandler
                     case '\0':
                         SelectCursorStyle(parameters);
                         break;
-                    // Any other marker is a sequence we do not implement. Ignored, since the
-                    // alternative is reshaping the cursor on some unrelated query's behalf.
+                    // Unreachable while the map lists only those two. Falling through rather than
+                    // defaulting to SelectCursorStyle means a marked form added to the map later
+                    // is ignored instead of reshaping the cursor on some unrelated query's behalf.
                 }
                 break;
 
