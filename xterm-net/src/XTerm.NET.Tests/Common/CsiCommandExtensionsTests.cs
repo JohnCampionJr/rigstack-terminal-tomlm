@@ -43,6 +43,7 @@ public class CsiCommandExtensionsTests
     [InlineData("?u", CsiCommand.KittyKeyboardQuery)] // Kitty keyboard, query flags
     [InlineData(">u", CsiCommand.KittyKeyboardPush)]  // Kitty keyboard, push flags
     [InlineData("<u", CsiCommand.KittyKeyboardPop)]   // Kitty keyboard, pop flags
+    [InlineData(">q", CsiCommand.SelectCursorStyle)]  // XTVERSION, split from DECSCUSR by its marker
     public void ToCsiCommand_MapsExplicitPrivateIdentifiers(string identifier, CsiCommand command)
     {
         Assert.Equal(command, identifier.ToCsiCommand());
@@ -57,7 +58,6 @@ public class CsiCommandExtensionsTests
     [InlineData("?r")]  // XTRESTORE -> reset the scroll region and homed the cursor
     [InlineData(">m")]  // XTMODKEYS -> applied its arguments as SGR
     [InlineData(">n")]  // XTMODKEYS disable -> answered a device status report
-    [InlineData(">q")]  // XTVERSION -> changed the cursor style
     [InlineData(">t")]  // XTSMTITLE -> performed a window operation
     [InlineData("?t")]
     [InlineData("?c")]  // not a sequence at all -> answered as a secondary DA

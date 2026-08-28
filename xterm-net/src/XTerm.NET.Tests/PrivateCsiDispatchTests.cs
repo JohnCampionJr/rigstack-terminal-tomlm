@@ -206,7 +206,12 @@ public class PrivateCsiDispatchTests
 
         terminal.Write($"{Esc}[>c");
 
-        Assert.Equal($"{Esc}[>0;10;0c", Assert.Single(replies));
+        // What the reply says is the DA handler's business and is asserted in InputHandlerTests.
+        // All this test cares about is that ">c" still reaches it once the marker is no longer
+        // stripped, so it checks only that the answer is shaped like a secondary DA.
+        var reply = Assert.Single(replies);
+        Assert.StartsWith($"{Esc}[>", reply);
+        Assert.EndsWith("c", reply);
     }
 
     [Fact]
