@@ -720,18 +720,31 @@ programs emit at startup:
 | `CSI ? Pm r` | XTRESTORE, restores private modes | SET SCROLLING REGION with the mode number as a row, then home |
 | `CSI > Ps q` | XTVERSION, "what terminal are you" | DECSCUSR — changed the cursor shape |
 | `CSI > Ps t` | XTSMTITLE, title reporting | XTWINOPS — `CSI > 2 t` minimised the window |
+| `CSI > Pm T` | XTRESTTITLE, restores a saved title | SCROLL DOWN — the screen jumped |
 
-XTSMGRAPHICS had already been patched in the dispatcher, with an `isPrivate` check inside the
-SCROLL UP case. That fixed the one symptom anyone had noticed and left the other six, which is the
-argument for fixing the lookup rather than the case: the aliasing is the defect, and it produces a
-new one for every final character the two namespaces share.
+Three of these had already been patched one at a time in the dispatcher: XTSMGRAPHICS with an
+`isPrivate` check inside the SCROLL UP case, then XTVERSION (#63) and the `?c` / `=c` device
+attributes case (#64) with marker checks of their own. Each fixed the symptom someone had noticed
+and left the rest, which is the argument for fixing the lookup rather than the cases: the aliasing
+is the defect, and it produces a new one for every final character the two namespaces share.
 
 ## What is mapped now
 
 Private identifiers are listed explicitly: `?J` (DECSED), `?K` (DECSEL), `?S` (XTSMGRAPHICS), `?h`
-(DECSET), `?l` (DECRST), `?n` (DEC DSR), `>c` (secondary DA), `?$p` (private DECRQM) and the four
-Kitty keyboard forms `=u`, `?u`, `>u` and `<u`. `?c` was dropped: `CSI ? c` is not a sequence, and
-answering it as a secondary DA was an artefact of the stripping rather than a decision.
+(DECSET), `?l` (DECRST), `?n` (DEC DSR), `>c` (secondary DA), `?$p` (private DECRQM), `>q`
+(XTVERSION) and the four Kitty keyboard forms `=u`, `?u`, `>u` and `<u`. `?c` was dropped:
+`CSI ? c` is not a sequence, and answering it as a secondary DA was an artefact of the stripping
+rather than a decision.
+
+`>q` is the one entry that deliberately shares a `CsiCommand` with another sequence — it maps to
+`SelectCursorStyle` and `InputHandler` splits XTVERSION back out on the marker. See below for why
+it is treated differently from XTSMGRAPHICS. It is load-bearing: delete the row and three
+`VersionReportTests` go red.
+
+The exact match runs on the intermediate bytes as well as the marker, so `q` is not a key either:
+the bare `CSI Ps q` is DECLL (Load LEDs), which is not implemented, and DECSCUSR is the `" q"` form
+that carries the SP intermediate. Mapping both to `SelectCursorStyle` meant an application clearing
+its LEDs got a blinking cursor.
 
 The Kitty keyboard protocol landed on `main` while this branch was open, and it is the case that
 shows why an exact match is the right shape: `?u` and `>u` are the query and the push, `<u` is the
@@ -739,7 +752,14 @@ pop, and each is a different command from `u` (RESTORE CURSOR). Under the old lo
 moved the cursor and the third was silently unknown.
 
 `XTSMGRAPHICS` gets its own `CsiCommand.GraphicsAttributes` instead of borrowing `ScrollUp`, so the
-dispatcher no longer needs to re-decide which command it is holding.
+dispatcher no longer re-decides that one on a flag. `>q` is the deliberate exception, and it is the
+only place left where the dispatcher looks at the identifier again. The difference is what the
+re-decision is made on: XTSMGRAPHICS was split from SCROLL UP by an `isPrivate` flag, which is true
+for `?` and `>` alike and so cannot tell two markers apart, while `>q` is split by
+`identifier.PrivateMarker()`, which names the exact byte the map matched on. Reading the marker is
+the same decision the map makes, taken one step later; reading a flag is a different and weaker
+one. A `CsiCommand.ReportVersion` member would work too — the two-arm switch was preferred because
+it sits next to the DECSCUSR call it exists to not make.
 
 ## Files changed
 
