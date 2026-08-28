@@ -53,7 +53,7 @@ jobs:
   # default branch's context with no github.event.pull_request at all, and its
   # workflow_run.pull_requests[] is empty for FORK pull requests -- which is most of them -- so
   # the base sha and PR number this job depends on would both be missing exactly when needed.
-  compare:
+  perf:
     needs: build
     # Nothing to compare a push against: base.sha is empty outside a pull request, and the
     # HEAD~1 fallback below would measure main against its own previous commit on every merge.
