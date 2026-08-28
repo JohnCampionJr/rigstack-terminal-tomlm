@@ -126,6 +126,31 @@ public class PrivateCsiDispatchTests
     }
 
     /// <summary>
+    /// DECLL, "CSI Ps q", loads the keyboard LEDs. It is the same aliasing on the intermediate-byte
+    /// axis rather than the marker axis: DECSCUSR is "CSI Ps SP q" and the bare final character used
+    /// to be mapped to it as well, so an application clearing its LEDs on startup got a blinking
+    /// cursor it never asked for. Nothing here implements DECLL; it is ignored.
+    /// </summary>
+    [Fact]
+    public void Decll_does_not_change_the_cursor_style()
+    {
+        var (terminal, replies) = Listening();
+        terminal.Write($"{Esc}[2 q"); // steady block
+
+        terminal.Write($"{Esc}[0q"); // DECLL 0 -- clear all LEDs
+
+        Assert.Equal(CursorStyle.Block, terminal.Options.CursorStyle);
+        Assert.False(terminal.Options.CursorBlink);
+        Assert.Empty(replies);
+
+        // The form that carries the SP intermediate is still DECSCUSR, so the guard above is
+        // testing the intermediate and not a cursor style that stopped working.
+        terminal.Write($"{Esc}[5 q");
+        Assert.Equal(CursorStyle.Bar, terminal.Options.CursorStyle);
+        Assert.True(terminal.Options.CursorBlink);
+    }
+
+    /// <summary>
     /// XTSMTITLE sets how window titles are reported. Read as XTWINOPS, "CSI &gt; 2 t" minimised
     /// the window instead.
     /// </summary>

@@ -68,6 +68,17 @@ public class CsiCommandExtensionsTests
     }
 
     /// <summary>
+    /// The same aliasing on the intermediate-byte axis. DECSCUSR is "CSI Ps SP q" and is mapped as
+    /// " q"; the bare final character is DECLL, a sequence this terminal does not implement, and
+    /// mapping it to DECSCUSR as well turned "clear the LEDs" into "blink the cursor".
+    /// </summary>
+    [Fact]
+    public void ToCsiCommand_BareQ_IsDecllAndReturnsUnknown()
+    {
+        Assert.Equal(CsiCommand.Unknown, "q".ToCsiCommand());
+    }
+
+    /// <summary>
     /// '&lt;' and '=' were never stripped, so they are recognised only where the map lists them --
     /// the Kitty keyboard pop and set forms, and nothing else.
     /// </summary>
