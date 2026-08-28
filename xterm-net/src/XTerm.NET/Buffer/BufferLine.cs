@@ -27,6 +27,11 @@ public class BufferLine : IEnumerable<BufferCell>
     private List<LineMark>? _marks;
 
     /// <summary>
+    /// OSC 8 link spans on this line, or null — which is nearly every line.
+    /// </summary>
+    private List<LineHyperlink>? _links;
+
+    /// <summary>
     /// The images those runs refer to, held strongly so they stay alive exactly as long as this line
     /// does — so a picture scrolled off the end of the scrollback dies with the last line showing it,
     /// with no eviction pass and nothing to keep in step with a buffer that scrolls.
@@ -383,6 +388,110 @@ public class BufferLine : IEnumerable<BufferCell>
     /// <summary>Drops every mark. Only line reuse does this; see <see cref="ResetInPlace"/>.</summary>
     internal void ClearMarks() => _marks = null;
 
+    /// <summary>Whether this line carries any OSC 8 link span.</summary>
+    public bool HasLinks => _links is { Count: > 0 };
+
+    /// <summary>The link spans on this line, left to right.</summary>
+    public IReadOnlyList<LineHyperlink> Links
+        => (IReadOnlyList<LineHyperlink>?)_links ?? Array.Empty<LineHyperlink>();
+
+    /// <summary>
+    /// The link covering <paramref name="column"/>, if any. What hit-testing a click asks.
+    /// </summary>
+    public bool TryGetLinkAt(int column, out LineHyperlink link)
+    {
+        if (_links is not null)
+        {
+            for (int i = 0; i < _links.Count; i++)
+            {
+                if (_links[i].Covers(column))
+                {
+                    link = _links[i];
+                    return true;
+                }
+            }
+        }
+
+        link = default;
+        return false;
+    }
+
+    /// <summary>Drops every link span. Only line reuse does this.</summary>
+    internal void ClearLinks() => _links = null;
+
+    /// <summary>
+    /// Records what a write of <paramref name="count"/> columns at <paramref name="column"/> did to
+    /// this line's links: extended one, started one, or took those columns out of one.
+    /// </summary>
+    /// <remarks>
+    /// <para>Called from the print paths rather than from <c>SetCell</c>, because only the printer
+    /// knows whether a link was in force for the text it just wrote — the cell itself carries
+    /// nothing about it, which is the point.</para>
+    /// <para>Guard the call, not just the body: callers test
+    /// <c>url is not null || line.HasLinks</c> first, so a line with no links being written without
+    /// one costs a field read rather than a call. That method is too big to inline, and the same
+    /// mistake cost the alt-redraw corpus 12% earlier in this project's history.</para>
+    /// </remarks>
+    internal void NoteLinkRun(int column, int count, string? url, string? id)
+    {
+        if (count <= 0)
+            return;
+
+        if (url is null)
+        {
+            SplitLinksOver(column, count);
+            return;
+        }
+
+        // Join a span that continues the one before it, so a link reads as one run rather than one
+        // per character. Only the last is worth testing: printing moves left to right.
+        if (_links is { Count: > 0 })
+        {
+            var last = _links[^1];
+            if (last.EndColumn == column && last.SameLinkAs(url, id))
+            {
+                _links[^1] = new LineHyperlink(last.Column, last.Cols + count, url, id);
+                return;
+            }
+        }
+
+        // Anything already claiming these columns loses them -- text written over a link is not
+        // part of it, even when a different link is being written.
+        SplitLinksOver(column, count);
+
+        _links ??= new List<LineHyperlink>(1);
+        _links.Add(new LineHyperlink(column, count, url, id));
+    }
+
+    /// <summary>
+    /// Takes a written span out of any link covering it, splitting one that was written through.
+    /// </summary>
+    private void SplitLinksOver(int column, int count)
+    {
+        if (_links is null)
+            return;
+
+        var end = column + count;
+
+        for (int i = _links.Count - 1; i >= 0; i--)
+        {
+            var link = _links[i];
+            if (link.Column >= end || link.EndColumn <= column)
+                continue;
+
+            _links.RemoveAt(i);
+
+            if (link.Column < column)
+                _links.Insert(i, new LineHyperlink(link.Column, column - link.Column, link.Url, link.Id));
+
+            if (link.EndColumn > end)
+                _links.Add(new LineHyperlink(end, link.EndColumn - end, link.Url, link.Id));
+        }
+
+        if (_links.Count == 0)
+            _links = null;
+    }
+
     /// <summary>
     /// The distinct images this line shows.
     /// </summary>
@@ -666,6 +775,8 @@ public class BufferLine : IEnumerable<BufferCell>
         // end of the scrollback from ever being collected — the one thing line ownership exists to
         // guarantee.
         ClearImages();
+
+        ClearLinks();
 
         // And the marks. A recycled line is a NEW line -- the ring hands back the object it is about
         // to drop, so anything left on it would reappear as history that never happened, a prompt

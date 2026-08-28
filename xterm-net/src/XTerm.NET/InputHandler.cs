@@ -313,6 +313,8 @@ public class InputHandler
         if (cell.CodePoint is var cp && IsRegionalIndicator(cp))
             _regionalPending = (_buffer.Y + _buffer.YBase, _buffer.X, _buffer.X + width);
 
+        NoteLink(line, _buffer.X, width);
+
         // Use MoveCursor to allow X to be one past the last column (pending wrap)
         _buffer.SetCursorRaw(_buffer.X + width, _buffer.Y);
     }
@@ -416,6 +418,11 @@ public class InputHandler
 
             var take = Math.Min(_terminal.Cols - _buffer.X, data.Length);
             line.SetSingleWidthRun(_buffer.X, data[..take], _curAttr);
+
+            // This path bypasses Print, so it keeps the link bookkeeping itself -- otherwise a link
+            // would cover the text or not depending on which writer took it.
+            NoteLink(line, _buffer.X, take);
+
             _buffer.SetCursorRaw(_buffer.X + take, _buffer.Y);
 
             data = data[take..];
@@ -475,6 +482,9 @@ public class InputHandler
 
             var take = Math.Min(_terminal.Cols - _buffer.X, remaining);
             line.SetSingleWidthRun(_buffer.X, data.AsSpan(pos, take), _curAttr);
+
+            // As above: bypassing Print means keeping the link bookkeeping here as well.
+            NoteLink(line, _buffer.X, take);
 
             // SetCursorRaw, as Print uses, so X may land one past the last column pending a wrap.
             _buffer.SetCursorRaw(_buffer.X + take, _buffer.Y);
@@ -2335,6 +2345,34 @@ public class InputHandler
         _terminal.RaiseShellIntegrationMark(mark, exitCode);
     }
 
+    /// <summary>
+    /// The link in force, mirrored here from the terminal.
+    /// </summary>
+    /// <remarks>
+    /// Fields rather than a property call, because the print path reads this for every character it
+    /// writes and the answer is null for essentially all of them.
+    /// </remarks>
+    private string? _linkUrl;
+    private string? _linkId;
+
+    /// <summary>
+    /// Records what a write covered, for the link in force.
+    /// </summary>
+    /// <remarks>
+    /// Guarded at the CALL as well as inside, which is not a style preference: NoteLinkRun is too
+    /// big to inline, so without the test here every printed character would pay a real call to be
+    /// told there is no link and never has been. Exactly the shape that cost the alt-redraw corpus
+    /// 12% earlier in this project.
+    /// </remarks>
+    private void NoteLink(Buffer.BufferLine? line, int column, int count)
+    {
+        if (line is null)
+            return;
+
+        if (_linkUrl is not null || line.HasLinks)
+            line.NoteLinkRun(column, count, _linkUrl, _linkId);
+    }
+
     private void HandleHyperlink(string data)
     {
         // OSC 8 ; params ; URI ST
@@ -2352,12 +2390,16 @@ public class InputHandler
                 // End hyperlink
                 _terminal.CurrentHyperlink = null;
                 _terminal.HyperlinkId = null;
+                _linkUrl = null;
+                _linkId = null;
                 _terminal.RaiseHyperlinkChanged(null);
             }
             else
             {
                 // Start hyperlink
                 _terminal.CurrentHyperlink = uri;
+                _linkUrl = uri;
+                _linkId = null;
 
                 // Parse params for id= parameter
                 if (!string.IsNullOrEmpty(params_))
@@ -2368,6 +2410,7 @@ public class InputHandler
                         if (p.StartsWith("id="))
                         {
                             _terminal.HyperlinkId = p.Substring(3);
+                            _linkId = _terminal.HyperlinkId;
                         }
                     }
                 }
