@@ -18,6 +18,9 @@ public class InputHandler
     private Buffer.TerminalBuffer _buffer;
     private AttributeData _curAttr;
     private readonly Dictionary<CharsetMode, Dictionary<char, string>?> _charsets;
+    private StringBuilder? _kittyClipboardData;
+    private string? _kittyClipboardTarget;
+    private string? _kittyClipboardMimeType;
 
     /// <summary>
     /// The table _currentCharset resolves to, cached.
@@ -2199,6 +2202,10 @@ public class InputHandler
                     HandleClipboard(arg);
                     break;
 
+                case OscCommand.KittyClipboard:
+                    HandleKittyClipboard(arg);
+                    break;
+
                 case OscCommand.ResetColor:
                 case OscCommand.ResetForeground:
                 case OscCommand.ResetBackground:
@@ -2520,39 +2527,133 @@ public class InputHandler
 
     private void HandleClipboard(string data)
     {
-        // OSC 52 ; c ; data ST
-        // Example: OSC 52;c;base64data ST
         var parts = data.Split(new[] { ';' }, 2);
 
-        if (parts.Length >= 2)
-        {
-            var target = parts[0]; // Usually 'c' for clipboard, 'p' for primary
-            var clipdata = parts[1];
+        if (parts.Length != 2 || !IsValidClipboardTarget(parts[0]))
+            return;
 
-            if (clipdata == "?")
+        var target = parts[0];
+        var clipdata = parts[1];
+
+        if (clipdata == "?")
+        {
+            if (!_terminal.Options.ClipboardReadEnabled)
+                return;
+
+            var request = _terminal.RaiseClipboardReadRequested(target, "text/plain");
+            if (request.Data is not null)
+                _terminal.RaiseDataReceived($"\u001b]52;{target};{Convert.ToBase64String(request.Data)}\u0007");
+            return;
+        }
+
+        if (_terminal.Options.ClipboardWriteEnabled && TryDecodeBase64(clipdata, out var decoded))
+            _terminal.RaiseClipboardWriteRequested(target, "text/plain", decoded);
+    }
+
+    private void HandleKittyClipboard(string data)
+    {
+        var parts = data.Split(new[] { ';' }, 2);
+        if (parts.Length != 2 || !TryParseKittyClipboardMetadata(parts[0], out var type, out var target, out var mimeType))
+            return;
+
+        var payload = parts[1];
+        if (type == "read")
+        {
+            if (payload.Length != 0 || !_terminal.Options.ClipboardReadEnabled)
+                return;
+
+            var request = _terminal.RaiseClipboardReadRequested(target, mimeType);
+            if (request.Data is not null)
             {
-                // Query clipboard - respond with clipboard content
-                // Format: OSC 52 ; c ; base64data ST
-                // For security, many terminals don't support this
-                // We'll send an empty response
-                _terminal.RaiseDataReceived($"\u001b]52;{target};\u0007");
+                var responseMetadata = $"type=read:mime={mimeType}";
+                _terminal.RaiseDataReceived($"\u001b]5522;{responseMetadata};{Convert.ToBase64String(request.Data)}\u0007");
+                _terminal.RaiseDataReceived($"\u001b]5522;{responseMetadata};\u0007");
             }
-            else
+            return;
+        }
+
+        if (!_terminal.Options.ClipboardWriteEnabled)
+        {
+            ResetKittyClipboard();
+            return;
+        }
+
+        if (payload.Length == 0)
+        {
+            if (_kittyClipboardData is not null
+                && _kittyClipboardTarget == target
+                && _kittyClipboardMimeType == mimeType
+                && TryDecodeBase64(_kittyClipboardData.ToString(), out var decoded))
             {
-                // Set clipboard
-                try
-                {
-                    var decoded = Convert.FromBase64String(clipdata);
-                    var text = System.Text.Encoding.UTF8.GetString(decoded);
-                    // TODO: Integrate with system clipboard
-                    // For now, we just acknowledge receipt
-                }
-                catch
-                {
-                    // Invalid base64 or encoding
-                }
+                _terminal.RaiseClipboardWriteRequested(_kittyClipboardTarget!, _kittyClipboardMimeType!, decoded);
+            }
+            ResetKittyClipboard();
+            return;
+        }
+
+        if (_kittyClipboardData is not null
+            && (_kittyClipboardTarget != target || _kittyClipboardMimeType != mimeType))
+        {
+            ResetKittyClipboard();
+        }
+
+        _kittyClipboardData ??= new StringBuilder();
+        _kittyClipboardTarget = target;
+        _kittyClipboardMimeType = mimeType;
+        _kittyClipboardData.Append(payload);
+    }
+
+    private static bool TryParseKittyClipboardMetadata(string metadata, out string type, out string target, out string mimeType)
+    {
+        type = target = mimeType = string.Empty;
+        foreach (var item in metadata.Split(':', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var separator = item.IndexOf('=');
+            if (separator <= 0)
+                return false;
+
+            var key = item[..separator];
+            var value = item[(separator + 1)..];
+            switch (key)
+            {
+                case "type": type = value; break;
+                case "loc": target = value; break;
+                case "mime": mimeType = value; break;
             }
         }
+
+        target = string.IsNullOrEmpty(target) ? "c" : target;
+        mimeType = string.IsNullOrEmpty(mimeType) ? "text/plain" : mimeType;
+        return (type == "read" || type == "write")
+            && IsValidClipboardField(target)
+            && IsValidClipboardField(mimeType);
+    }
+
+    private static bool IsValidClipboardTarget(string target) =>
+        target.Length > 0 && target.All(c => c is 'c' or 'p' or 's');
+
+    private static bool IsValidClipboardField(string value) =>
+        value.Length > 0 && value.All(c => c is >= ' ' and <= '~' and not ';');
+
+    private static bool TryDecodeBase64(string data, out byte[] decoded)
+    {
+        try
+        {
+            decoded = Convert.FromBase64String(data);
+            return true;
+        }
+        catch (FormatException)
+        {
+            decoded = Array.Empty<byte>();
+            return false;
+        }
+    }
+
+    private void ResetKittyClipboard()
+    {
+        _kittyClipboardData = null;
+        _kittyClipboardTarget = null;
+        _kittyClipboardMimeType = null;
     }
 
     private void HandleColorReset(OscCommand command, string data)

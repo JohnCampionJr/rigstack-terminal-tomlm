@@ -1,5 +1,6 @@
 using XTerm;
 using XTerm.Common;
+using XTerm.Events;
 using XTerm.Options;
 
 namespace XTerm.Tests;
@@ -250,19 +251,23 @@ public class OscSequenceTests
     }
 
     [Fact]
-    public void OscClipboard_Query_RespondsWithEmptyData()
+    public void OscClipboard_Query_ReturnsHostDataWhenEnabled()
     {
         // Arrange
-        var terminal = CreateTerminal();
+        var terminal = new Terminal(new TerminalOptions
+        {
+            ClipboardReadEnabled = true
+        });
         string? response = null;
         terminal.DataReceived += (sender, e) => response = e.Data;
+        terminal.ClipboardReadRequested += (_, e) => e.Data = System.Text.Encoding.UTF8.GetBytes("Hello");
 
         // Act
         terminal.Write("\x1B]52;c;?\x07");
 
         // Assert
         Assert.NotNull(response);
-        Assert.Contains("]52;c;", response);
+        Assert.Equal("\x1B]52;c;SGVsbG8=\x07", response);
     }
 
     [Fact]
@@ -274,6 +279,86 @@ public class OscSequenceTests
 
         // Act & Assert - Should not throw
         terminal.Write($"\x1B]52;c;{base64Data}\x07");
+    }
+
+    [Fact]
+    public void OscKittyClipboard_WriteChunks_RaisesClipboardWriteRequested()
+    {
+        // Arrange
+        var terminal = CreateTerminal();
+        TerminalEvents.ClipboardWriteEventArgs? request = null;
+        terminal.ClipboardWriteRequested += (_, e) => request = e;
+
+        // Act
+        terminal.Write("\x1B]5522;type=write:mime=text/plain;aGV\x07");
+        terminal.Write("\x1B]5522;type=write:mime=text/plain;sbG8=\x07");
+        terminal.Write("\x1B]5522;type=write:mime=text/plain;\x07");
+
+        // Assert
+        Assert.NotNull(request);
+        Assert.Equal("c", request!.Target);
+        Assert.Equal("text/plain", request.MimeType);
+        Assert.Equal("hello", request.Text);
+    }
+
+    [Fact]
+    public void OscKittyClipboard_Write_PreservesMimeTypeAndBinaryData()
+    {
+        // Arrange
+        var terminal = CreateTerminal();
+        TerminalEvents.ClipboardWriteEventArgs? request = null;
+        terminal.ClipboardWriteRequested += (_, e) => request = e;
+
+        // Act
+        terminal.Write("\x1B]5522;type=write:mime=image/png;AP+A\x07");
+        terminal.Write("\x1B]5522;type=write:mime=image/png;\x07");
+
+        // Assert
+        Assert.NotNull(request);
+        Assert.Equal("image/png", request!.MimeType);
+        Assert.Equal([0x00, 0xFF, 0x80], request.Data);
+    }
+
+    [Fact]
+    public void OscKittyClipboard_Read_RequiresOptInAndReturnsHostData()
+    {
+        // Arrange
+        var terminal = new Terminal(new TerminalOptions
+        {
+            ClipboardReadEnabled = true
+        });
+        var responses = new List<string>();
+        terminal.DataReceived += (_, e) => responses.Add(e.Data);
+        terminal.ClipboardReadRequested += (_, e) => e.Data = System.Text.Encoding.UTF8.GetBytes("hello");
+
+        // Act
+        terminal.Write("\x1B]5522;type=read:mime=text/plain;\x07");
+
+        // Assert
+        Assert.Equal(
+            [
+                "\x1B]5522;type=read:mime=text/plain;aGVsbG8=\x07",
+                "\x1B]5522;type=read:mime=text/plain;\x07"
+            ],
+            responses);
+    }
+
+    [Fact]
+    public void OscKittyClipboard_ReadDisabled_DoesNotRequestOrRespond()
+    {
+        // Arrange
+        var terminal = CreateTerminal();
+        var requested = false;
+        var responded = false;
+        terminal.ClipboardReadRequested += (_, _) => requested = true;
+        terminal.DataReceived += (_, _) => responded = true;
+
+        // Act
+        terminal.Write("\x1B]5522;type=read:mime=text/plain;\x07");
+
+        // Assert
+        Assert.False(requested);
+        Assert.False(responded);
     }
 
     [Fact]

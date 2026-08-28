@@ -21,6 +21,40 @@ public static class TerminalEvents
     }
 
     /// <summary>
+    /// Clipboard data supplied by an application.
+    /// </summary>
+    public class ClipboardWriteEventArgs : EventArgs
+    {
+        public ClipboardWriteEventArgs(string target, string mimeType, byte[] data)
+        {
+            Target = target;
+            MimeType = mimeType;
+            Data = data;
+        }
+
+        public string Target { get; }
+        public string MimeType { get; }
+        public byte[] Data { get; }
+        public string Text => System.Text.Encoding.UTF8.GetString(Data);
+    }
+
+    /// <summary>
+    /// A request for clipboard data. Leave <see cref="Data"/> null to decline it.
+    /// </summary>
+    public class ClipboardReadEventArgs : EventArgs
+    {
+        public ClipboardReadEventArgs(string target, string mimeType)
+        {
+            Target = target;
+            MimeType = mimeType;
+        }
+
+        public string Target { get; }
+        public string MimeType { get; }
+        public byte[]? Data { get; set; }
+    }
+
+    /// <summary>
     /// Resize event - fired when the terminal is resized.
     /// </summary>
     public class ResizeEventArgs : EventArgs

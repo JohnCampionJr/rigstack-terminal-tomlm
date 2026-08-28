@@ -74,6 +74,12 @@ public enum OscCommand
     /// Format: OSC 52 ; c ; data ST
     /// </summary>
     Clipboard = 52,
+
+    /// <summary>
+    /// Kitty clipboard operations.
+    /// Format: OSC 5522 ; type=read|write:mime=type ; data ST
+    /// </summary>
+    KittyClipboard = 5522,
     
     /// <summary>
     /// Shell integration marks, FinalTerm/FTCS (OSC 133).

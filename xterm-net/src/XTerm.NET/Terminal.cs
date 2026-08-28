@@ -148,6 +148,16 @@ public class Terminal
     public event EventHandler<TerminalEvents.DataEventArgs>? DataReceived;
 
     /// <summary>
+    /// Fired when an application writes clipboard data through OSC 52 or Kitty OSC 5522.
+    /// </summary>
+    public event EventHandler<TerminalEvents.ClipboardWriteEventArgs>? ClipboardWriteRequested;
+
+    /// <summary>
+    /// Fired when an application requests clipboard data through OSC 52 or Kitty OSC 5522.
+    /// </summary>
+    public event EventHandler<TerminalEvents.ClipboardReadEventArgs>? ClipboardReadRequested;
+
+    /// <summary>
     /// Fired when the terminal title changes.
     /// </summary>
     public event EventHandler<TerminalEvents.TitleChangeEventArgs>? TitleChanged;
@@ -915,6 +925,16 @@ public class Terminal
     // Internal methods for raising events (called by InputHandler)
     internal void RaiseDataReceived(string data) => 
         DataReceived?.Invoke(this, new TerminalEvents.DataEventArgs(data));
+
+    internal void RaiseClipboardWriteRequested(string target, string mimeType, byte[] data) =>
+        ClipboardWriteRequested?.Invoke(this, new TerminalEvents.ClipboardWriteEventArgs(target, mimeType, data));
+
+    internal TerminalEvents.ClipboardReadEventArgs RaiseClipboardReadRequested(string target, string mimeType)
+    {
+        var args = new TerminalEvents.ClipboardReadEventArgs(target, mimeType);
+        ClipboardReadRequested?.Invoke(this, args);
+        return args;
+    }
     
     internal void RaiseTitleChanged(string title) => 
         TitleChanged?.Invoke(this, new TerminalEvents.TitleChangeEventArgs(title));
@@ -1177,6 +1197,8 @@ public class Terminal
 
         // Clear all event subscriptions
         DataReceived = null;
+        ClipboardWriteRequested = null;
+        ClipboardReadRequested = null;
         TitleChanged = null;
         BellRang = null;
         Resized = null;
