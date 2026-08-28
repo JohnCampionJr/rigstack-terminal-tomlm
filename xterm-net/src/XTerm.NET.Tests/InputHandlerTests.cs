@@ -15,13 +15,15 @@ public class InputHandlerTests
         return new Terminal(options);
     }
 
+    /// <summary>
+    /// The secondary DA reply the handler should send: terminal type 1 (VT220), the package
+    /// version flattened into one number, and no cartridge ROM.
+    /// </summary>
     private static string ExpectedSecondaryDeviceAttributes()
     {
         var version = typeof(InputHandler).Assembly.GetName().Version;
-        var firmwareVersion = version is null
-            ? "0"
-            : $"{version.Major}{version.Minor:D2}{Math.Max(version.Build, 0):D2}";
-        return $"\u001b[>41;{firmwareVersion};0c";
+        var firmwareVersion = version is null ? 0 : version.Major * 100 + version.Minor;
+        return $"\u001b[>1;{firmwareVersion};0c";
     }
 
     [Fact]
@@ -1099,11 +1101,11 @@ public class InputHandlerTests
         // Act
         handler.HandleCsi("c", params_);
 
-        // Assert - CSI ? 64 ; 1 ; 2 ; 4 ; 6 ; 9 ; 15 ; 21 ; 22 c: VT420 with Sixel and the
-        // capabilities this emulator actually implements.
-        // Attribute 4 is how libsixel-based programs decide whether to send a picture at all, so
-        // dropping it from this reply silently turns every image back into text art.
-        Assert.Equal("\u001b[?64;1;2;4;6;9;15;21;22c", receivedData);
+        // Assert - CSI ? 62 ; 4 ; 22 c: a VT220 with Sixel and ANSI colour, which is what the code
+        // in this repository actually implements. Attribute 4 is how libsixel-based programs decide
+        // whether to send a picture at all, so dropping it from this reply silently turns every
+        // image back into text art.
+        Assert.Equal("\u001b[?62;4;22c", receivedData);
     }
 
     [Fact]
@@ -1123,7 +1125,7 @@ public class InputHandlerTests
         handler.HandleCsi("c", params_);
 
         // Assert - claiming Sixel while it is switched off would send pictures we then drop
-        Assert.Equal("\u001b[?64;1;2;6;9;15;21;22c", receivedData);
+        Assert.Equal("\u001b[?62;22c", receivedData);
     }
 
     [Fact]
@@ -1141,8 +1143,52 @@ public class InputHandlerTests
         // Act - Use ">c" for secondary DA
         handler.HandleCsi(">c", params_);
 
-        // Assert - Should respond with CSI > 41 ; package-version ; 0 c
+        // Assert - CSI > 1 ; package-version ; 0 c. Terminal type 1 is a VT220, so it agrees with
+        // the 62 the primary reply sends; the old 0 said VT100 and contradicted it.
         Assert.Equal(ExpectedSecondaryDeviceAttributes(), receivedData);
+    }
+
+    [Theory]
+    [InlineData("c")]
+    [InlineData(">c")]
+    public void HandleCsi_DA_IgnoresNonZeroParameter(string identifier)
+    {
+        // Arrange
+        var terminal = CreateTerminal();
+        var handler = new InputHandler(terminal);
+        var params_ = new Params();
+        params_.AddParam(1);
+
+        string? receivedData = null;
+        terminal.DataReceived += (_, e) => receivedData = e.Data;
+
+        // Act
+        handler.HandleCsi(identifier, params_);
+
+        // Assert - a DA with a non-zero parameter is a reply, not a request. Two of these hooked
+        // up to each other answer each other forever.
+        Assert.Null(receivedData);
+    }
+
+    [Fact]
+    public void HandleCsi_DA_Tertiary_IsNotAnsweredWithThePrimaryReply()
+    {
+        // Arrange
+        var terminal = CreateTerminal();
+        var handler = new InputHandler(terminal);
+        var params_ = new Params();
+        params_.AddParam(0);
+
+        string? receivedData = null;
+        terminal.DataReceived += (_, e) => receivedData = e.Data;
+
+        // Act - "=c" is the tertiary DA, asking for a unit ID
+        handler.HandleCsi("=c", params_);
+
+        // Assert - it used to fall through to the primary reply, because "=" is not ">" and the
+        // handler only distinguished those two. Answering a question nobody asked is worse than
+        // staying quiet: the program reads a DA1 reply where it expected DECRPTUI.
+        Assert.Null(receivedData);
     }
 
     #endregion
