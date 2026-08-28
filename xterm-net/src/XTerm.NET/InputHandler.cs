@@ -4072,8 +4072,8 @@ public class InputHandler
     }
 
     /// <summary>
-    /// DECRQM — reports the current state of a private mode this terminal tracks, and answers
-    /// nothing for the rest.
+    /// DECRQM — reports the current state of a mode this terminal tracks, and answers nothing for
+    /// the rest.
     /// </summary>
     /// <remarks>
     /// <para>This is how an application finds out whether a feature is worth using: it asks, and a
@@ -4086,19 +4086,29 @@ public class InputHandler
     /// deliberate: see issue #55. Reporting "reset" for a mode that was accepted and ignored would
     /// be worse, because an application that had just set it would be told its request did not
     /// take.</para>
+    /// <para>The private and ANSI forms are separate questions with separate answers — the private
+    /// report carries the '?' back, the ANSI one does not — so each has its own lookup.</para>
     /// </remarks>
     private void HandleRequestMode(Params parameters, bool isPrivate)
     {
-        if (!isPrivate)
-            return;
-
         var mode = parameters.GetParam(0, 0);
-        if (!TryGetPrivateModeState(mode, out var set))
-            return;
 
-        // DECRPM: 1 = set, 2 = reset.
+        bool set;
+        if (isPrivate)
+        {
+            if (!TryGetPrivateModeState(mode, out set))
+                return;
+        }
+        else if (!TryGetAnsiModeState(mode, out set))
+        {
+            return;
+        }
+
+        // DECRPM: 1 = set, 2 = reset. The marker is echoed back so the reply answers the question
+        // that was asked -- CSI ? 4 ; 1 $ y is DECSCLM, CSI 4 ; 1 $ y is IRM.
         var state = set ? 1 : 2;
-        _terminal.RaiseDataReceived($"\u001b[?{mode};{state}$y");
+        var marker = isPrivate ? "?" : string.Empty;
+        _terminal.RaiseDataReceived($"\u001b[{marker}{mode};{state}$y");
     }
 
     /// <summary>
@@ -4198,6 +4208,30 @@ public class InputHandler
                 return true;
             case (int)TerminalMode.Win32InputMode:
                 set = _terminal.Win32InputMode;
+                return true;
+            default:
+                set = false;
+                return false;
+        }
+    }
+
+    /// <summary>
+    /// Reads back the current state of an ANSI mode, or reports that this terminal keeps no state
+    /// for it.
+    /// </summary>
+    /// <remarks>
+    /// IRM is the one ANSI mode this terminal implements: SM 4 sets <see cref="Terminal.InsertMode"/>
+    /// and printing shifts the rest of the line right on the strength of it, so an application can
+    /// usefully ask about it. KAM, SRM and LNM are neither stored nor acted on and get the same
+    /// silence as an untracked private mode. Note the numbers overlap the private ones and mean
+    /// something else — 4 here is IRM, not DECSCLM — which is why this is a separate lookup.
+    /// </remarks>
+    private bool TryGetAnsiModeState(int mode, out bool set)
+    {
+        switch (mode)
+        {
+            case (int)TerminalMode.InsertMode:
+                set = _terminal.InsertMode;
                 return true;
             default:
                 set = false;

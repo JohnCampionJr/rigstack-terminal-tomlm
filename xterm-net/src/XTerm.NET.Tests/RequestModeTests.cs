@@ -35,6 +35,9 @@ public class RequestModeTests
     /// <summary>The DECRPM report expected back for a mode in a given state: 1 is set, 2 is reset.</summary>
     private static string Report(int mode, bool set) => Esc.Csi($"?{mode};{(set ? 1 : 2)}$y");
 
+    /// <summary>The same report for an ANSI mode, which carries no private marker.</summary>
+    private static string AnsiReport(int mode, bool set) => Esc.Csi($"{mode};{(set ? 1 : 2)}$y");
+
     /// <summary>Every private mode DECRQM answers for, as an application would name it.</summary>
     public static TheoryData<int> ReportedModes() => new()
     {
@@ -223,17 +226,44 @@ public class RequestModeTests
     }
 
     /// <summary>
-    /// DECRQM without the private marker asks about an ANSI mode, and this terminal answers for
-    /// none of them. Replying with a private-mode report would be answering a different question.
+    /// IRM is the one ANSI mode this terminal implements, and DECRQM answers for it. The reply
+    /// carries no '?': CSI 4 ; 1 $ y is IRM set, where CSI ? 4 ; 1 $ y would be DECSCLM, and the
+    /// two are different sequences to a parser. This test previously pinned silence here on the
+    /// grounds that any reply would be a private-mode report — it would not, and the mode is
+    /// tracked, so the silence was a supported feature reported as unsupported.
     /// </summary>
     [Fact]
-    public void Says_nothing_about_ansi_modes()
+    public void Reports_ansi_insert_mode()
     {
         var terminal = Fresh();
         var replies = Replies(terminal);
 
         terminal.Write(Esc.Csi("4$p"));
-        terminal.Write(Esc.Csi("20$p"));
+        terminal.Write(Esc.Csi("4h"));
+        terminal.Write(Esc.Csi("4$p"));
+        terminal.Write(Esc.Csi("4l"));
+        terminal.Write(Esc.Csi("4$p"));
+
+        Assert.Equal(
+            new[] { AnsiReport(4, false), AnsiReport(4, true), AnsiReport(4, false) },
+            replies);
+    }
+
+    /// <summary>
+    /// The ANSI modes this terminal keeps no state for get the same silence as an untracked private
+    /// mode. LNM is the one an application is most likely to ask about; nothing here reads or writes
+    /// it, so a "reset" reply would be a guess.
+    /// </summary>
+    [Theory]
+    [InlineData(2)]   // keyboard action mode (KAM), not implemented
+    [InlineData(12)]  // send/receive (SRM), not implemented
+    [InlineData(20)]  // automatic newline (LNM), not implemented
+    public void Says_nothing_about_ansi_modes_it_keeps_no_state_for(int mode)
+    {
+        var terminal = Fresh();
+        var replies = Replies(terminal);
+
+        terminal.Write(Esc.Csi($"{mode}$p"));
 
         Assert.Empty(replies);
     }
