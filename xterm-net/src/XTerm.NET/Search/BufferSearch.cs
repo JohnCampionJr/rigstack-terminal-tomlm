@@ -38,6 +38,20 @@ public sealed class BufferSearch : IDisposable
     private readonly List<SearchHit> _hits = new();
 
     private string _needle = string.Empty;
+
+    /// <summary>
+    /// The needle as CODEPOINTS, folded for case. A cell stores a codepoint, and comparing it to
+    /// UTF-16 chars one at a time can never match anything outside the BMP -- an emoji in the
+    /// needle is two chars and neither equals the cell. Built once per Find.
+    /// </summary>
+    /// <remarks>
+    /// A cell whose text is a multi-codepoint cluster is compared by its LEADING codepoint, which
+    /// is all the cell stores inline. Matching the full cluster text would mean materialising it
+    /// per cell -- the same cost this class exists to avoid, and the same reason regular
+    /// expressions are not offered. The limitation is one-directional: base-character searches
+    /// still find cells that carry combining marks.
+    /// </remarks>
+    private int[] _pattern = Array.Empty<int>();
     private SearchOptions _options;
     private int _current = -1;
     private bool _disposed;
@@ -74,6 +88,8 @@ public sealed class BufferSearch : IDisposable
 
         if (_needle.Length == 0)
             return 0;
+
+        _pattern = ToFoldedCodePoints(_needle, options.CaseSensitive);
 
         var lines = _terminal.Buffer.Lines;
         var matchId = 0;
@@ -220,7 +236,7 @@ public sealed class BufferSearch : IDisposable
         var r = row;
         var c = col;
 
-        for (var i = 0; i < _needle.Length; i++)
+        for (var i = 0; i < _pattern.Length; i++)
         {
             if (!Advance(lines, endRow, ref r, ref c, skipZeroWidth: i > 0))
                 return false;
@@ -229,7 +245,7 @@ public sealed class BufferSearch : IDisposable
             if (cell.Width == 0)
                 return false;
 
-            if (!SameCharacter(cell.CodePoint, _needle[i]))
+            if (Fold(cell.CodePoint, _options.CaseSensitive) != _pattern[i])
                 return false;
 
             afterRow = r;
@@ -272,15 +288,28 @@ public sealed class BufferSearch : IDisposable
         }
     }
 
-    private bool SameCharacter(int codePoint, char needle)
+    private static int[] ToFoldedCodePoints(string needle, bool caseSensitive)
     {
-        if (codePoint > 0xFFFF)
-            return false;   // outside the BMP; a needle is UTF-16 and cannot name one in a char
+        var points = new List<int>(needle.Length);
+        for (var i = 0; i < needle.Length; i++)
+        {
+            int cp = needle[i];
+            if (char.IsHighSurrogate(needle[i]) && i + 1 < needle.Length && char.IsLowSurrogate(needle[i + 1]))
+            {
+                cp = char.ConvertToUtf32(needle[i], needle[i + 1]);
+                i++;
+            }
+            points.Add(Fold(cp, caseSensitive));
+        }
+        return points.ToArray();
+    }
 
-        var cell = (char)codePoint;
-        return _options.CaseSensitive
-            ? cell == needle
-            : char.ToUpperInvariant(cell) == char.ToUpperInvariant(needle);
+    private static int Fold(int codePoint, bool caseSensitive)
+    {
+        if (caseSensitive || codePoint > 0xFFFF)
+            return codePoint;   // astral case pairs are rare enough that exact match is honest
+
+        return char.ToUpperInvariant((char)codePoint);
     }
 
     /// <summary>
@@ -311,16 +340,28 @@ public sealed class BufferSearch : IDisposable
         var r = row;
         var c = col - 1;
 
-        while (c < 0)
+        while (true)
         {
-            if (r <= startRow)
-                return false;   // start of the logical line; nothing before it
+            while (c < 0)
+            {
+                if (r <= startRow)
+                    return false;   // start of the logical line; nothing before it
 
-            r--;
-            c = (lines[r]?.Length ?? 0) - 1;
+                r--;
+                c = (lines[r]?.Length ?? 0) - 1;
+            }
+
+            // A width-0 cell is not a character -- it is the placeholder behind a wide glyph, and
+            // treating it as the neighbour would let a whole-word match sit flush against a CJK
+            // letter. Step past it to the glyph that owns it.
+            if ((lines[r]?[c].Width ?? 1) == 0)
+            {
+                c--;
+                continue;
+            }
+
+            return IsWordCharacter(lines[r]?[c].CodePoint ?? 0);
         }
-
-        return c >= 0 && IsWordCharacter(lines[r]?[c].CodePoint ?? 0);
     }
 
     private static bool IsWordCharacterAt(CircularList<BufferLine> lines, int endRow, int row, int col)

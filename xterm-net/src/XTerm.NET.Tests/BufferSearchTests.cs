@@ -188,6 +188,34 @@ public class BufferSearchTests
         Assert.False(search.TryMoveNext(out _));
     }
 
+    /// <summary>A needle outside the BMP is one codepoint in a cell, not two chars.</summary>
+    [Fact]
+    public void An_emoji_needle_matches_the_cell_that_holds_it()
+    {
+        var t = Fresh();
+        t.Write("go \U0001F600 now\r\n");
+
+        using var search = new BufferSearch(t);
+        Assert.Equal(1, search.Find("\U0001F600"));
+        Assert.Equal(1, search.Find("go \U0001F600 now"));
+    }
+
+    /// <summary>
+    /// The placeholder behind a wide glyph is not a character, so a whole-word match must not sit
+    /// flush against the CJK letter that owns it.
+    /// </summary>
+    [Fact]
+    public void Whole_word_sees_through_a_wide_glyphs_placeholder()
+    {
+        var t = Fresh(cols: 30);
+        t.Write("\u6F22word \u6F22 word\r\n");   // CJK+word joined, then separated
+
+        using var search = new BufferSearch(t);
+        var hits = search.Find("word", new SearchOptions { WholeWord = true });
+
+        Assert.Equal(1, hits);   // only the separated one
+    }
+
     /// <summary>What the whole design is for: a search allocates nothing worth counting.</summary>
     [Fact]
     public void Searching_does_not_allocate_per_line()
