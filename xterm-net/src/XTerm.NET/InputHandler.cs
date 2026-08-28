@@ -871,7 +871,25 @@ public class InputHandler
                 break;
 
             case CsiCommand.SelectCursorStyle:
-                SelectCursorStyle(parameters);
+                // "CSI > Ps q" is XTVERSION, not DECSCUSR. They share a final character, and the
+                // identifier has its private marker stripped before the lookup, so without this
+                // guard a terminal version query reshaped the cursor instead of being answered --
+                // a program that asks on startup left the user in a cursor they never chose.
+                //
+                // The marker itself is read rather than isPrivate, which is also true for '?': a
+                // "CSI ? Ps q" is neither of these sequences, and answering it as XTVERSION would
+                // be a second wrong reading of the same character.
+                switch (identifier.PrivateMarker())
+                {
+                    case '>':
+                        ReportVersion(parameters);
+                        break;
+                    case '\0':
+                        SelectCursorStyle(parameters);
+                        break;
+                    // Any other marker is a sequence we do not implement. Ignored, since the
+                    // alternative is reshaping the cursor on some unrelated query's behalf.
+                }
                 break;
 
             case CsiCommand.RequestMode:
@@ -3347,6 +3365,45 @@ public class InputHandler
                 break;
         }
     }
+
+    /// <summary>
+    /// The version XTVERSION reports, read once. It cannot change while the process runs, and the
+    /// query arrives during the startup of every program that sends one, so rediscovering it
+    /// through reflection each time buys nothing.
+    /// </summary>
+    private static readonly string _versionText = ReadVersion();
+
+    private static string ReadVersion()
+    {
+        var version = typeof(InputHandler).Assembly.GetName().Version;
+
+        // Build is -1 on a version that carries only a major and a minor part.
+        return version is null
+            ? "0.0.0"
+            : $"{version.Major}.{version.Minor}.{Math.Max(0, version.Build)}";
+    }
+
+    /// <summary>
+    /// XTVERSION -- CSI > Ps q. Reports the terminal's name and version.
+    /// </summary>
+    /// <remarks>
+    /// <para>The reply is a DCS string, "DCS &gt; | text ST", in the shape xterm defined and the
+    /// terminals that answer have followed: xterm sends "XTerm(370)", foot "foot(1.13.1)", kitty
+    /// "kitty(0.26.5)". Programs send it to work out whether a capability they cannot otherwise
+    /// detect is safe to use, so being answerable at all matters more than what stands inside the
+    /// parentheses.</para>
+    /// <para>Ps 0 is the only request defined, and anything else goes unanswered: a program that
+    /// asked a question we do not know would otherwise read the version back as the answer to
+    /// it.</para>
+    /// </remarks>
+    private void ReportVersion(Params parameters)
+    {
+        if (parameters.GetParam(0, 0) != 0)
+            return;
+
+        _terminal.RaiseDataReceived($"\u001bP>|XTerm.NET({_versionText})\u001b\\");
+    }
+
     private void DeviceStatusReport(Params parameters, bool isPrivate)
     {
         // DSR - Device Status Report (CSI n or CSI ? n)
