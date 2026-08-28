@@ -994,18 +994,43 @@ public class InputHandler
     /// </summary>
     private Graphics.SixelPalette? _sharedSixelPalette;
 
+    /// <summary>The XTGETTCAP request being read, if a DCS + q payload is currently arriving.</summary>
+    private StringBuilder? _capabilityRequest;
+
+    /// <summary>Whether that request ran past <see cref="MaxCapabilityRequestLength"/>.</summary>
+    private bool _capabilityRequestTooLong;
+
+    /// <summary>
+    /// How much of an XTGETTCAP request will be read before it is treated as malformed. A real
+    /// request is a handful of capability names; anything past this is not one, and accumulating it
+    /// would let a peer make the terminal hold an arbitrary amount of memory for a reply nobody
+    /// asked for.
+    /// </summary>
+    private const int MaxCapabilityRequestLength = 4096;
+
     /// <summary>
     /// Handles the start of a DCS sequence.
     /// </summary>
     /// <remarks>
     /// The payload that follows is streamed rather than handed over whole, so this is where we
-    /// decide whether it is worth reading at all. Only DECSIXEL is; anything else is left to the
-    /// parser's whole-payload event, which is capped and cheap.
+    /// decide whether it is worth reading at all. Two sequences are: DECSIXEL, whose payload is an
+    /// image, and XTGETTCAP, whose payload is a list of capability names to answer. The identifier
+    /// keeps them apart the way it does for CSI — the bare "q" is Sixel, "+q" is XTGETTCAP — so a
+    /// terminal that decodes images does not have to choose between the two. Everything else is left
+    /// to the parser's whole-payload event, which is capped and cheap.
     /// </remarks>
     public void HandleDcsHook(string identifier, Params parameters)
     {
         CancelRepeat();
         _sixelDecoder = null;
+        _capabilityRequest = null;
+        _capabilityRequestTooLong = false;
+
+        if (identifier == "+q")
+        {
+            _capabilityRequest = new StringBuilder();
+            return;
+        }
 
         if (identifier != "q" || !_terminal.Options.SixelEnabled)
             return;
@@ -1036,6 +1061,21 @@ public class InputHandler
     public void HandleDcsPut(ReadOnlySpan<char> data)
     {
         _sixelDecoder?.Put(data);
+
+        if (_capabilityRequest is null || _capabilityRequestTooLong)
+            return;
+
+        // Past the cap the request is dropped rather than truncated: half a name decodes to some
+        // other capability, and answering that confidently would be worse than not answering. The
+        // client still gets its failure reply, so nothing is left waiting on an answer.
+        if (_capabilityRequest.Length + data.Length > MaxCapabilityRequestLength)
+        {
+            _capabilityRequestTooLong = true;
+            _capabilityRequest.Clear();
+            return;
+        }
+
+        _capabilityRequest.Append(data);
     }
 
     /// <summary>
@@ -1047,6 +1087,14 @@ public class InputHandler
     /// </param>
     public void HandleDcsUnhook(bool terminatedCleanly)
     {
+        var capabilityRequest = _capabilityRequest;
+        var tooLong = _capabilityRequestTooLong;
+        _capabilityRequest = null;
+        _capabilityRequestTooLong = false;
+
+        if (capabilityRequest is not null && terminatedCleanly)
+            AnswerCapabilityRequest(tooLong ? string.Empty : capabilityRequest.ToString());
+
         var decoder = _sixelDecoder;
         _sixelDecoder = null;
 
@@ -1056,6 +1104,21 @@ public class InputHandler
         var image = decoder.Finish();
         if (image is not null)
             PlaceImage(Graphics.ImagePlacement.Natural(image), Graphics.PlacementKind.Sixel);
+    }
+
+    /// <summary>
+    /// Answers an XTGETTCAP request (DCS + q), one reply per capability asked about.
+    /// </summary>
+    /// <remarks>
+    /// The point of the sequence is that a program's terminfo entry describes whatever terminal the
+    /// machine it is running on has heard of, which over ssh or in a container is not this one. So
+    /// the answers come from what this emulator actually implements — see
+    /// <see cref="TermCapabilities"/> — and not from the entry named by <c>TermName</c>.
+    /// </remarks>
+    private void AnswerCapabilityRequest(string request)
+    {
+        foreach (var reply in TermCapabilities.Answer(request, _terminal))
+            _terminal.RaiseDataReceived(reply);
     }
 
     /// <summary>The text of the APC sequence currently arriving.</summary>
