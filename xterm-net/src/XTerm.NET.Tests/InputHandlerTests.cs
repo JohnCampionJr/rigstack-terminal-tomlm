@@ -1171,7 +1171,7 @@ public class InputHandlerTests
     }
 
     [Fact]
-    public void HandleCsi_DA_Tertiary_IsNotAnsweredWithThePrimaryReply()
+    public void HandleCsi_DA_Tertiary_IsNotAnswered()
     {
         // Arrange
         var terminal = CreateTerminal();
@@ -1185,9 +1185,29 @@ public class InputHandlerTests
         // Act - "=c" is the tertiary DA, asking for a unit ID
         handler.HandleCsi("=c", params_);
 
-        // Assert - it used to fall through to the primary reply, because "=" is not ">" and the
-        // handler only distinguished those two. Answering a question nobody asked is worse than
-        // staying quiet: the program reads a DA1 reply where it expected DECRPTUI.
+        // Assert - there is no unit ID to report, and terminals without DECRPTUI stay quiet.
+        // Answering a question nobody asked is worse than silence: the program would read a DA
+        // reply where it expected DECRPTUI, while still waiting for the reply it did ask for.
+        Assert.Null(receivedData);
+    }
+
+    [Fact]
+    public void HandleCsi_DA_PrivateMarker_IsNotAnsweredWithTheSecondaryReply()
+    {
+        // Arrange
+        var terminal = CreateTerminal();
+        var handler = new InputHandler(terminal);
+        var params_ = new Params();
+        params_.AddParam(0);
+
+        string? receivedData = null;
+        terminal.DataReceived += (_, e) => receivedData = e.Data;
+
+        // Act - "?c" is not a DA request any program sends; it is not the secondary DA either
+        handler.HandleCsi("?c", params_);
+
+        // Assert - it used to be answered with the secondary reply, because the handler dispatched
+        // on the coarse isPrivate flag, which "?" sets just as ">" does
         Assert.Null(receivedData);
     }
 

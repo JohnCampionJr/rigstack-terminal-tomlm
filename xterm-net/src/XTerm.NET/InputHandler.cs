@@ -806,8 +806,8 @@ public class InputHandler
                 break;
 
             case CsiCommand.DeviceAttributes:
-                // The identifier goes in whole, not as isPrivate: "?", "=" and ">" all set that
-                // flag, and DA means something different for each of them.
+                // The identifier goes in whole, not as isPrivate: "?c" and ">c" both set that flag,
+                // and only one of them is the secondary DA.
                 DeviceAttributes(identifier, parameters);
                 break;
 
@@ -2960,10 +2960,13 @@ public class InputHandler
                 : "\u001b[?62;22c");
         }
 
-        // Any other prefix is left unanswered. "=c" is the tertiary DA, which asks for a unit ID
-        // this terminal does not have; it used to fall through to the primary reply and hand the
-        // program the answer to a question it had not asked. Terminals without DECRPTUI stay quiet
-        // here, and so does this one.
+        // Any other prefix is left unanswered. "?c" is the one that used to go wrong: it is not the
+        // secondary DA, but it sets isPrivate, so it was handed the secondary reply -- the answer to
+        // a question the program had not asked, while it was still waiting for the one it had. The
+        // tertiary DA, "=c", never reaches this method at all, because ToCsiCommand strips only "?"
+        // and ">" before the lookup and so resolves it to Unknown. Silence is the right outcome for
+        // it regardless: it asks for a unit ID this terminal does not have, and terminals without
+        // DECRPTUI say nothing.
     }
 
     /// <summary>
