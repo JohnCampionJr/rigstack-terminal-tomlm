@@ -170,6 +170,14 @@ public class TerminalBuffer
         // Decided here rather than at each call site. Every path that scrolls -- a wrap at the
         // bottom of the region, LF, IND, DECSTBM's own scroll -- arrives through this, so putting
         // the choice anywhere else means finding all of them and finding them again next time.
+        //
+        // isWrapped is DELIBERATELY not forwarded. It is a per-LINE flag -- "this line continues
+        // the previous one" -- and a margin scroll moves a column BOX, not lines: every line in
+        // the region keeps its content outside the margins, so marking the bottom line wrapped
+        // would claim continuation for content that never moved, and a later reflow would merge
+        // full lines an application laid out separately. There is no per-line value that can
+        // describe a box continuation, so the flags of the untouched outside content win, and a
+        // box scroll neither sets nor clears any line's flag.
         if (!MarginsAreFullWidth)
         {
             ScrollMarginColumns(_scrollTop, _scrollBottom, lines, up: true, BlankFill());

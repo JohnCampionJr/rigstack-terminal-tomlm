@@ -236,6 +236,13 @@ public class InputHandler
         {
             if (_terminal.Options.Wraparound)
             {
+                // Only a FULL-WIDTH wrap marks the next line as a continuation. IsWrapped is a
+                // per-line flag, and a wrap inside the margin box continues the box, not the line:
+                // content outside the margins on the next row was never part of this text, and a
+                // reflow that believed the flag would merge lines an application laid out
+                // separately. Decided before the cursor moves, because the answer depends on
+                // where the wrap happened.
+                var lineWrap = WrapLimit() == _terminal.Cols - 1 && WrapHome() == 0;
                 if (_buffer.Y == _buffer.ScrollBottom)
                 {
                     _buffer.SetCursor(WrapHome(), _buffer.Y);
@@ -245,7 +252,8 @@ public class InputHandler
                 {
                     _buffer.SetCursor(WrapHome(), _buffer.Y + 1);
                 }
-                _buffer.Lines[_buffer.Y + _buffer.YBase]!.IsWrapped = true;
+                if (lineWrap)
+                    _buffer.Lines[_buffer.Y + _buffer.YBase]!.IsWrapped = true;
             }
             else
             {
@@ -437,6 +445,9 @@ public class InputHandler
                 if (!_terminal.Options.Wraparound)
                     return;
 
+                // Full-width wraps only, as in Print: a wrap inside the margin box continues
+                // the box, not the line.
+                var lineWrap = WrapLimit() == _terminal.Cols - 1 && WrapHome() == 0;
                 if (_buffer.Y == _buffer.ScrollBottom)
                 {
                     _buffer.SetCursor(WrapHome(), _buffer.Y);
@@ -447,7 +458,8 @@ public class InputHandler
                     _buffer.SetCursor(WrapHome(), _buffer.Y + 1);
                 }
 
-                _buffer.Lines[_buffer.Y + _buffer.YBase]!.IsWrapped = true;
+                if (lineWrap)
+                    _buffer.Lines[_buffer.Y + _buffer.YBase]!.IsWrapped = true;
             }
 
             var line = _buffer.Lines[_buffer.Y + _buffer.YBase];
@@ -511,6 +523,9 @@ public class InputHandler
                 if (!_terminal.Options.Wraparound)
                     return;   // printing past the edge is discarded, as in Print
 
+                // Full-width wraps only, as in Print: a wrap inside the margin box continues
+                // the box, not the line.
+                var lineWrap = WrapLimit() == _terminal.Cols - 1 && WrapHome() == 0;
                 if (_buffer.Y == _buffer.ScrollBottom)
                 {
                     _buffer.SetCursor(WrapHome(), _buffer.Y);
@@ -521,7 +536,8 @@ public class InputHandler
                     _buffer.SetCursor(WrapHome(), _buffer.Y + 1);
                 }
 
-                _buffer.Lines[_buffer.Y + _buffer.YBase]!.IsWrapped = true;
+                if (lineWrap)
+                    _buffer.Lines[_buffer.Y + _buffer.YBase]!.IsWrapped = true;
             }
 
             var line = _buffer.Lines[_buffer.Y + _buffer.YBase];
@@ -3650,12 +3666,13 @@ public class InputHandler
     /// <para>This is how an application finds out whether synchronized output is worth using: it
     /// asks, and a terminal that says nothing is one that does not support the query. Emitting the
     /// mode without answering for it would leave well-behaved applications never using it.</para>
-    /// <para>Deliberately answers for 2026 alone. The reply codes distinguish "set" and "reset" from
-    /// "not recognised", and this terminal keeps mode state as individual properties rather than a
-    /// registry — so answering for everything would mean a switch mapping every mode back to its
-    /// property, and getting one wrong tells an application a feature is missing when it is not.
-    /// Staying silent for the rest is exactly the behaviour before this change, so nothing regresses
-    /// while the one mode that needs an answer gets a correct one.</para>
+    /// <para>Deliberately answers only for the modes an application changes its behaviour on —
+    /// 2026 (synchronized output) and 69 (DECSLRM). The reply codes distinguish "set" and "reset"
+    /// from "not recognised", and this terminal keeps mode state as individual properties rather
+    /// than a registry — so answering for everything would mean a switch mapping every mode back to
+    /// its property, and getting one wrong tells an application a feature is missing when it is
+    /// not. Staying silent for the rest is exactly the behaviour before these modes were added, so
+    /// nothing regresses while the modes that need an answer get correct ones.</para>
     /// </remarks>
     private void HandleRequestMode(Params parameters, bool isPrivate)
     {

@@ -318,4 +318,37 @@ public class LeftRightMarginTests
         Assert.Equal("abcdefgh", Row(terminal, 0));
         Assert.Equal("ij", Row(terminal, 1));
     }
+
+    /// <summary>
+    /// A box scroll neither sets nor clears any line's IsWrapped flag — including the wrap-driven
+    /// scroll at the bottom of the region. The flag is per LINE, and every line keeps its content
+    /// outside the margins; marking the bottom line wrapped would claim continuation for content
+    /// that never moved, and a later reflow would merge full lines an application laid out
+    /// separately. So the wrapped lines outside the region stay wrapped, and the region's own
+    /// lines stay unwrapped, no matter how much the box scrolls.
+    /// </summary>
+    [Fact]
+    public void A_box_scroll_leaves_every_IsWrapped_flag_alone()
+    {
+        var terminal = Fresh(cols: 8, rows: 6);
+
+        // A genuinely wrapped pair of rows below the future region, made by autowrap.
+        terminal.Write($"{Esc}[5;1H");
+        terminal.Write("0123456789");
+        Assert.True(terminal.Buffer.Lines[terminal.Buffer.YBase + 5]!.IsWrapped,
+            "sanity: autowrap marked the continuation row");
+
+        // Margins over rows 1-4, columns 3-6; fill the box until it wrap-scrolls repeatedly.
+        terminal.Write($"{Esc}[?69h{Esc}[3;6s{Esc}[1;4r");
+        terminal.Write($"{Esc}[1;3H");
+        terminal.Write(new string('x', 30));
+
+        for (var row = 0; row < 4; row++)
+            Assert.False(terminal.Buffer.Lines[terminal.Buffer.YBase + row]!.IsWrapped,
+                $"row {row} is inside the box and must not become a continuation");
+        Assert.True(terminal.Buffer.Lines[terminal.Buffer.YBase + 5]!.IsWrapped,
+            "the wrapped pair below the region is untouched by the box scrolling");
+
+        terminal.Write($"{Esc}[?69l{Esc}[r");
+    }
 }
