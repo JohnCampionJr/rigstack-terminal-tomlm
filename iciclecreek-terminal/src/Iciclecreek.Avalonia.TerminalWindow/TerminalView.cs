@@ -1083,7 +1083,17 @@ namespace Iciclecreek.Terminal
         private const int AnimationTickMilliseconds = 16;
 
         private DispatcherTimer _animationTimer;
-        private DateTime _lastAnimationTick = DateTime.UtcNow;
+
+        /// <summary>
+        /// Elapsed time since the last animation tick.
+        /// </summary>
+        /// <remarks>
+        /// A stopwatch rather than two readings of the wall clock, because the wall clock is not
+        /// monotonic: an NTP correction stepping it backwards would hand the emulator a negative
+        /// interval to advance by. Nothing here needs to know what time it is, only how much of it
+        /// has gone by, which is the question a stopwatch answers.
+        /// </remarks>
+        private readonly Stopwatch _animationClock = new();
 
         /// <summary>
         /// Starts or stops the animation clock to match whether anything is animating.
@@ -1103,7 +1113,7 @@ namespace Iciclecreek.Terminal
             {
                 // Reset the clock rather than counting the idle time: an animation started after a
                 // quiet minute should begin at its first frame, not a minute into itself.
-                _lastAnimationTick = DateTime.UtcNow;
+                _animationClock.Restart();
                 _animationTimer.Start();
             }
             else
@@ -1114,9 +1124,8 @@ namespace Iciclecreek.Terminal
 
         private void OnAnimationTick(object? sender, EventArgs e)
         {
-            var now = DateTime.UtcNow;
-            var elapsed = now - _lastAnimationTick;
-            _lastAnimationTick = now;
+            var elapsed = _animationClock.Elapsed;
+            _animationClock.Restart();
 
             if (_terminal.AdvanceAnimations(elapsed))
                 this.RequestInvalidate();
@@ -1654,6 +1663,12 @@ namespace Iciclecreek.Terminal
             {
                 _cursorBlinkTimer.Start();
             }
+
+            // And the animation clock, which OnUnloaded stopped. Output is the only other thing
+            // that starts it, so without this a view detached and re-attached -- a tab switched
+            // away and back -- comes back with its animation frozen until something writes, which
+            // at an idle prompt is never.
+            SyncAnimationClock();
         }
 
         private void OnUnloaded(object? sender, RoutedEventArgs e)
@@ -4637,6 +4652,13 @@ namespace Iciclecreek.Terminal
                 int cellCount = 0;
                 int runStartX = 0;
 
+                // Nothing is drawn where a Sixel covers, because a Sixel REPLACED what was there.
+                if (CoveredBySixel(line, x))
+                {
+                    x++;
+                    continue;
+                }
+
                 // Skip width-0 cells. There are TWO kinds, and only one of them is a placeholder.
                 //
                 // The placeholder behind a wide glyph carries no content, and skipping it is what stops the
@@ -4667,11 +4689,11 @@ namespace Iciclecreek.Terminal
 
                         // Stop if we hit a different attribute or a placeholder cell mid-run.
                         //
-                        // A picture is no reason to stop. Pictures are not in cells any more, so a cell
-                        // under one carries whatever character was printed there and belongs in the run
-                        // like any other; the picture is drawn separately and the z-index decides which
-                        // of them a viewer ends up seeing.
-                        if (currentCell.Width != 1 || currentCell.Attributes != cell.Attributes)
+                        // A KITTY picture is no reason to stop: it is an overlay, the cell under it
+                        // still carries whatever was printed there, and the z-index decides which of
+                        // them a viewer sees. A SIXEL is not -- see CoveredBySixel.
+                        if (currentCell.Width != 1 || currentCell.Attributes != cell.Attributes
+                            || CoveredBySixel(line, x))
                             break;
                         textBuilder.Append(currentCell.Content);
                         cellCount += currentCell.Width;
@@ -4920,6 +4942,34 @@ namespace Iciclecreek.Terminal
         /// costs the upper run's spare columns their background, which errs toward leaving a picture
         /// alone rather than painting over one.</para>
         /// </remarks>
+        /// <summary>
+        /// Whether a Sixel covers this column, and so has replaced whatever text was under it.
+        /// </summary>
+        /// <remarks>
+        /// <para>The one place the two protocols have to be told apart. A Kitty placement is an
+        /// OVERLAY: the cell keeps its character, both are drawn, and the z-index decides which one
+        /// is seen. A Sixel is CONTENT: it replaced what was there, which is why the emulator splits
+        /// a Sixel run when something prints over it and leaves a Kitty run alone.</para>
+        /// <para>The emulator does not clear the cells a Sixel covers -- placing one only adds a run
+        /// -- so they keep whatever was on screen beforehand. Drawing them puts that text under the
+        /// picture: invisible beneath an opaque one, and showing through a Sixel drawn with
+        /// background select 1, whose unset pixels are transparent so that the cell's own colour
+        /// comes through. The cell's colour, not the previous screen's text.</para>
+        /// </remarks>
+        private static bool CoveredBySixel(BufferLine line, int column)
+        {
+            if (!line.HasImages)
+                return false;
+
+            foreach (var placement in line.Placements)
+            {
+                if (placement.Kind == XT.Graphics.PlacementKind.Sixel && placement.Covers(column))
+                    return true;
+            }
+
+            return false;
+        }
+
         private static bool OverlapsAny(List<XT.Graphics.LinePlacement> earlier, int start, int end)
         {
             foreach (var placement in earlier)

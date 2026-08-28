@@ -134,6 +134,39 @@ public class SixelRenderingTests
     /// it and never drawn.
     /// </summary>
     /// <summary>
+    /// A Sixel replaced what was under it, so the text it covered is not drawn.
+    /// </summary>
+    /// <remarks>
+    /// <para>The emulator does not clear the cells a Sixel covers — placing one only adds a run —
+    /// so they still hold whatever was printed there. Drawing them puts that text under the
+    /// picture: invisible beneath an opaque one, and showing through a Sixel drawn with background
+    /// select 1, whose unset pixels are transparent precisely so the cell's own colour comes
+    /// through. The cell's colour, not the previous screen's text.</para>
+    /// <para>The contrast is <c>A_front_picture_leaves_no_text_over_it</c>, where a Kitty placement
+    /// over the same text keeps it: that one is an overlay and the z-index decides what is seen.
+    /// The two together are the whole of why the renderer has to tell the protocols apart.</para>
+    /// </remarks>
+    [AvaloniaTest]
+    public void Text_a_sixel_covered_is_not_drawn_under_it()
+    {
+        var (view, window) = Realised();
+        try
+        {
+            view.Terminal.Write("XY");
+            view.Terminal.Write(Esc + "[1;1H");
+            PlaceImage(view);
+
+            var runs = RunsForRow(view, 0);
+
+            Assert.That(runs.Any(r => r.IsImage), Is.True, "the picture should be drawn");
+            Assert.That(runs.Where(r => r.Text is not null).Any(r => r.StartX < 2 && r.StartX + r.CellCount > 0),
+                        Is.False,
+                        "the text the picture covered should not be drawn underneath it");
+        }
+        finally { window.Close(); }
+    }
+
+    /// <summary>
     /// Narrowing the window draws less of a picture, and widening it draws the rest back.
     /// </summary>
     /// <remarks>
