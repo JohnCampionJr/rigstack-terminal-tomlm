@@ -830,7 +830,9 @@ public class InputHandler
                 break;
 
             case CsiCommand.DeviceAttributes:
-                DeviceAttributes(parameters, isPrivate);
+                // The identifier goes in whole, not as isPrivate: "?c" and ">c" both set that flag,
+                // and only one of them is the secondary DA.
+                DeviceAttributes(identifier, parameters);
                 break;
 
             case CsiCommand.LinePositionAbsolute:
@@ -869,7 +871,25 @@ public class InputHandler
                 break;
 
             case CsiCommand.SelectCursorStyle:
-                SelectCursorStyle(parameters);
+                // "CSI > Ps q" is XTVERSION, not DECSCUSR. They share a final character, and the
+                // identifier has its private marker stripped before the lookup, so without this
+                // guard a terminal version query reshaped the cursor instead of being answered --
+                // a program that asks on startup left the user in a cursor they never chose.
+                //
+                // The marker itself is read rather than isPrivate, which is also true for '?': a
+                // "CSI ? Ps q" is neither of these sequences, and answering it as XTVERSION would
+                // be a second wrong reading of the same character.
+                switch (identifier.PrivateMarker())
+                {
+                    case '>':
+                        ReportVersion(parameters);
+                        break;
+                    case '\0':
+                        SelectCursorStyle(parameters);
+                        break;
+                    // Any other marker is a sequence we do not implement. Ignored, since the
+                    // alternative is reshaping the cursor on some unrelated query's behalf.
+                }
                 break;
 
             case CsiCommand.RequestMode:
@@ -1029,7 +1049,7 @@ public class InputHandler
         RefreshActiveCharset();
     }
 
-    #region DCS / Sixel
+    #region DCS / Sixel / DECRQSS
 
     /// <summary>The Sixel image being decoded, if a DECSIXEL payload is currently arriving.</summary>
     private Graphics.SixelDecoder? _sixelDecoder;
@@ -1056,15 +1076,32 @@ public class InputHandler
     private const int MaxCapabilityRequestLength = 4096;
 
     /// <summary>
+    /// Accumulates the payload of a DECRQSS sequence (<c>DCS $ q … ST</c>) while it streams in.
+    /// Null when no DECRQSS is active.
+    /// </summary>
+    private StringBuilder? _decrqssPayload;
+
+    /// <summary>
+    /// The most of a DECRQSS payload worth keeping.
+    /// </summary>
+    /// <remarks>
+    /// Every setting that can be asked for is three characters at most, so a longer payload is one
+    /// we are going to refuse anyway. Truncating at the door keeps a <c>DCS $ q</c> followed by a
+    /// megabyte of anything from being buffered on its way to that refusal.
+    /// </remarks>
+    private const int MaxDecrqssPayloadLength = 16;
+
+    /// <summary>
     /// Handles the start of a DCS sequence.
     /// </summary>
     /// <remarks>
     /// The payload that follows is streamed rather than handed over whole, so this is where we
-    /// decide whether it is worth reading at all. Two sequences are: DECSIXEL, whose payload is an
-    /// image, and XTGETTCAP, whose payload is a list of capability names to answer. The identifier
-    /// keeps them apart the way it does for CSI — the bare "q" is Sixel, "+q" is XTGETTCAP — so a
-    /// terminal that decodes images does not have to choose between the two. Everything else is left
-    /// to the parser's whole-payload event, which is capped and cheap.
+    /// decide whether it is worth reading at all. Three sequences are: DECSIXEL, whose payload is
+    /// an image; DECRQSS, whose payload names a setting to read back; and XTGETTCAP, whose payload
+    /// is a list of capability names to answer. The identifier keeps them apart the way it does for
+    /// CSI — the bare "q" is Sixel, "$q" is DECRQSS, "+q" is XTGETTCAP — so a terminal that decodes
+    /// images does not have to choose between them. Everything else is left to the parser's
+    /// whole-payload event, which is capped and cheap.
     /// </remarks>
     public void HandleDcsHook(string identifier, Params parameters)
     {
@@ -1072,10 +1109,19 @@ public class InputHandler
         _sixelDecoder = null;
         _capabilityRequest = null;
         _capabilityRequestTooLong = false;
+        _decrqssPayload = null;
 
         if (identifier == "+q")
         {
+            // XTGETTCAP. The payload is a list of hex-encoded capability names to answer.
             _capabilityRequest = new StringBuilder();
+            return;
+        }
+
+        if (identifier == "$q")
+        {
+            // DECRQSS — Request Status String. The payload names the setting to read back.
+            _decrqssPayload = new StringBuilder();
             return;
         }
 
@@ -1108,6 +1154,11 @@ public class InputHandler
     public void HandleDcsPut(ReadOnlySpan<char> data)
     {
         _sixelDecoder?.Put(data);
+
+        // DECRQSS first: the capability branch below returns early, and only one of the two is
+        // ever live at a time anyway -- HandleDcsHook arms exactly one per sequence.
+        if (_decrqssPayload is { } decrqss && decrqss.Length < MaxDecrqssPayloadLength)
+            decrqss.Append(data[..Math.Min(data.Length, MaxDecrqssPayloadLength - decrqss.Length)]);
 
         if (_capabilityRequest is null || _capabilityRequestTooLong)
             return;
@@ -1145,12 +1196,146 @@ public class InputHandler
         var decoder = _sixelDecoder;
         _sixelDecoder = null;
 
-        if (decoder is null || !terminatedCleanly)
-            return;
+        var decrqssPayload = _decrqssPayload;
+        _decrqssPayload = null;
 
-        var image = decoder.Finish();
-        if (image is not null)
-            PlaceImage(Graphics.ImagePlacement.Natural(image), Graphics.PlacementKind.Sixel);
+        if (decoder is not null && terminatedCleanly)
+        {
+            var image = decoder.Finish();
+            if (image is not null)
+                PlaceImage(Graphics.ImagePlacement.Natural(image), Graphics.PlacementKind.Sixel);
+        }
+
+        if (decrqssPayload is not null && terminatedCleanly)
+            HandleDecrqss(decrqssPayload.ToString());
+    }
+
+    /// <summary>
+    /// Handles a completed DECRQSS request by reading back the named setting.
+    /// </summary>
+    /// <remarks>
+    /// Reply format: <c>DCS 1 $ r &lt;setting&gt; ST</c> when the setting is recognised, or
+    /// <c>DCS 0 $ r ST</c> when it is not. ST is ESC \.
+    /// </remarks>
+    private void HandleDecrqss(string setting)
+    {
+        // DCS 0 $ r ST — unrecognised setting
+        const string Deny = "\x1bP0$r\x1b\\";
+
+        var reply = setting switch
+        {
+            "m" => $"\x1bP1$r{SerializeSgr()}m\x1b\\",
+            "r" => $"\x1bP1$r{_buffer.ScrollTop + 1};{_buffer.ScrollBottom + 1}r\x1b\\",
+            " q" => $"\x1bP1$r{SerializeDecscusr()} q\x1b\\",
+            "\"p" => "\x1bP1$r62;1\"p\x1b\\",
+            "\"q" => "\x1bP1$r0\"q\x1b\\",
+            _ => Deny,
+        };
+
+        _terminal.RaiseDataReceived(reply);
+    }
+
+    /// <summary>
+    /// Serialises the current character attributes as a semicolon-separated SGR parameter string,
+    /// suitable for embedding in a DECRQSS <c>m</c> response.
+    /// </summary>
+    /// <remarks>
+    /// Every code emitted here is one this handler parses back, so a program can read the reply,
+    /// replay it, and land on the attributes it started from — which is the point of asking. What
+    /// is off, and a colour that is still the default, is left out; nothing at all reads as
+    /// <c>0</c>, the reset.
+    /// </remarks>
+    private string SerializeSgr()
+    {
+        var attr = _curAttr;
+
+        // Build a list of SGR code fragments. Each may be a single number ("1") or a
+        // semicolon-separated run ("38;2;255;128;0").
+        var parts = new List<string>(8);
+
+        if (attr.IsBold()) parts.Add("1");
+        if (attr.IsDim()) parts.Add("2");
+        if (attr.IsItalic()) parts.Add("3");
+
+        switch (attr.GetUnderlineStyle())
+        {
+            case UnderlineStyle.Single: parts.Add("4"); break;
+            case UnderlineStyle.Double: parts.Add("21"); break;
+            case UnderlineStyle.Curly: parts.Add("4:3"); break;
+            case UnderlineStyle.Dotted: parts.Add("4:4"); break;
+            case UnderlineStyle.Dashed: parts.Add("4:5"); break;
+        }
+
+        if (attr.IsBlink()) parts.Add("5");
+        if (attr.IsInverse()) parts.Add("7");
+        if (attr.IsInvisible()) parts.Add("8");
+        if (attr.IsStrikethrough()) parts.Add("9");
+        if (attr.IsOverline()) parts.Add("53");
+
+        // Foreground colour
+        var fgMode = attr.GetFgColorMode();
+        var fg = attr.GetFgColor();
+        if (fgMode == 1)
+        {
+            // RGB truecolor
+            parts.Add($"38;2;{(fg >> 16) & 0xFF};{(fg >> 8) & 0xFF};{fg & 0xFF}");
+        }
+        else if (fg <= 7)
+        {
+            parts.Add($"{30 + fg}");
+        }
+        else if (fg <= 15)
+        {
+            parts.Add($"{90 + fg - 8}");
+        }
+        else if (fg <= 255)
+        {
+            parts.Add($"38;5;{fg}");
+        }
+        // 256 (default fg) → omit
+
+        // Background colour
+        var bgMode = attr.GetBgColorMode();
+        var bg = attr.GetBgColor();
+        if (bgMode == 1)
+        {
+            // RGB truecolor
+            parts.Add($"48;2;{(bg >> 16) & 0xFF};{(bg >> 8) & 0xFF};{bg & 0xFF}");
+        }
+        else if (bg <= 7)
+        {
+            parts.Add($"{40 + bg}");
+        }
+        else if (bg <= 15)
+        {
+            parts.Add($"{100 + bg - 8}");
+        }
+        else if (bg <= 255)
+        {
+            parts.Add($"48;5;{bg}");
+        }
+        // 257 (default bg) → omit
+
+        return parts.Count == 0 ? "0" : string.Join(";", parts);
+    }
+
+    /// <summary>
+    /// Serialises the current cursor style as the numeric DECSCUSR parameter.
+    /// </summary>
+    private string SerializeDecscusr()
+    {
+        var style = _terminal.Options.CursorStyle;
+        var blink = _terminal.Options.CursorBlink;
+        return (style, blink) switch
+        {
+            (CursorStyle.Block, true) => "1",
+            (CursorStyle.Block, false) => "2",
+            (CursorStyle.Underline, true) => "3",
+            (CursorStyle.Underline, false) => "4",
+            (CursorStyle.Bar, true) => "5",
+            (CursorStyle.Bar, false) => "6",
+            _ => "0",
+        };
     }
 
     /// <summary>
@@ -3122,32 +3307,77 @@ public class InputHandler
         }
     }
 
-    private void DeviceAttributes(Params parameters, bool isPrivate)
+    /// <summary>
+    /// DA -- CSI c (primary) and CSI &gt; c (secondary). Tells the program on the other end of the
+    /// wire what this terminal is and what it can do.
+    /// </summary>
+    /// <remarks>
+    /// <para>The reply is a promise, not a boast. Every attribute listed here names a sequence the
+    /// program will now go ahead and send, so claiming a feature this emulator does not implement
+    /// does not flatter it, it breaks it: the program emits the sequence, nothing happens, and the
+    /// screen it believes it drew is not the screen that is there. A program that reads attribute
+    /// 21 sets left and right margins and then draws inside them. One that reads attribute 2 pushes
+    /// a print job through printer-controller mode, which an emulator that never enters that mode
+    /// prints onto the screen instead.</para>
+    /// <para>So the list is the intersection of the DA attribute numbers with what the code
+    /// actually does, and nothing else. Deliberately absent, each checked against the tree:
+    /// 1 (132 columns -- <c>TerminalMode.ColumnMode</c> is in the enum, but <c>SetCSIMode</c> has
+    /// no case for it), 2 (printer -- there is no media copy command), 6 (selective erase -- no
+    /// DECSCA), 9 (national replacement character sets -- <c>Charsets</c> holds only the default,
+    /// the line drawing set and UK), 15 (technical characters), 21 (horizontal scrolling -- no
+    /// left and right margins).</para>
+    /// <para>Attribute 4, Sixel, is the one that visibly matters: libsixel, chafa, img2sixel and
+    /// everything built on them read this reply, and send text art instead of pictures unless they
+    /// see it. Claiming it while Sixel is switched off would be the same lie pointed the other
+    /// way, so it follows the option.</para>
+    /// </remarks>
+    private void DeviceAttributes(string identifier, Params parameters)
     {
-        // DA - Device Attributes (CSI c or CSI > c)
-        if (isPrivate)
+        // Only an absent or zero parameter is a request. A non-zero one is another terminal's
+        // reply that has arrived on our input, and answering that starts a ping-pong.
+        if (parameters.GetParam(0, 0) != 0)
+            return;
+
+        if (identifier.StartsWith('>'))
         {
-            // Secondary DA (CSI > c) - Report terminal ID and version
-            // Response: CSI > 0 ; version ; 0 c
-            // We report as VT100-compatible
-            _terminal.RaiseDataReceived("\u001b[>0;10;0c");
+            // Secondary DA: CSI > Pp ; Pv ; Pc c. Pp = 1 is a VT220, matching the conformance
+            // level the primary reply claims -- the old 0 said VT100 and contradicted it. Pv
+            // carries this library's version so a program can tell builds apart, and Pc = 0 is
+            // "no cartridge ROM".
+            _terminal.RaiseDataReceived(SecondaryDeviceAttributes);
         }
-        else
+        else if (identifier.Length == 1)
         {
-            // Primary DA (CSI c) - Report device attributes
-            // Response: CSI ? 1 ; 2 c (VT100 with AVO)
-            // More complete: CSI ? 1 ; 2 ; 6 ; 9 c
-            // 1 = 132 columns, 2 = Printer, 6 = Selective erase, 9 = National replacement character sets
-            //
-            // Attribute 4 is Sixel graphics, and it is not decoration: libsixel, chafa, img2sixel
-            // and everything built on them read this reply, and send text art instead of pictures
-            // unless they see it. Claiming it while Sixel is switched off would be a lie in the
-            // other direction, so it follows the option.
+            // Primary DA: CSI ? 62 ; ... c. 62 is service class 2 (VT220), the level whose core --
+            // scrolling regions, insert and delete line and character, erase character, the
+            // alternate buffer, DECSC/DECRC -- this emulator does implement. 22 is ANSI colour.
             _terminal.RaiseDataReceived(_terminal.Options.SixelEnabled
-                ? "\u001b[?1;2;4c"
-                : "\u001b[?1;2c");
+                ? "\u001b[?62;4;22c"
+                : "\u001b[?62;22c");
         }
+
+        // Any other prefix is left unanswered. "?c" is the one that used to go wrong: it is not the
+        // secondary DA, but it sets isPrivate, so it was handed the secondary reply -- the answer to
+        // a question the program had not asked, while it was still waiting for the one it had. The
+        // tertiary DA, "=c", never reaches this method at all, because ToCsiCommand strips only "?"
+        // and ">" before the lookup and so resolves it to Unknown. Silence is the right outcome for
+        // it regardless: it asks for a unit ID this terminal does not have, and terminals without
+        // DECRPTUI say nothing.
     }
+
+    /// <summary>
+    /// The Pv field of the secondary DA reply: this assembly's version flattened into one number,
+    /// so 2.0 reports 200.
+    /// </summary>
+    private static int FirmwareVersion =>
+        typeof(InputHandler).Assembly.GetName().Version is { } version
+            ? version.Major * 100 + version.Minor
+            : 0;
+
+    /// <summary>
+    /// The secondary DA reply, CSI &gt; Pp ; Pv ; Pc c.
+    /// </summary>
+    private static string SecondaryDeviceAttributes => $"\u001b[>1;{FirmwareVersion};0c";
 
     /// <summary>
     /// XTSMGRAPHICS -- CSI ? Pi ; Pa ; Pv S. Reports the terminal's graphics limits.
@@ -3202,6 +3432,45 @@ public class InputHandler
                 break;
         }
     }
+
+    /// <summary>
+    /// The version XTVERSION reports, read once. It cannot change while the process runs, and the
+    /// query arrives during the startup of every program that sends one, so rediscovering it
+    /// through reflection each time buys nothing.
+    /// </summary>
+    private static readonly string _versionText = ReadVersion();
+
+    private static string ReadVersion()
+    {
+        var version = typeof(InputHandler).Assembly.GetName().Version;
+
+        // Build is -1 on a version that carries only a major and a minor part.
+        return version is null
+            ? "0.0.0"
+            : $"{version.Major}.{version.Minor}.{Math.Max(0, version.Build)}";
+    }
+
+    /// <summary>
+    /// XTVERSION -- CSI > Ps q. Reports the terminal's name and version.
+    /// </summary>
+    /// <remarks>
+    /// <para>The reply is a DCS string, "DCS &gt; | text ST", in the shape xterm defined and the
+    /// terminals that answer have followed: xterm sends "XTerm(370)", foot "foot(1.13.1)", kitty
+    /// "kitty(0.26.5)". Programs send it to work out whether a capability they cannot otherwise
+    /// detect is safe to use, so being answerable at all matters more than what stands inside the
+    /// parentheses.</para>
+    /// <para>Ps 0 is the only request defined, and anything else goes unanswered: a program that
+    /// asked a question we do not know would otherwise read the version back as the answer to
+    /// it.</para>
+    /// </remarks>
+    private void ReportVersion(Params parameters)
+    {
+        if (parameters.GetParam(0, 0) != 0)
+            return;
+
+        _terminal.RaiseDataReceived($"\u001bP>|XTerm.NET({_versionText})\u001b\\");
+    }
+
     private void DeviceStatusReport(Params parameters, bool isPrivate)
     {
         // DSR - Device Status Report (CSI n or CSI ? n)
@@ -3448,8 +3717,49 @@ public class InputHandler
         return index;
     }
 
+    /// <summary>Applies a colour from SGR 38 or 48 to whichever side asked for it.</summary>
+    private void SetExtendedColor(int color, int mode, bool isForeground)
+    {
+        if (isForeground)
+            _curAttr.SetFgColor(color, mode);
+        else
+            _curAttr.SetBgColor(color, mode);
+    }
+
+    /// <summary>
+    /// SGR 38 and 48 — a foreground or background colour beyond the sixteen, either as a 256-palette
+    /// index or as direct RGB.
+    /// </summary>
+    /// <remarks>
+    /// Accepts the colour as sub-parameters (<c>38:2::r:g:b</c>) as well as separate parameters
+    /// (<c>38;2;r;g;b</c>), for the reason SGR 58 already does: both forms are in use, and taking
+    /// only one of them looks broken to half the callers. The colon form was already reaching the
+    /// parser, which collects it as sub-parameters, and then being dropped here — so a program that
+    /// asked for truecolor that way got no colour at all.
+    /// </remarks>
     private int HandleExtendedColor(Params parameters, int index, bool isForeground)
     {
+        var sub = parameters.GetSubParams(index);
+
+        if (sub is { Count: > 0 })
+        {
+            // 38:2::r:g:b — the empty slot is a colour space id nobody uses, and some programs
+            // leave it out entirely, so the run's length says where red starts.
+            if (sub[0] == 2 && sub.Count >= 4)
+            {
+                var offset = sub.Count >= 5 ? 2 : 1;
+                var rgb = (sub[offset] << 16) | (sub[offset + 1] << 8) | sub[offset + 2];
+                SetExtendedColor(rgb, 1, isForeground);
+            }
+            else if (sub[0] == 5 && sub.Count >= 2)
+            {
+                SetExtendedColor(sub[1], 0, isForeground);
+            }
+
+            // Sub-parameters belong to this parameter, so no later one was consumed.
+            return index;
+        }
+
         if (index + 1 >= parameters.Length)
             return index;
 
@@ -3460,24 +3770,13 @@ public class InputHandler
             var r = parameters.GetParam(index + 2, 0);
             var g = parameters.GetParam(index + 3, 0);
             var b = parameters.GetParam(index + 4, 0);
-            var rgb = (r << 16) | (g << 8) | b;
 
-            if (isForeground)
-                _curAttr.SetFgColor(rgb, 1);
-            else
-                _curAttr.SetBgColor(rgb, 1);
-
+            SetExtendedColor((r << 16) | (g << 8) | b, 1, isForeground);
             return index + 4;
         }
         else if (colorType == 5 && index + 2 < parameters.Length) // 256 color
         {
-            var color = parameters.GetParam(index + 2, 0);
-
-            if (isForeground)
-                _curAttr.SetFgColor(color);
-            else
-                _curAttr.SetBgColor(color);
-
+            SetExtendedColor(parameters.GetParam(index + 2, 0), 0, isForeground);
             return index + 2;
         }
 
