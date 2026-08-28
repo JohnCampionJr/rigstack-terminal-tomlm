@@ -166,6 +166,15 @@ public class TerminalOptions : ICloneable
     public bool ClipboardReadEnabled { get; set; }
 
     /// <summary>
+    /// Whether the Kitty keyboard protocol sequences (CSI u) are honoured.
+    /// </summary>
+    /// <remarks>
+    /// Turning it off makes the terminal ignore the query as well as the flags, so an application
+    /// probing with CSI ? u gets no answer and stays in legacy encoding.
+    /// </remarks>
+    public bool KittyKeyboardEnabled { get; set; } = true;
+
+    /// <summary>
     /// Budget for images held by client id but not currently on screen, in bytes.
     /// </summary>
     /// <remarks>
@@ -280,6 +289,7 @@ public class TerminalOptions : ICloneable
         KittyGraphicsEnabled = other.KittyGraphicsEnabled;
         ClipboardWriteEnabled = other.ClipboardWriteEnabled;
         ClipboardReadEnabled = other.ClipboardReadEnabled;
+        KittyKeyboardEnabled = other.KittyKeyboardEnabled;
         MaxImageRegistryBytes = other.MaxImageRegistryBytes;
         CellWidthPixels = other.CellWidthPixels;
         CellHeightPixels = other.CellHeightPixels;
@@ -494,6 +504,14 @@ public class ThemeOptions : ICloneable
 public class KeyEvent
 {
     public string Key { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The PHYSICAL key, named as a browser names ev.code ("KeyA", "Digit5", "Numpad7",
+    /// "ShiftLeft"), independent of layout. The Kitty keyboard protocol needs it twice over:
+    /// the base-layout key under a shifted or Option-composed character, and which of the two
+    /// Shift keys was actually pressed. Empty when the host cannot say.
+    /// </summary>
+    public string Code { get; set; } = string.Empty;
     public bool CtrlKey { get; set; }
     public bool AltKey { get; set; }
     public bool ShiftKey { get; set; }
