@@ -2838,9 +2838,22 @@ public class InputHandler
                 if (!_terminal.Options.ClipboardReadEnabled)
                     return;
 
-                var args = _terminal.RaiseClipboardReadRequested(target);
+                // Armed BEFORE the handler runs, so a host whose clipboard is asynchronous can
+                // let the handler return and answer later via Respond — the response format is
+                // the same either way, and null (or never calling) is the same silence an
+                // unhandled request produces.
+                var args = new Events.TerminalEvents.ClipboardReadEventArgs(target);
+                args.Arm(text =>
+                {
+                    if (text is null)
+                        return;
+                    var deferredEncoded = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(text));
+                    _terminal.RaiseDataReceived($"\u001b]52;{target};{deferredEncoded}\u0007");
+                });
+                _terminal.RaiseClipboardReadRequested(args);
                 if (args.Handled)
                 {
+                    args.Disarm();
                     var encoded = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(args.Text ?? string.Empty));
                     _terminal.RaiseDataReceived($"\u001b]52;{target};{encoded}\u0007");
                 }

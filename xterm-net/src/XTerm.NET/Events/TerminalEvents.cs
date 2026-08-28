@@ -251,6 +251,31 @@ public static class TerminalEvents
 
         /// <summary>The clipboard text to return when <see cref="Handled"/> is true.</summary>
         public string? Text { get; set; }
+
+        private Action<string?>? _respond;
+
+        /// <summary>
+        /// Answers the read AFTER the handler has returned — the path for hosts whose clipboard
+        /// API is asynchronous, where blocking the handler would deadlock the UI thread. A
+        /// terminal-to-application message is legal at any time, so the response is simply
+        /// emitted when this is called. Null declines: the terminal stays silent, exactly as an
+        /// unhandled request does. Call it from the thread the terminal is driven on. Setting
+        /// <see cref="Handled"/> synchronously wins: the response goes out as the handler
+        /// returns, and a later call here is ignored, as is a second call.
+        /// </summary>
+        public void Respond(string? text)
+        {
+            var respond = _respond;
+            _respond = null;
+            respond?.Invoke(text);
+        }
+
+        /// <summary>Installs what <see cref="Respond"/> emits; disarmed once used or once the
+        /// synchronous path has answered.</summary>
+        internal void Arm(Action<string?> respond) => _respond = respond;
+
+        /// <summary>The synchronous path answered, so a later <see cref="Respond"/> must not.</summary>
+        internal void Disarm() => _respond = null;
     }
 
     /// <summary>

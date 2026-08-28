@@ -309,6 +309,58 @@ public class OscSequenceTests
     }
 
     [Fact]
+    public void OscClipboard_Query_CanBeAnsweredAfterTheHandlerReturns()
+    {
+        // The async-host path: an Avalonia clipboard is awaited, so the handler returns first
+        // and answers later. The response must be byte-identical to the synchronous one.
+        var terminal = new Terminal(new TerminalOptions { ClipboardReadEnabled = true });
+        string? response = null;
+        terminal.DataReceived += (_, e) => response = e.Data;
+        TerminalEvents.ClipboardReadEventArgs? pending = null;
+        terminal.ClipboardReadRequested += (_, e) => pending = e;
+
+        terminal.Write("\u001b]52;c;?\u0007");
+        Assert.Null(response);                        // nothing answered yet...
+        pending!.Respond("deferred");
+        Assert.Equal("\u001b]52;c;ZGVmZXJyZWQ=\u0007", response);
+
+        response = null;
+        pending.Respond("again");                     // a second call is ignored
+        Assert.Null(response);
+    }
+
+    [Fact]
+    public void OscClipboard_DeferredDecline_StaysSilent()
+    {
+        var terminal = new Terminal(new TerminalOptions { ClipboardReadEnabled = true });
+        string? response = null;
+        terminal.DataReceived += (_, e) => response = e.Data;
+        TerminalEvents.ClipboardReadEventArgs? pending = null;
+        terminal.ClipboardReadRequested += (_, e) => pending = e;
+
+        terminal.Write("\u001b]52;c;?\u0007");
+        pending!.Respond(null);
+        Assert.Null(response);
+    }
+
+    [Fact]
+    public void OscClipboard_SyncAnswerDisarmsRespond()
+    {
+        // Handled synchronously answers as the handler returns; Respond afterwards must not
+        // produce a SECOND response.
+        var terminal = new Terminal(new TerminalOptions { ClipboardReadEnabled = true });
+        var responses = new List<string>();
+        terminal.DataReceived += (_, e) => responses.Add(e.Data);
+        TerminalEvents.ClipboardReadEventArgs? pending = null;
+        terminal.ClipboardReadRequested += (_, e) => { e.Handled = true; e.Text = "sync"; pending = e; };
+
+        terminal.Write("\u001b]52;c;?\u0007");
+        pending!.Respond("late");
+        Assert.Single(responses);
+        Assert.Equal("\u001b]52;c;c3luYw==\u0007", responses[0]);
+    }
+
+    [Fact]
     public void OscClipboard_Query_WhenEnabledAndDeclined_DoesNotRespond()
     {
         // Arrange

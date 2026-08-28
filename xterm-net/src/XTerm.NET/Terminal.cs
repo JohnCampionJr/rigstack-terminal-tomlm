@@ -981,12 +981,8 @@ public class Terminal
     internal void RaiseClipboardWriteRequested(string target, string text) =>
         ClipboardWriteRequested?.Invoke(this, new TerminalEvents.ClipboardWriteEventArgs(target, text));
 
-    internal TerminalEvents.ClipboardReadEventArgs RaiseClipboardReadRequested(string target)
-    {
-        var args = new TerminalEvents.ClipboardReadEventArgs(target);
+    internal void RaiseClipboardReadRequested(TerminalEvents.ClipboardReadEventArgs args) =>
         ClipboardReadRequested?.Invoke(this, args);
-        return args;
-    }
 
     internal void RaiseHyperlinkChanged(string? url) =>
         HyperlinkChanged?.Invoke(this, new TerminalEvents.HyperlinkEventArgs(url ?? string.Empty, url == null));
