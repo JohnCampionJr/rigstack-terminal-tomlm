@@ -2851,9 +2851,8 @@ public class InputHandler
                     _terminal.RaiseDataReceived($"\u001b]52;{target};{deferredEncoded}\u0007");
                 });
                 _terminal.RaiseClipboardReadRequested(args);
-                if (args.Handled)
+                if (args.Handled && args.Disarm())
                 {
-                    args.Disarm();
                     var encoded = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(args.Text ?? string.Empty));
                     _terminal.RaiseDataReceived($"\u001b]52;{target};{encoded}\u0007");
                 }

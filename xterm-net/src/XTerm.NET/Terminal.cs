@@ -1244,6 +1244,11 @@ public class Terminal
 
         // Clear all event subscriptions
         DataReceived = null;
+        ClipboardWriteRequested = null;
+        ClipboardReadRequested = null;
+        CursorStyleChanged = null;
+        SynchronizedOutputChanged = null;
+        BufferChanged = null;
         TitleChanged = null;
         BellRang = null;
         Resized = null;

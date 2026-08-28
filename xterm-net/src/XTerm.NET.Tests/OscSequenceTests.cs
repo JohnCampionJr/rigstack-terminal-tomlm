@@ -344,6 +344,28 @@ public class OscSequenceTests
     }
 
     [Fact]
+    public void OscClipboard_RespondInsideTheHandlerPlusHandled_EmitsOnce()
+    {
+        // Off-contract but easy to write: a handler that serves from a cache calls Respond
+        // synchronously AND sets Handled. The single-response guarantee must hold — whoever
+        // claims the response first wins, and the other path stays silent.
+        var terminal = new Terminal(new TerminalOptions { ClipboardReadEnabled = true });
+        var responses = new List<string>();
+        terminal.DataReceived += (_, e) => responses.Add(e.Data);
+        terminal.ClipboardReadRequested += (_, e) =>
+        {
+            e.Respond("cached");
+            e.Handled = true;
+            e.Text = "sync";
+        };
+
+        terminal.Write("\u001b]52;c;?\u0007");
+
+        Assert.Single(responses);
+        Assert.Equal("\u001b]52;c;Y2FjaGVk\u0007", responses[0]);
+    }
+
+    [Fact]
     public void OscClipboard_SyncAnswerDisarmsRespond()
     {
         // Handled synchronously answers as the handler returns; Respond afterwards must not

@@ -274,8 +274,17 @@ public static class TerminalEvents
         /// synchronous path has answered.</summary>
         internal void Arm(Action<string?> respond) => _respond = respond;
 
-        /// <summary>The synchronous path answered, so a later <see cref="Respond"/> must not.</summary>
-        internal void Disarm() => _respond = null;
+        /// <summary>
+        /// Claims the response for the synchronous path. False when <see cref="Respond"/> already
+        /// answered — a handler that responds from inside the handler AND sets Handled must still
+        /// produce exactly one response, so the loser of this claim stays silent.
+        /// </summary>
+        internal bool Disarm()
+        {
+            var wasArmed = _respond is not null;
+            _respond = null;
+            return wasArmed;
+        }
     }
 
     /// <summary>
