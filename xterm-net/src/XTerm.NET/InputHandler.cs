@@ -2320,6 +2320,17 @@ public class InputHandler
             _terminal.LastCommandExitCode = exitCode;
         }
 
+        // Anchor it. The event says a mark happened; the line says where, which is the half every
+        // use of shell integration actually needs -- jumping to the previous prompt, selecting a
+        // command's output, putting an exit status beside the command that produced it.
+        //
+        // Deliberately NOT cleared by erasing the cells it sits among. A mark records a position in
+        // the history rather than anything about the content there, and a shell redrawing its prompt
+        // with EL -- which is most of them -- would otherwise destroy the A mark it had just
+        // emitted, a moment before the prompt it marks is even printed.
+        var line = _buffer.Lines[_buffer.Y + _buffer.YBase];
+        line?.AddMark(new Buffer.LineMark(_buffer.X, mark, exitCode));
+
         _terminal.ShellIntegrationState = mark;
         _terminal.RaiseShellIntegrationMark(mark, exitCode);
     }

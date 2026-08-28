@@ -22,6 +22,11 @@ public class BufferLine : IEnumerable<BufferCell>
     private List<Graphics.LinePlacement>? _placements;
 
     /// <summary>
+    /// Shell-integration marks on this line, or null — which is every line that is not a prompt.
+    /// </summary>
+    private List<LineMark>? _marks;
+
+    /// <summary>
     /// The images those runs refer to, held strongly so they stay alive exactly as long as this line
     /// does — so a picture scrolled off the end of the scrollback dies with the last line showing it,
     /// with no eviction pass and nothing to keep in step with a buffer that scrolls.
@@ -353,6 +358,31 @@ public class BufferLine : IEnumerable<BufferCell>
     /// </summary>
     public bool HasImages => _placements is { Count: > 0 };
 
+    /// <summary>Whether this line carries any shell-integration mark.</summary>
+    public bool HasMarks => _marks is { Count: > 0 };
+
+    /// <summary>
+    /// The shell-integration marks on this line, in the order they were emitted.
+    /// </summary>
+    public IReadOnlyList<LineMark> Marks
+        => (IReadOnlyList<LineMark>?)_marks ?? Array.Empty<LineMark>();
+
+    /// <summary>
+    /// Records a mark at a column.
+    /// </summary>
+    /// <remarks>
+    /// A line collects several: a prompt emits A and then B, and a command that produces no output
+    /// finishes on the same line it started on.
+    /// </remarks>
+    internal void AddMark(LineMark mark)
+    {
+        _marks ??= new List<LineMark>(1);
+        _marks.Add(mark);
+    }
+
+    /// <summary>Drops every mark. Only line reuse does this; see <see cref="ResetInPlace"/>.</summary>
+    internal void ClearMarks() => _marks = null;
+
     /// <summary>
     /// The distinct images this line shows.
     /// </summary>
@@ -636,6 +666,11 @@ public class BufferLine : IEnumerable<BufferCell>
         // end of the scrollback from ever being collected — the one thing line ownership exists to
         // guarantee.
         ClearImages();
+
+        // And the marks. A recycled line is a NEW line -- the ring hands back the object it is about
+        // to drop, so anything left on it would reappear as history that never happened, a prompt
+        // marked in the middle of a program's output.
+        ClearMarks();
 
         Cache = null;
     }

@@ -925,6 +925,65 @@ public class Terminal
     internal void RaiseHyperlinkChanged(string? url) =>
         HyperlinkChanged?.Invoke(this, new TerminalEvents.HyperlinkEventArgs(url ?? string.Empty, url == null));
 
+    /// <summary>
+    /// The row of the nearest prompt above <paramref name="fromRow"/>, if there is one.
+    /// </summary>
+    /// <remarks>
+    /// <para>Jump-to-previous-prompt, which is the first thing shell integration is worth having
+    /// for. Rows are absolute indices into <see cref="TerminalBuffer.Lines"/>, so scrollback is
+    /// included and the answer is what a host scrolls to directly.</para>
+    /// <para>Here rather than in every host because it is the same walk each time and it has an
+    /// off-by-one worth getting right once: the search is strictly above the row given, so calling
+    /// it repeatedly from its own answer walks back through the history rather than sticking on the
+    /// prompt it just found.</para>
+    /// </remarks>
+    public bool TryFindPreviousPrompt(int fromRow, out int row)
+    {
+        var lines = Buffer.Lines;
+        for (var i = Math.Min(fromRow, lines.Length) - 1; i >= 0; i--)
+        {
+            if (HasPromptStart(lines[i]))
+            {
+                row = i;
+                return true;
+            }
+        }
+
+        row = -1;
+        return false;
+    }
+
+    /// <summary>The row of the nearest prompt below <paramref name="fromRow"/>, if there is one.</summary>
+    public bool TryFindNextPrompt(int fromRow, out int row)
+    {
+        var lines = Buffer.Lines;
+        for (var i = Math.Max(fromRow, -1) + 1; i < lines.Length; i++)
+        {
+            if (HasPromptStart(lines[i]))
+            {
+                row = i;
+                return true;
+            }
+        }
+
+        row = -1;
+        return false;
+    }
+
+    private static bool HasPromptStart(Buffer.BufferLine? line)
+    {
+        if (line is null || !line.HasMarks)
+            return false;
+
+        foreach (var mark in line.Marks)
+        {
+            if (mark.Kind == ShellIntegrationMark.PromptStart)
+                return true;
+        }
+
+        return false;
+    }
+
     internal void RaiseShellIntegrationMark(ShellIntegrationMark mark, int? exitCode) =>
         ShellIntegrationMarkReceived?.Invoke(this, new TerminalEvents.ShellIntegrationEventArgs(mark, exitCode));
 
