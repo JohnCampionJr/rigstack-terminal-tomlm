@@ -16,6 +16,8 @@ public class TerminalBuffer
     private int _x;
     private int _scrollBottom;
     private int _scrollTop;
+    private int _scrollLeft;
+    private int _scrollRight;
     private int _cols;
     private int _rows;
 
@@ -64,6 +66,23 @@ public class TerminalBuffer
     public int ScrollTop => _scrollTop;
     public int ScrollBottom => _scrollBottom;
 
+    /// <summary>The leftmost column of the scrolling region. Zero unless DECSLRM narrowed it.</summary>
+    public int ScrollLeft => _scrollLeft;
+
+    /// <summary>The rightmost column of the scrolling region. The last column unless DECSLRM narrowed it.</summary>
+    public int ScrollRight => _scrollRight;
+
+    /// <summary>
+    /// True while the scrolling region spans every column, which is the ordinary case.
+    /// </summary>
+    /// <remarks>
+    /// Worth testing before anything else, because a full-width region scrolls by moving whole LINES
+    /// through the ring -- which is what feeds the scrollback and what the line recycling depends on.
+    /// Narrowed margins cannot use that path at all: only part of each line moves, the rest stays,
+    /// and nothing is promoted to scrollback. Two implementations, and this decides between them.
+    /// </remarks>
+    public bool MarginsAreFullWidth => _scrollLeft == 0 && _scrollRight >= _cols - 1;
+
     public CircularList<BufferLine> Lines => _lines;
 
     /// <summary>
@@ -111,6 +130,8 @@ public class TerminalBuffer
         _x = 0;
         _scrollTop = 0;
         _scrollBottom = rows - 1;
+        _scrollLeft = 0;
+        _scrollRight = cols - 1;
         SavedCursorState = new SavedCursor();
 
         // Initialize buffer with empty lines
@@ -146,6 +167,15 @@ public class TerminalBuffer
     /// </summary>
     public void ScrollUp(int lines, bool isWrapped = false)
     {
+        // Decided here rather than at each call site. Every path that scrolls -- a wrap at the
+        // bottom of the region, LF, IND, DECSTBM's own scroll -- arrives through this, so putting
+        // the choice anywhere else means finding all of them and finding them again next time.
+        if (!MarginsAreFullWidth)
+        {
+            ScrollMarginColumns(_scrollTop, _scrollBottom, lines, up: true, BlankFill());
+            return;
+        }
+
         for (int i = 0; i < lines; i++)
         {
             BufferLine newLine;
@@ -241,6 +271,12 @@ public class TerminalBuffer
     /// </summary>
     public void ScrollDown(int lines)
     {
+        if (!MarginsAreFullWidth)
+        {
+            ScrollMarginColumns(_scrollTop, _scrollBottom, lines, up: false, BlankFill());
+            return;
+        }
+
         for (int i = 0; i < lines; i++)
         {
             // Calculate absolute positions in the buffer
@@ -354,6 +390,109 @@ public class TerminalBuffer
     {
         _scrollTop = 0;
         _scrollBottom = _rows - 1;
+
+        // The columns too. RIS and DECSTR both come through here, and either leaving margins in
+        // force across a full reset would hand the next application a region it never asked for and
+        // has no reason to check.
+        ResetLeftRightMargins();
+    }
+
+    /// <summary>
+    /// Sets the left and right margins (DECSLRM). Both are inclusive and zero-based.
+    /// </summary>
+    /// <returns>False when the pair is degenerate, in which case nothing is changed.</returns>
+    /// <remarks>
+    /// A right margin at or left of the left one is refused rather than clamped. DEC requires the
+    /// region to be at least two columns wide, and clamping a nonsense pair into a legal one leaves
+    /// an application drawing into a region it did not ask for and cannot detect -- whereas ignoring
+    /// it leaves the previous margins in force, which the application can at least query.
+    /// </remarks>
+    public bool SetLeftRightMargins(int left, int right)
+    {
+        left = Math.Clamp(left, 0, _cols - 1);
+        right = Math.Clamp(right, 0, _cols - 1);
+
+        if (right <= left)
+            return false;
+
+        _scrollLeft = left;
+        _scrollRight = right;
+        return true;
+    }
+
+    /// <summary>Widens the margins back to the whole screen.</summary>
+    public void ResetLeftRightMargins()
+    {
+        _scrollLeft = 0;
+        _scrollRight = _cols - 1;
+    }
+
+    /// <summary>
+    /// Moves the margin columns of rows <paramref name="top"/>..<paramref name="bottom"/> by
+    /// <paramref name="count"/> rows, filling what it vacates.
+    /// </summary>
+    /// <remarks>
+    /// <para>The narrowed-margin counterpart of <see cref="ScrollUp"/>, and a different operation
+    /// rather than a parameter on it. A full-width scroll moves whole LINES through the ring: the
+    /// top line is promoted to scrollback and a blank one appended. Only part of each line moves
+    /// here, so the lines stay where they are and their cells are copied between them -- and nothing
+    /// reaches the scrollback, because half a line is not a line anyone could scroll back to.</para>
+    /// <para>Copying row by row in the direction of travel, so a region taller than the distance
+    /// moved does not overwrite what it has yet to read.</para>
+    /// </remarks>
+    public void ScrollMarginColumns(int top, int bottom, int count, bool up, BufferCell fill)
+    {
+        if (count <= 0 || top > bottom)
+            return;
+
+        var left = _scrollLeft;
+        var width = _scrollRight - _scrollLeft + 1;
+        if (width <= 0)
+            return;
+
+        var rows = bottom - top + 1;
+        count = Math.Min(count, rows);
+
+        if (up)
+        {
+            for (var row = top; row <= bottom - count; row++)
+                CopyMarginColumns(row + count, row, left, width);
+
+            for (var row = bottom - count + 1; row <= bottom; row++)
+                FillMarginColumns(row, left, width, fill);
+        }
+        else
+        {
+            for (var row = bottom; row >= top + count; row--)
+                CopyMarginColumns(row - count, row, left, width);
+
+            for (var row = top; row < top + count; row++)
+                FillMarginColumns(row, left, width, fill);
+        }
+    }
+
+    /// <summary>The blank a scroll leaves behind, matching what the full-width path fills with.</summary>
+    private static BufferCell BlankFill()
+    {
+        var cell = BufferCell.Space;
+        cell.Attributes = AttributeData.Default;
+        return cell;
+    }
+
+    private void CopyMarginColumns(int fromRow, int toRow, int left, int width)
+    {
+        var from = _lines[_yBase + fromRow];
+        var to = _lines[_yBase + toRow];
+        if (from is null || to is null)
+            return;
+
+        to.CopyCellsFrom(from, left, left, width, false);
+    }
+
+    private void FillMarginColumns(int row, int left, int width, BufferCell fill)
+    {
+        var line = _lines[_yBase + row];
+        line?.Fill(fill, left, left + width);
     }
 
     /// <summary>
@@ -449,6 +588,7 @@ public class TerminalBuffer
         }
 
         var oldRows = _rows;
+        var oldCols = _cols;
         _cols = newCols;
         _rows = newRows;
 
@@ -461,6 +601,20 @@ public class TerminalBuffer
             _scrollBottom = Math.Min(_scrollBottom, newRows - 1);
         }
         _scrollTop = Math.Min(_scrollTop, newRows - 1);
+
+        // The same for the columns. A right margin that reached the old edge follows the new one --
+        // an application that asked for "everything" should keep getting everything -- and a
+        // narrower one is clamped in. If the clamp makes the pair degenerate, the margins go back to
+        // the whole screen rather than leaving a region no write could land in.
+        if (_scrollRight >= oldCols - 1)
+            _scrollRight = newCols - 1;
+        else
+            _scrollRight = Math.Min(_scrollRight, Math.Max(0, newCols - 1));
+
+        _scrollLeft = Math.Min(_scrollLeft, Math.Max(0, newCols - 1));
+
+        if (_scrollRight <= _scrollLeft)
+            ResetLeftRightMargins();
 
         // Clamp, not Min. Moving to the NEW column count was the point of this change, but dropping
         // the lower bound with it meant a negative cursor -- which SetCursorRaw exists to allow --

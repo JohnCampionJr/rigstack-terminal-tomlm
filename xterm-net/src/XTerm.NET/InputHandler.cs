@@ -232,18 +232,18 @@ public class InputHandler
 
 
         // Handle autowrap
-        if (_buffer.X >= _terminal.Cols)
+        if (_buffer.X > WrapLimit())
         {
             if (_terminal.Options.Wraparound)
             {
                 if (_buffer.Y == _buffer.ScrollBottom)
                 {
-                    _buffer.SetCursor(0, _buffer.Y);
+                    _buffer.SetCursor(WrapHome(), _buffer.Y);
                     _buffer.ScrollUp(1, true);
                 }
                 else
                 {
-                    _buffer.SetCursor(0, _buffer.Y + 1);
+                    _buffer.SetCursor(WrapHome(), _buffer.Y + 1);
                 }
                 _buffer.Lines[_buffer.Y + _buffer.YBase]!.IsWrapped = true;
             }
@@ -299,8 +299,11 @@ public class InputHandler
         // Handle wide characters
         if (width == 2)
         {
-            // Set following cell as a spacer
-            if (_buffer.X + 1 < _terminal.Cols)
+            // Set following cell as a spacer, bounded by the right MARGIN rather than the screen --
+            // otherwise a double-width character sitting on the last column of a region plants its
+            // spacer in the pane next door. Identical to the old test when no margins are set, since
+            // the limit is then the last column.
+            if (_buffer.X + 1 <= WrapLimit())
             {
                 var spacer = BufferCell.Empty;
                 spacer.Attributes = _curAttr;
@@ -429,19 +432,19 @@ public class InputHandler
 
         while (!data.IsEmpty)
         {
-            if (_buffer.X >= _terminal.Cols)
+            if (_buffer.X > WrapLimit())
             {
                 if (!_terminal.Options.Wraparound)
                     return;
 
                 if (_buffer.Y == _buffer.ScrollBottom)
                 {
-                    _buffer.SetCursor(0, _buffer.Y);
+                    _buffer.SetCursor(WrapHome(), _buffer.Y);
                     _buffer.ScrollUp(1, true);
                 }
                 else
                 {
-                    _buffer.SetCursor(0, _buffer.Y + 1);
+                    _buffer.SetCursor(WrapHome(), _buffer.Y + 1);
                 }
 
                 _buffer.Lines[_buffer.Y + _buffer.YBase]!.IsWrapped = true;
@@ -451,7 +454,11 @@ public class InputHandler
             if (line == null)
                 return;
 
-            var take = Math.Min(_terminal.Cols - _buffer.X, data.Length);
+            // Bounded by the right MARGIN, not the screen. A batched run bypasses the per-character
+            // wrap check above, so without this it writes straight through the margin and out the
+            // other side -- and only when the fast path takes the write, which is the difference
+            // that reads as an intermittent fault rather than a missing case.
+            var take = Math.Min(WrapLimit() + 1 - _buffer.X, data.Length);
             line.SetSingleWidthRun(_buffer.X, data[..take], _curAttr);
 
             // This path bypasses Print, so it keeps the link bookkeeping itself -- otherwise a link
@@ -499,19 +506,19 @@ public class InputHandler
         {
             // Autowrap, matching Print. The cursor is allowed to rest one past the last column, so
             // the wrap is resolved here rather than when the previous character was written.
-            if (_buffer.X >= _terminal.Cols)
+            if (_buffer.X > WrapLimit())
             {
                 if (!_terminal.Options.Wraparound)
                     return;   // printing past the edge is discarded, as in Print
 
                 if (_buffer.Y == _buffer.ScrollBottom)
                 {
-                    _buffer.SetCursor(0, _buffer.Y);
+                    _buffer.SetCursor(WrapHome(), _buffer.Y);
                     _buffer.ScrollUp(1, true);
                 }
                 else
                 {
-                    _buffer.SetCursor(0, _buffer.Y + 1);
+                    _buffer.SetCursor(WrapHome(), _buffer.Y + 1);
                 }
 
                 _buffer.Lines[_buffer.Y + _buffer.YBase]!.IsWrapped = true;
@@ -521,7 +528,8 @@ public class InputHandler
             if (line == null)
                 return;
 
-            var take = Math.Min(_terminal.Cols - _buffer.X, remaining);
+            // As above: the margin bounds the batch, or the fast path leaks past it.
+            var take = Math.Min(WrapLimit() + 1 - _buffer.X, remaining);
             line.SetSingleWidthRun(_buffer.X, data.AsSpan(pos, take), _curAttr);
 
             // As above: bypassing Print means keeping the link bookkeeping here as well.
@@ -826,7 +834,14 @@ public class InputHandler
                 break;
 
             case CsiCommand.SaveCursorAnsi:
-                SaveCursorAnsi();
+                // CSI s is two sequences sharing a final character, and the mode decides which.
+                // With DECLRMM set it is DECSLRM; without it, Save Cursor. This is the one place in
+                // the dispatch where that is true, and getting it backwards would make an
+                // application's margins silently save the cursor instead.
+                if (_terminal.LeftRightMarginMode)
+                    SetLeftRightMargins(parameters);
+                else
+                    SaveCursorAnsi();
                 break;
 
             case CsiCommand.RestoreCursorAnsi:
@@ -2632,7 +2647,7 @@ public class InputHandler
 
     private void CursorCharAbsolute(Params parameters)
     {
-        var col = Math.Max(parameters.GetParam(0, 1), 1) - 1;
+        var col = GetAbsoluteCursorCol(Math.Max(parameters.GetParam(0, 1), 1) - 1);
         _buffer.SetCursor(col, _buffer.Y);
     }
 
@@ -2641,6 +2656,7 @@ public class InputHandler
         var row = Math.Max(parameters.GetParam(0, 1), 1) - 1;
         var col = Math.Max(parameters.GetParam(1, 1), 1) - 1;
         row = GetAbsoluteCursorRow(row);
+        col = GetAbsoluteCursorCol(col);
         _buffer.SetCursor(col, row);
     }
 
@@ -2751,12 +2767,73 @@ public class InputHandler
             Print(text);
     }
 
+    /// <summary>
+    /// The last column a write may land on before it wraps.
+    /// </summary>
+    /// <remarks>
+    /// The right margin, not the screen edge — that is what makes text stay inside its pane. But
+    /// only for a cursor already INSIDE the margins: a cursor parked to the right of them is not in
+    /// the region at all, and wrapping it at the margin would drag it into a pane it was never in.
+    /// xterm draws the same distinction, and it is the reason this is a method rather than a field.
+    /// </remarks>
+    private int WrapLimit()
+    {
+        // ScrollRight + 1 is INSIDE, not outside. The cursor is allowed to rest one past the last
+        // column it wrote, which is how a pending wrap is represented -- so a cursor that has just
+        // filled to the right margin sits at ScrollRight + 1 and is still in the region. Reading
+        // that as outside handed the limit back to the screen edge at exactly the moment the wrap
+        // was due, and the text ran straight through the margin.
+        if (_buffer.MarginsAreFullWidth
+            || _buffer.X < _buffer.ScrollLeft
+            || _buffer.X > _buffer.ScrollRight + 1)
+            return _terminal.Cols - 1;
+
+        return _buffer.ScrollRight;
+    }
+
+    /// <summary>The column a wrapped line begins on: the left margin, for the same reason.</summary>
+    private int WrapHome()
+    {
+        if (_buffer.MarginsAreFullWidth || _buffer.X < _buffer.ScrollLeft || _buffer.X > _buffer.ScrollRight + 1)
+            return 0;
+
+        return _buffer.ScrollLeft;
+    }
+
+    /// <summary>
+    /// Whether the cursor is inside the scrolling region — the box, not just the band of rows.
+    /// </summary>
+    /// <remarks>
+    /// IL and DL do nothing from outside it. With margins that has to include the columns: a cursor
+    /// in the right-hand pane of a split layout is outside the left pane's region, and shifting the
+    /// left pane's lines from there is the exact corruption margins exist to prevent.
+    /// </remarks>
+    private bool InsideScrollRegion()
+        => _buffer.Y >= _buffer.ScrollTop && _buffer.Y <= _buffer.ScrollBottom
+        && _buffer.X >= _buffer.ScrollLeft && _buffer.X <= _buffer.ScrollRight;
+
+    /// <summary>A blank carrying the current attributes, which is what BCE fills with.</summary>
+    private BufferCell BlankCell()
+    {
+        var cell = BufferCell.Space;
+        cell.Attributes = _curAttr;
+        return cell;
+    }
+
     private void InsertLines(Params parameters)
     {
         var count = Math.Max(parameters.GetParam(0, 1), 1);
-        // Only works in scroll region
-        if (_buffer.Y < _buffer.ScrollTop || _buffer.Y > _buffer.ScrollBottom)
+        if (!InsideScrollRegion())
             return;
+
+        // Narrowed margins move only their own columns, so the lines stay put and their cells are
+        // copied between them. Splicing whole lines here would drag the columns OUTSIDE the region
+        // along with them, which is the side-by-side layout tearing itself apart.
+        if (!_buffer.MarginsAreFullWidth)
+        {
+            _buffer.ScrollMarginColumns(_buffer.Y, _buffer.ScrollBottom, count, up: false, BlankCell());
+            return;
+        }
 
         for (int i = 0; i < count; i++)
         {
@@ -2769,9 +2846,14 @@ public class InputHandler
     private void DeleteLines(Params parameters)
     {
         var count = Math.Max(parameters.GetParam(0, 1), 1);
-        // Only works in scroll region
-        if (_buffer.Y < _buffer.ScrollTop || _buffer.Y > _buffer.ScrollBottom)
+        if (!InsideScrollRegion())
             return;
+
+        if (!_buffer.MarginsAreFullWidth)
+        {
+            _buffer.ScrollMarginColumns(_buffer.Y, _buffer.ScrollBottom, count, up: true, BlankCell());
+            return;
+        }
 
         for (int i = 0; i < count; i++)
         {
@@ -2788,14 +2870,18 @@ public class InputHandler
         if (line == null)
             return;
 
-        // Shift cells right from cursor position
-        line.CopyCellsFrom(line, _buffer.X, _buffer.X + count,
-            _terminal.Cols - _buffer.X - count, false);
+        // The right margin bounds this, not the screen. Shifting past it would push characters out
+        // of one pane and into the next, which is the whole thing margins are for.
+        var right = _buffer.ScrollRight;
+        if (_buffer.X > right)
+            return;
 
-        // Blank the inserted cells at cursor position
-        var emptyCell = BufferCell.Space;
-        emptyCell.Attributes = _curAttr;
-        line.Fill(emptyCell, _buffer.X, Math.Min(_buffer.X + count, _terminal.Cols));
+        count = Math.Min(count, right - _buffer.X + 1);
+
+        line.CopyCellsFrom(line, _buffer.X, _buffer.X + count,
+            right - _buffer.X - count + 1, false);
+
+        line.Fill(BlankCell(), _buffer.X, Math.Min(_buffer.X + count, right + 1));
     }
 
     private void DeleteChars(Params parameters)
@@ -2805,17 +2891,18 @@ public class InputHandler
         if (line == null)
             return;
 
-        // Limit count to remaining characters on line
-        var remaining = _terminal.Cols - _buffer.X;
-        count = Math.Min(count, remaining);
+        // As with ICH, the right margin is the edge -- so what is pulled in comes from inside the
+        // region and the blanks appear at the margin, not at the screen edge.
+        var right = _buffer.ScrollRight;
+        if (_buffer.X > right)
+            return;
+
+        count = Math.Min(count, right - _buffer.X + 1);
 
         line.CopyCellsFrom(line, _buffer.X + count, _buffer.X,
-            _terminal.Cols - _buffer.X - count, false);
+            right - _buffer.X - count + 1, false);
 
-        // Fill vacated cells at right edge with current attributes (BCE)
-        var emptyCell = BufferCell.Space;
-        emptyCell.Attributes = _curAttr;
-        line.Fill(emptyCell, _terminal.Cols - count, _terminal.Cols);
+        line.Fill(BlankCell(), right - count + 1, right + 1);
     }
 
     private void EraseChars(Params parameters)
@@ -3271,6 +3358,30 @@ public class InputHandler
         return index;
     }
 
+    /// <summary>
+    /// DECSLRM (<c>CSI Pl ; Pr s</c>) — set the left and right margins of the scrolling region.
+    /// </summary>
+    /// <remarks>
+    /// <para>Only reachable while DECLRMM is set; see the dispatch above for why.</para>
+    /// <para>Omitted parameters mean the extremes, so a bare <c>CSI s</c> under the mode widens the
+    /// margins back to the whole screen rather than doing nothing.</para>
+    /// <para>The cursor goes home afterwards, as it does for DECSTBM. A cursor left outside the new
+    /// region is the thing that makes the next write land somewhere the application did not choose.</para>
+    /// </remarks>
+    private void SetLeftRightMargins(Params parameters)
+    {
+        var left = Math.Max(parameters.GetParam(0, 1), 1) - 1;
+        var right = Math.Max(parameters.GetParam(1, _terminal.Cols), 1) - 1;
+
+        // A degenerate pair is refused outright, and then so is the cursor move: DEC leaves the old
+        // margins in force, and homing the cursor to a region that was not set would be a visible
+        // effect from a sequence that had none.
+        if (!_buffer.SetLeftRightMargins(left, right))
+            return;
+
+        MoveCursorToHome();
+    }
+
     private void SetScrollRegion(Params parameters)
     {
         var top = Math.Max(parameters.GetParam(0, 1), 1) - 1;
@@ -3292,8 +3403,30 @@ public class InputHandler
 
     private void MoveCursorToHome()
     {
+        // Home is the top-left of the SCROLLING REGION under origin mode, which with margins is a
+        // box rather than a band -- so the column matters as well as the row.
         var row = _terminal.OriginMode ? _buffer.ScrollTop : 0;
-        _buffer.SetCursor(0, row);
+        var col = _terminal.OriginMode ? _buffer.ScrollLeft : 0;
+        _buffer.SetCursor(col, row);
+    }
+
+    /// <summary>
+    /// Turns a column an application asked for into an absolute one, honouring origin mode.
+    /// </summary>
+    /// <remarks>
+    /// The column twin of <see cref="GetAbsoluteCursorRow"/>. Under origin mode an application
+    /// addresses the region rather than the screen, so column 1 is the left margin and nothing it
+    /// asks for can land outside the box.
+    /// </remarks>
+    private int GetAbsoluteCursorCol(int col)
+    {
+        if (_terminal.OriginMode)
+        {
+            long absolute = (long)_buffer.ScrollLeft + col;
+            return (int)Math.Clamp(absolute, _buffer.ScrollLeft, _buffer.ScrollRight);
+        }
+
+        return Math.Clamp(col, 0, Math.Max(0, _terminal.Cols - 1));
     }
 
     private void WindowManipulation(Params parameters)
@@ -3530,11 +3663,26 @@ public class InputHandler
             return;
 
         var mode = parameters.GetParam(0, 0);
-        if (mode != (int)TerminalMode.SynchronizedOutput)
-            return;
 
         // DECRPM: 1 = set, 2 = reset.
-        var state = _terminal.SynchronizedOutput ? 1 : 2;
+        int state;
+        switch ((TerminalMode)mode)
+        {
+            case TerminalMode.SynchronizedOutput:
+                state = _terminal.SynchronizedOutput ? 1 : 2;
+                break;
+
+            // Worth answering, because an application that cannot ask will not use the feature: the
+            // whole point of DECSLRM is a layout that behaves differently when margins are available,
+            // and a well-behaved one checks before relying on them.
+            case TerminalMode.LeftRightMargin:
+                state = _terminal.LeftRightMarginMode ? 1 : 2;
+                break;
+
+            default:
+                return;
+        }
+
         _terminal.RaiseDataReceived($"\u001b[?{mode};{state}$y");
     }
 
@@ -3580,6 +3728,10 @@ public class InputHandler
                 case TerminalMode.Origin:
                     _terminal.OriginMode = true;
                     MoveCursorToHome();
+                    break;
+
+                case TerminalMode.LeftRightMargin:
+                    _terminal.LeftRightMarginMode = true;
                     break;
 
                 case TerminalMode.Wraparound:
@@ -3785,6 +3937,14 @@ public class InputHandler
                 case TerminalMode.Origin:
                     _terminal.OriginMode = false;
                     MoveCursorToHome();
+                    break;
+
+                case TerminalMode.LeftRightMargin:
+                    // Turning the mode off widens the margins back out, per DEC. Leaving them
+                    // narrowed would keep the region in force with no sequence able to reach it --
+                    // CSI s means Save Cursor again the moment the mode is off.
+                    _terminal.LeftRightMarginMode = false;
+                    _buffer.ResetLeftRightMargins();
                     break;
 
                 case TerminalMode.Wraparound:

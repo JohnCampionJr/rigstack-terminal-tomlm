@@ -38,6 +38,12 @@ public class Terminal
     public bool ApplicationKeypad { get; set; }
     public bool BracketedPasteMode { get; set; }
     public bool OriginMode { get; set; }
+
+    /// <summary>
+    /// DECLRMM (mode 69). While set, <c>CSI Pl ; Pr s</c> sets the left and right margins rather
+    /// than saving the cursor, and the scrolling region is a box instead of a band of rows.
+    /// </summary>
+    public bool LeftRightMarginMode { get; set; }
     public bool CursorVisible { get; set; }
     public bool ReverseWraparound { get; set; }
     public bool ReverseVideo { get; set; }
@@ -324,6 +330,7 @@ public class Terminal
         ApplicationKeypad = false;
         BracketedPasteMode = false;
         OriginMode = false;
+        LeftRightMarginMode = false;
         CursorVisible = true;
         ReverseWraparound = false;
         SendFocusEvents = false;
@@ -469,6 +476,7 @@ public class Terminal
         ApplicationKeypad = false;
         BracketedPasteMode = false;
         OriginMode = false;
+        LeftRightMarginMode = false;
         CursorVisible = true;
         ReverseWraparound = false;
         ReverseVideo = false;
