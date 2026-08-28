@@ -2938,10 +2938,10 @@ public class InputHandler
     /// XTSMGRAPHICS -- CSI ? Pi ; Pa ; Pv S. Reports the terminal's graphics limits.
     /// </summary>
     /// <remarks>
-    /// <para>This shares its final character with SCROLL UP, and <c>ToCsiCommand</c> strips the
-    /// private marker before looking the command up, so until this existed a graphics query
-    /// scrolled the screen instead of being answered. Every Sixel-capable program sends one during
-    /// startup, which made the damage routine rather than obscure.</para>
+    /// <para>This shares its final character with SCROLL UP, and <c>ToCsiCommand</c> used to strip
+    /// the private marker before looking the command up, so a graphics query scrolled the screen
+    /// instead of being answered. Every Sixel-capable program sends one during startup, which made
+    /// the damage routine rather than obscure. The lookup now matches "?S" on its own.</para>
     /// <para>Only the read operations are answered. The limits are fixed, so accepting a request
     /// to change them and quietly not doing it would be worse than refusing outright.</para>
     /// </remarks>

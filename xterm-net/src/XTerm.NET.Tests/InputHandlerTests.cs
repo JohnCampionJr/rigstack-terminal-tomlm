@@ -1442,24 +1442,6 @@ public class InputHandlerTests
     }
 
     [Fact]
-    public void HandleCsi_PrivateRestoreCursorQuery_DoesNotRestoreCursor()
-    {
-        // Arrange
-        var terminal = CreateTerminal();
-        var handler = new InputHandler(terminal);
-        terminal.Buffer.SetCursor(10, 5);
-        handler.HandleCsi("s", new Params());
-        terminal.Buffer.SetCursor(30, 15);
-
-        // Act
-        handler.HandleCsi("?u", new Params());
-
-        // Assert
-        Assert.Equal(30, terminal.Buffer.X);
-        Assert.Equal(15, terminal.Buffer.Y);
-    }
-
-    [Fact]
     public void HandleCsi_EraseInDisplay_ClearAbove()
     {
         // Arrange

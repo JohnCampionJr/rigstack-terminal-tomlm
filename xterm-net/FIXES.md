@@ -692,3 +692,61 @@ Every guard added here was checked by breaking the code it guards and confirming
 with a useful message. Three tests did not, and were rewritten rather than kept: a column delete
 over a two-column picture that swallowed an off-by-one, a gapless-frame test whose timing landed on
 the right frame either way, and a bitmap-cache test that never looked again after the refresh.
+
+# Private CSI sequences stop being aliases of their namesakes
+
+## Summary
+
+`CsiCommandExtensions.ToCsiCommand` stripped a leading `?` or `>` off the CSI identifier and looked
+up what was left. That made every DEC private sequence an alias for whichever non-private command
+happened to share its final character, whether or not the two had anything to do with each other.
+The lookup now matches the identifier the parser actually built, private marker included, and a
+private form is dispatched only where the table lists it. Anything else falls out as
+`CsiCommand.Unknown` and is ignored, which is what an unimplemented sequence should do.
+
+## Why
+
+The stripping was there to make `CSI ? Pm h` reach DECSET, and for `h`, `l`, `n` and `$p` the
+private and non-private forms genuinely are the same handler with a flag. For everything else the
+final character is a coincidence, and the alias ran the wrong command on input that ordinary
+programs emit at startup:
+
+| Sequence | What it is | What ran instead |
+|---|---|---|
+| `CSI ? Pi ; Pa ; Pv S` | XTSMGRAPHICS, a Sixel capability query | SCROLL UP — the screen jumped whenever a graphics program started |
+| `CSI > 4 ; 2 m` | XTMODKEYS, keyboard negotiation | SGR 4 ; 2 — underline and dim on everything printed afterwards |
+| `CSI > 1 u` / `CSI ? u` | the Kitty keyboard protocol | RESTORE CURSOR — the cursor teleported to wherever it was last saved |
+| `CSI ? Pm s` | XTSAVE, saves private modes | SAVE CURSOR — clobbered the position the application had saved on purpose |
+| `CSI ? Pm r` | XTRESTORE, restores private modes | SET SCROLLING REGION with the mode number as a row, then home |
+| `CSI > Ps q` | XTVERSION, "what terminal are you" | DECSCUSR — changed the cursor shape |
+| `CSI > Ps t` | XTSMTITLE, title reporting | XTWINOPS — `CSI > 2 t` minimised the window |
+
+XTSMGRAPHICS had already been patched in the dispatcher, with an `isPrivate` check inside the
+SCROLL UP case. That fixed the one symptom anyone had noticed and left the other six, which is the
+argument for fixing the lookup rather than the case: the aliasing is the defect, and it produces a
+new one for every final character the two namespaces share.
+
+## What is mapped now
+
+Private identifiers are listed explicitly: `?J` (DECSED), `?K` (DECSEL), `?S` (XTSMGRAPHICS), `?h`
+(DECSET), `?l` (DECRST), `?n` (DEC DSR), `>c` (secondary DA) and `?$p` (private DECRQM). `?c` was
+dropped: `CSI ? c` is not a sequence, and answering it as a secondary DA was an artefact of the
+stripping rather than a decision.
+
+`XTSMGRAPHICS` gets its own `CsiCommand.GraphicsAttributes` instead of borrowing `ScrollUp`, so the
+dispatcher no longer needs to re-decide which command it is holding.
+
+## Files changed
+
+- `src/XTerm.NET/Common/CommandExtensions.cs` -- exact identifier match; private entries listed
+- `src/XTerm.NET/Common/CsiCommand.cs` -- `GraphicsAttributes`
+- `src/XTerm.NET/InputHandler.cs` -- XTSMGRAPHICS dispatches on its own command, not on a flag
+- `src/XTerm.NET.Tests/Common/CsiCommandExtensionsTests.cs` -- the mapping table, both directions
+- `src/XTerm.NET.Tests/PrivateCsiDispatchTests.cs` -- each misroute above, driven through `Write`,
+  plus the implemented private sequences still reaching their handlers
+
+## Validation
+
+```powershell
+dotnet test src/XTerm.NET.slnx
+```
