@@ -287,18 +287,21 @@ public class OscSequenceTests
         // Arrange
         var terminal = CreateTerminal();
         TerminalEvents.ClipboardWriteEventArgs? request = null;
+        string? response = null;
         terminal.ClipboardWriteRequested += (_, e) => request = e;
+        terminal.DataReceived += (_, e) => response = e.Data;
 
         // Act
-        terminal.Write("\x1B]5522;type=write:mime=text/plain;aGV\x07");
-        terminal.Write("\x1B]5522;type=write:mime=text/plain;sbG8=\x07");
-        terminal.Write("\x1B]5522;type=write:mime=text/plain;\x07");
+        terminal.Write("\x1B]5522;type=write\x1B\\");
+        terminal.Write("\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;aGVsbG8=\x07");
+        terminal.Write("\x1B]5522;type=wdata\x1B\\");
 
         // Assert
         Assert.NotNull(request);
         Assert.Equal("c", request!.Target);
         Assert.Equal("text/plain", request.MimeType);
         Assert.Equal("hello", request.Text);
+        Assert.Equal("\x1B]5522;type=write:status=DONE\x1B\\", response);
     }
 
     [Fact]
@@ -310,13 +313,33 @@ public class OscSequenceTests
         terminal.ClipboardWriteRequested += (_, e) => request = e;
 
         // Act
-        terminal.Write("\x1B]5522;type=write:mime=image/png;AP+A\x07");
-        terminal.Write("\x1B]5522;type=write:mime=image/png;\x07");
+        terminal.Write("\x1B]5522;type=write\x1B\\");
+        terminal.Write("\x1B]5522;type=wdata:mime=aW1hZ2UvcG5n;AP+A\x07");
+        terminal.Write("\x1B]5522;type=wdata\x1B\\");
 
         // Assert
         Assert.NotNull(request);
         Assert.Equal("image/png", request!.MimeType);
         Assert.Equal([0x00, 0xFF, 0x80], request.Data);
+    }
+
+    [Fact]
+    public void OscKittyClipboard_WriteStart_ReplacesAbandonedTransfer()
+    {
+        // Arrange
+        var terminal = CreateTerminal();
+        string? text = null;
+        terminal.ClipboardWriteRequested += (_, e) => text = e.Text;
+
+        // Act
+        terminal.Write("\x1B]5522;type=write\x1B\\");
+        terminal.Write("\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;b2xk\x1B\\");
+        terminal.Write("\x1B]5522;type=write\x1B\\");
+        terminal.Write("\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;bmV3\x1B\\");
+        terminal.Write("\x1B]5522;type=wdata\x1B\\");
+
+        // Assert
+        Assert.Equal("new", text);
     }
 
     [Fact]
@@ -329,18 +352,25 @@ public class OscSequenceTests
         });
         var responses = new List<string>();
         terminal.DataReceived += (_, e) => responses.Add(e.Data);
-        terminal.ClipboardReadRequested += (_, e) => e.Data = System.Text.Encoding.UTF8.GetBytes("hello");
+        string? target = null;
+        terminal.ClipboardReadRequested += (_, e) =>
+        {
+            target = e.Target;
+            e.Data = System.Text.Encoding.UTF8.GetBytes("hello");
+        };
 
         // Act
-        terminal.Write("\x1B]5522;type=read:mime=text/plain;\x07");
+        terminal.Write("\x1B]5522;type=read:loc=primary:id=r1;dGV4dC9wbGFpbg==\x1B\\");
 
         // Assert
         Assert.Equal(
             [
-                "\x1B]5522;type=read:mime=text/plain;aGVsbG8=\x07",
-                "\x1B]5522;type=read:mime=text/plain;\x07"
+                "\x1B]5522;type=read:status=OK:id=r1\x1B\\",
+                "\x1B]5522;type=read:status=DATA:mime=dGV4dC9wbGFpbg==:id=r1;aGVsbG8=\x1B\\",
+                "\x1B]5522;type=read:status=DONE:id=r1\x1B\\"
             ],
             responses);
+        Assert.Equal("p", target);
     }
 
     [Fact]
@@ -349,16 +379,16 @@ public class OscSequenceTests
         // Arrange
         var terminal = CreateTerminal();
         var requested = false;
-        var responded = false;
+        string? response = null;
         terminal.ClipboardReadRequested += (_, _) => requested = true;
-        terminal.DataReceived += (_, _) => responded = true;
+        terminal.DataReceived += (_, e) => response = e.Data;
 
         // Act
-        terminal.Write("\x1B]5522;type=read:mime=text/plain;\x07");
+        terminal.Write("\x1B]5522;type=read;dGV4dC9wbGFpbg==\x07");
 
         // Assert
         Assert.False(requested);
-        Assert.False(responded);
+        Assert.Equal("\x1B]5522;type=read:status=EPERM\x1B\\", response);
     }
 
     [Fact]

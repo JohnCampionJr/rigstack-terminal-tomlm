@@ -165,6 +165,11 @@ public class TerminalOptions : ICloneable
     public bool ClipboardReadEnabled { get; set; } = false;
 
     /// <summary>
+    /// Maximum decoded clipboard bytes accepted in a Kitty OSC 5522 write.
+    /// </summary>
+    public int MaxClipboardBytes { get; set; } = 64 * 1024 * 1024;
+
+    /// <summary>
     /// Budget for images held by client id but not currently on screen, in bytes.
     /// </summary>
     /// <remarks>
@@ -279,6 +284,7 @@ public class TerminalOptions : ICloneable
         KittyGraphicsEnabled = other.KittyGraphicsEnabled;
         ClipboardWriteEnabled = other.ClipboardWriteEnabled;
         ClipboardReadEnabled = other.ClipboardReadEnabled;
+        MaxClipboardBytes = other.MaxClipboardBytes;
         MaxImageRegistryBytes = other.MaxImageRegistryBytes;
         CellWidthPixels = other.CellWidthPixels;
         CellHeightPixels = other.CellHeightPixels;
