@@ -3396,6 +3396,15 @@ public class InputHandler
         return index;
     }
 
+    /// <summary>Applies a colour from SGR 38 or 48 to whichever side asked for it.</summary>
+    private void SetExtendedColor(int color, int mode, bool isForeground)
+    {
+        if (isForeground)
+            _curAttr.SetFgColor(color, mode);
+        else
+            _curAttr.SetBgColor(color, mode);
+    }
+
     /// <summary>
     /// SGR 38 and 48 — a foreground or background colour beyond the sixteen, either as a 256-palette
     /// index or as direct RGB.
@@ -3451,15 +3460,6 @@ public class InputHandler
         }
 
         return index;
-    }
-
-    /// <summary>Applies a colour from SGR 38 or 48 to whichever side asked for it.</summary>
-    private void SetExtendedColor(int color, int mode, bool isForeground)
-    {
-        if (isForeground)
-            _curAttr.SetFgColor(color, mode);
-        else
-            _curAttr.SetBgColor(color, mode);
     }
 
     private void SetScrollRegion(Params parameters)
