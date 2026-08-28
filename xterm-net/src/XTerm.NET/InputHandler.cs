@@ -2526,8 +2526,17 @@ public class InputHandler
 
         if (parts.Length >= 2)
         {
-            var target = parts[0]; // Usually 'c' for clipboard, 'p' for primary
+            var target = parts[0];
             var clipdata = parts[1];
+            if (target.Length == 0)
+            {
+                target = "s0";
+            }
+            else if (target.Any(selection => selection is not ('c' or 'p' or 'q' or 's') &&
+                                               (selection < '0' || selection > '7')))
+            {
+                return;
+            }
 
             if (clipdata == "?")
             {
@@ -2543,16 +2552,18 @@ public class InputHandler
             }
             else if (_terminal.Options.ClipboardWriteEnabled)
             {
+                string text;
                 try
                 {
                     var decoded = Convert.FromBase64String(clipdata);
-                    var text = System.Text.Encoding.UTF8.GetString(decoded);
-                    _terminal.RaiseClipboardWriteRequested(target, text);
+                    text = System.Text.Encoding.UTF8.GetString(decoded);
                 }
-                catch
+                catch (FormatException)
                 {
-                    // Invalid base64 or encoding
+                    text = string.Empty;
                 }
+
+                _terminal.RaiseClipboardWriteRequested(target, text);
             }
         }
     }

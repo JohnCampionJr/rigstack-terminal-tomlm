@@ -315,14 +315,82 @@ public class OscSequenceTests
         var terminal = CreateTerminal();
         terminal.Options.ClipboardReadEnabled = true;
         string? response = null;
-        terminal.ClipboardReadRequested += (_, e) => Assert.Equal("s", e.Target);
+        var raised = false;
+        terminal.ClipboardReadRequested += (_, e) =>
+        {
+            raised = true;
+            Assert.Equal("s", e.Target);
+        };
         terminal.DataReceived += (_, e) => response = e.Data;
 
         // Act
         terminal.Write("\x1B]52;s;?\x07");
 
         // Assert
+        Assert.True(raised);
         Assert.Null(response);
+    }
+
+    [Fact]
+    public void OscClipboard_SetInvalidData_RaisesClearRequest()
+    {
+        // Arrange
+        var terminal = CreateTerminal();
+        TerminalEvents.ClipboardWriteEventArgs? request = null;
+        terminal.ClipboardWriteRequested += (_, e) => request = e;
+
+        // Act
+        terminal.Write("\x1B]52;c;!\x07");
+
+        // Assert
+        Assert.NotNull(request);
+        Assert.Equal("c", request.Target);
+        Assert.Equal(string.Empty, request.Text);
+    }
+
+    [Fact]
+    public void OscClipboard_EmptyTarget_DefaultsToSelectionZero()
+    {
+        // Arrange
+        var terminal = CreateTerminal();
+        TerminalEvents.ClipboardWriteEventArgs? request = null;
+        terminal.ClipboardWriteRequested += (_, e) => request = e;
+        var base64Data = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("Hello, World!"));
+
+        // Act
+        terminal.Write($"\x1B]52;;{base64Data}\x07");
+
+        // Assert
+        Assert.NotNull(request);
+        Assert.Equal("s0", request.Target);
+    }
+
+    [Fact]
+    public void OscClipboard_InvalidTarget_IsIgnored()
+    {
+        // Arrange
+        var terminal = CreateTerminal();
+        var raised = false;
+        terminal.ClipboardWriteRequested += (_, _) => raised = true;
+        var base64Data = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("Hello, World!"));
+
+        // Act
+        terminal.Write($"\x1B]52;x;{base64Data}\x07");
+
+        // Assert
+        Assert.False(raised);
+    }
+
+    [Fact]
+    public void OscClipboard_SetData_PropagatesHostExceptions()
+    {
+        // Arrange
+        var terminal = CreateTerminal();
+        terminal.ClipboardWriteRequested += (_, _) => throw new InvalidOperationException();
+        var base64Data = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("Hello, World!"));
+
+        // Act & Assert
+        Assert.Throws<InvalidOperationException>(() => terminal.Write($"\x1B]52;c;{base64Data}\x07"));
     }
 
     [Fact]

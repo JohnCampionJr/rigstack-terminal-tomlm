@@ -229,7 +229,7 @@ public static class TerminalEvents
         /// <summary>The requested clipboard selection.</summary>
         public string Target { get; }
 
-        /// <summary>The decoded UTF-8 clipboard text.</summary>
+        /// <summary>The decoded UTF-8 clipboard text; empty text requests clearing the selection.</summary>
         public string Text { get; }
     }
 
