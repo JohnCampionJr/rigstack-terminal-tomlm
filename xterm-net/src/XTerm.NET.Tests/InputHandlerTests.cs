@@ -15,6 +15,17 @@ public class InputHandlerTests
         return new Terminal(options);
     }
 
+    /// <summary>
+    /// The secondary DA reply the handler should send: terminal type 1 (VT220), the package
+    /// version flattened into one number, and no cartridge ROM.
+    /// </summary>
+    private static string ExpectedSecondaryDeviceAttributes()
+    {
+        var version = typeof(InputHandler).Assembly.GetName().Version;
+        var firmwareVersion = version is null ? 0 : version.Major * 100 + version.Minor;
+        return $"\u001b[>1;{firmwareVersion};0c";
+    }
+
     [Fact]
     public void Constructor_InitializesHandler()
     {
@@ -1090,10 +1101,11 @@ public class InputHandlerTests
         // Act
         handler.HandleCsi("c", params_);
 
-        // Assert - CSI ? 1 ; 2 ; 4 c: VT100 with AVO, plus Sixel graphics.
-        // Attribute 4 is how libsixel-based programs decide whether to send a picture at all, so
-        // dropping it from this reply silently turns every image back into text art.
-        Assert.Equal("\u001b[?1;2;4c", receivedData);
+        // Assert - CSI ? 62 ; 4 ; 22 c: a VT220 with Sixel and ANSI colour, which is what the code
+        // in this repository actually implements. Attribute 4 is how libsixel-based programs decide
+        // whether to send a picture at all, so dropping it from this reply silently turns every
+        // image back into text art.
+        Assert.Equal("\u001b[?62;4;22c", receivedData);
     }
 
     [Fact]
@@ -1113,7 +1125,7 @@ public class InputHandlerTests
         handler.HandleCsi("c", params_);
 
         // Assert - claiming Sixel while it is switched off would send pictures we then drop
-        Assert.Equal("\u001b[?1;2c", receivedData);
+        Assert.Equal("\u001b[?62;22c", receivedData);
     }
 
     [Fact]
@@ -1131,8 +1143,72 @@ public class InputHandlerTests
         // Act - Use ">c" for secondary DA
         handler.HandleCsi(">c", params_);
 
-        // Assert - Should respond with CSI > 0 ; 10 ; 0 c
-        Assert.Equal("\u001b[>0;10;0c", receivedData);
+        // Assert - CSI > 1 ; package-version ; 0 c. Terminal type 1 is a VT220, so it agrees with
+        // the 62 the primary reply sends; the old 0 said VT100 and contradicted it.
+        Assert.Equal(ExpectedSecondaryDeviceAttributes(), receivedData);
+    }
+
+    [Theory]
+    [InlineData("c")]
+    [InlineData(">c")]
+    public void HandleCsi_DA_IgnoresNonZeroParameter(string identifier)
+    {
+        // Arrange
+        var terminal = CreateTerminal();
+        var handler = new InputHandler(terminal);
+        var params_ = new Params();
+        params_.AddParam(1);
+
+        string? receivedData = null;
+        terminal.DataReceived += (_, e) => receivedData = e.Data;
+
+        // Act
+        handler.HandleCsi(identifier, params_);
+
+        // Assert - a DA with a non-zero parameter is a reply, not a request. Two of these hooked
+        // up to each other answer each other forever.
+        Assert.Null(receivedData);
+    }
+
+    [Fact]
+    public void HandleCsi_DA_Tertiary_IsNotAnswered()
+    {
+        // Arrange
+        var terminal = CreateTerminal();
+        var handler = new InputHandler(terminal);
+        var params_ = new Params();
+        params_.AddParam(0);
+
+        string? receivedData = null;
+        terminal.DataReceived += (_, e) => receivedData = e.Data;
+
+        // Act - "=c" is the tertiary DA, asking for a unit ID
+        handler.HandleCsi("=c", params_);
+
+        // Assert - there is no unit ID to report, and terminals without DECRPTUI stay quiet.
+        // Answering a question nobody asked is worse than silence: the program would read a DA
+        // reply where it expected DECRPTUI, while still waiting for the reply it did ask for.
+        Assert.Null(receivedData);
+    }
+
+    [Fact]
+    public void HandleCsi_DA_PrivateMarker_IsNotAnsweredWithTheSecondaryReply()
+    {
+        // Arrange
+        var terminal = CreateTerminal();
+        var handler = new InputHandler(terminal);
+        var params_ = new Params();
+        params_.AddParam(0);
+
+        string? receivedData = null;
+        terminal.DataReceived += (_, e) => receivedData = e.Data;
+
+        // Act - "?c" is not a DA request any program sends; it is not the secondary DA either
+        handler.HandleCsi("?c", params_);
+
+        // Assert - it used to be answered with the secondary reply, because the handler dispatched
+        // on the coarse isPrivate flag, which "?" sets just as ">" does
+        Assert.Null(receivedData);
     }
 
     #endregion
