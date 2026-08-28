@@ -116,7 +116,7 @@ public enum CsiCommand
     TabClear,
     
     /// <summary>
-    /// Device Attributes (CSI c for the primary reply, CSI &gt; c for the secondary).
+    /// Device Attributes (CSI c is the primary request, CSI &gt; c the secondary).
     /// </summary>
     DeviceAttributes,
 
