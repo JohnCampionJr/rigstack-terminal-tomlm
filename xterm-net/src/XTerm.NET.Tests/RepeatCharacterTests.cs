@@ -162,6 +162,75 @@ public class RepeatCharacterTests
     }
 
     /// <summary>And the same through the byte entry, which is a third writer again.</summary>
+    /// <summary>
+    /// A cursor moved away and BACK still cancels it. Position equality alone cannot see the
+    /// excursion — this is what the dispatch-point clearing exists for, and it is how xterm.js
+    /// behaves: any sequence between the print and the REP means there is no preceding
+    /// character, whether or not the cursor ended up where it started.
+    /// </summary>
+    [Fact]
+    public void A_cursor_move_that_returns_still_cancels_it()
+    {
+        var terminal = Fresh();
+        terminal.Write($"a{Esc}[D{Esc}[C{Esc}[5b");
+
+        Assert.Equal("a", Row(terminal));
+    }
+
+    /// <summary>Any sequence cancels it, not just movement — SGR leaves the cursor alone and still counts.</summary>
+    [Fact]
+    public void An_SGR_in_between_cancels_it()
+    {
+        var terminal = Fresh();
+        terminal.Write($"a{Esc}[31m{Esc}[5b");
+
+        Assert.Equal("a", Row(terminal));
+    }
+
+    /// <summary>An OSC in between cancels it too — the rule is any sequence, not any CSI.</summary>
+    [Fact]
+    public void An_OSC_in_between_cancels_it()
+    {
+        var terminal = Fresh();
+        terminal.Write($"a{Esc}]0;title{Esc}\\{Esc}[5b");
+
+        Assert.Equal("a", Row(terminal));
+    }
+
+    /// <summary>
+    /// A chain of REPs keeps repeating: after a REP, the character it printed IS the preceding
+    /// graphic character. This is ECMA-48's reading and the one deliberate divergence from
+    /// xterm.js, whose parser happens to clear its record after every handler including REP's.
+    /// </summary>
+    [Fact]
+    public void A_second_REP_repeats_again()
+    {
+        var terminal = Fresh();
+        terminal.Write($"a{Esc}[2b{Esc}[2b");
+
+        Assert.Equal("aaaaa", Row(terminal));
+    }
+
+    /// <summary>
+    /// An emoji-presentation selector widens the previous cell and moves the cursor with it —
+    /// and the record has to be taken AFTER that adjustment. Taken before, the saved position
+    /// went stale and REP right after the selector silently did nothing.
+    /// </summary>
+    [Fact]
+    public void It_repeats_a_cluster_widened_by_a_variation_selector()
+    {
+        var terminal = Fresh();
+        terminal.Write("❤️");          // heart + VS16: width 1 becomes width 2
+        terminal.Write($"{Esc}[2b");
+
+        var line = terminal.Buffer.Lines[terminal.Buffer.YBase]!;
+        Assert.Equal("❤️", line[0].Content);
+        Assert.Equal("❤️", line[2].Content);
+        Assert.Equal("❤️", line[4].Content);
+        Assert.Equal(2, line[0].Width);
+        Assert.Equal(6, terminal.Buffer.X);
+    }
+
     [Fact]
     public void It_works_after_a_byte_run()
     {

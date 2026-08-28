@@ -323,16 +323,27 @@ public class InputHandler
     /// Records the character just printed, and where it left the cursor, for <c>REP</c>.
     /// </summary>
     /// <remarks>
-    /// The cursor position is half the record. REP repeats the <em>preceding</em> graphic character,
-    /// so it only means anything while the cursor is still where that character left it -- once
-    /// something has moved it, there is no preceding character to speak of and REP does nothing.
-    /// Storing the position is what lets that be answered without having to invalidate this from
-    /// every cursor movement in the file, which is the version of this that rots.
+    /// <para>Two things guard the record, and they catch different intrusions. Any control, CSI,
+    /// ESC, OSC or DCS between the print and the REP FORGETS it, cleared at the dispatch points
+    /// rather than from every handler -- which is how xterm.js does it (its parser zeroes
+    /// <c>precedingJoinState</c> after every dispatch), and is the version that does not rot,
+    /// because a new handler cannot forget to cancel what the dispatcher already cancelled.
+    /// That is what catches a cursor moved away and back: the position afterwards is the same,
+    /// but a sequence intervened, so there is no preceding character any more.</para>
+    /// <para>The stored position is the second guard, for movement that arrives through no
+    /// sequence at all -- the host calling a public cursor API between writes.</para>
+    /// <para>REP itself is exempt from the clearing, so a chain of REPs keeps repeating: after a
+    /// REP the character it printed IS the preceding graphic character (ECMA-48's reading).
+    /// xterm.js happens to cancel there, but only because its parser clears after the handler
+    /// returns; nothing in the spec asks for that.</para>
     /// </remarks>
     private void RememberForRepeat(int codePoint, int clusterId)
     {
         _lastPrinted = (_buffer.Y + _buffer.YBase, _buffer.X, codePoint, clusterId);
     }
+
+    /// <summary>Forgets the preceding character. See <see cref="RememberForRepeat"/> for when.</summary>
+    internal void CancelRepeat() => _lastPrinted = null;
 
     /// <summary>The character last printed, and the cursor position it left behind. See <see cref="RememberForRepeat"/>.</summary>
     private (int Row, int CursorCol, int CodePoint, int ClusterId)? _lastPrinted;
@@ -623,11 +634,6 @@ public class InputHandler
 
         line.SetCell(prevX, ref updatedCell);
 
-        // The preceding character is now the COMBINED one. Nothing moved the cursor, so REP still
-        // applies -- and repeating the base letter without its marks would be a different character
-        // from the one on screen.
-        _lastPrinted = (_buffer.Y + _buffer.YBase, _buffer.X, updatedCell.CodePoint, updatedCell.ClusterId);
-
         // Handle width changes
         if (newWidth != prevCell.Width)
         {
@@ -668,6 +674,12 @@ public class InputHandler
             }
         }
 
+        // The preceding character is now the COMBINED one -- repeating the base letter without its
+        // marks would be a different character from the one on screen. Recorded AFTER the width
+        // adjustments above, which can move the cursor: recorded any earlier, a variation selector
+        // that widened the cell left the saved position stale and silently cancelled the next REP.
+        _lastPrinted = (_buffer.Y + _buffer.YBase, _buffer.X, updatedCell.CodePoint, updatedCell.ClusterId);
+
         return true;
     }
 
@@ -678,6 +690,11 @@ public class InputHandler
     {
         bool isPrivate = identifier.IsPrivateMode();
         var command = identifier.ToCsiCommand();
+
+        // Any sequence between a print and a REP means there is no preceding character any more.
+        // REP is the one exemption: the character IT prints becomes the preceding one.
+        if (command != CsiCommand.RepeatPrecedingCharacter)
+            CancelRepeat();
 
         switch (command)
         {
@@ -832,6 +849,8 @@ public class InputHandler
     /// </summary>
     public void HandleEsc(string finalChar, string collected)
     {
+        CancelRepeat();
+
         switch (finalChar)
         {
             case "D": // IND - Index
@@ -968,6 +987,7 @@ public class InputHandler
     /// </remarks>
     public void HandleDcsHook(string identifier, Params parameters)
     {
+        CancelRepeat();
         _sixelDecoder = null;
 
         if (identifier != "q" || !_terminal.Options.SixelEnabled)
@@ -1097,6 +1117,7 @@ public class InputHandler
     /// </remarks>
     public void HandleApcHook(char introducer)
     {
+        CancelRepeat();
         _ = introducer;
         _apcPayload.Clear();
     }
@@ -2098,6 +2119,7 @@ public class InputHandler
     /// </summary>
     public void HandleOsc(string data)
     {
+        CancelRepeat();
         var parts = data.Split(new[] { ';' }, 2);
         if (parts.Length == 0)
             return;
