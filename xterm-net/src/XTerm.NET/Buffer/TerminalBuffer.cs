@@ -162,9 +162,20 @@ public class TerminalBuffer
     }
 
     /// <summary>
-    /// Scrolls the buffer up by a specified number of lines.
-    /// This matches xterm.js Buffer.scroll() behavior.
+    /// Scrolls the scrolling region up, dispatching on the margins: full-width margins move whole
+    /// lines through the ring, narrowed margins move only the margin columns as a box.
     /// </summary>
+    /// <param name="lines">How many rows to scroll by.</param>
+    /// <param name="isWrapped">
+    /// Whether the line this scroll makes room for continues the previous one. Honoured only on
+    /// the full-width path: a box scroll neither sets nor clears any line's flag, for the reasons
+    /// the body explains.
+    /// </param>
+    /// <remarks>
+    /// The full-width path matches xterm.js <c>Buffer.scroll()</c> — promotion to scrollback
+    /// included. None of that applies to the narrowed path: xterm.js has no left/right margins,
+    /// no lines move through the ring, and nothing reaches scrollback.
+    /// </remarks>
     public void ScrollUp(int lines, bool isWrapped = false)
     {
         // Decided here rather than at each call site. Every path that scrolls -- a wrap at the
@@ -274,8 +285,9 @@ public class TerminalBuffer
     }
 
     /// <summary>
-    /// Scrolls the buffer down by a specified number of lines.
-    /// This is reverse scrolling within the scroll region.
+    /// Scrolls the scrolling region down — reverse scrolling — with the same dispatch as
+    /// <see cref="ScrollUp"/>: whole lines when the margins are full width, a column box when
+    /// they are narrowed. Nothing reaches scrollback in either direction.
     /// </summary>
     public void ScrollDown(int lines)
     {
@@ -399,7 +411,7 @@ public class TerminalBuffer
         _scrollTop = 0;
         _scrollBottom = _rows - 1;
 
-        // The columns too. RIS and DECSTR both come through here, and either leaving margins in
+        // The columns too. RIS and DECSTR both come through here, and leaving margins in
         // force across a full reset would hand the next application a region it never asked for and
         // has no reason to check.
         ResetLeftRightMargins();
@@ -437,18 +449,22 @@ public class TerminalBuffer
 
     /// <summary>
     /// Moves the margin columns of rows <paramref name="top"/>..<paramref name="bottom"/> by
-    /// <paramref name="count"/> rows, filling what it vacates.
+    /// <paramref name="count"/> rows, filling what it vacates. The COLUMNS are not parameters:
+    /// they are always the current left/right margins. Only the rows vary, and only because IL
+    /// and DL scroll from the cursor's row rather than from the top of the region — which is why
+    /// this is internal, not public: the row parameters are an implementation detail of its four
+    /// callers (<see cref="ScrollUp"/>, <see cref="ScrollDown"/>, IL and DL), not an API.
     /// </summary>
     /// <remarks>
-    /// <para>The narrowed-margin counterpart of <see cref="ScrollUp"/>, and a different operation
-    /// rather than a parameter on it. A full-width scroll moves whole LINES through the ring: the
+    /// <para>The narrowed-margin half of all four of those operations, and a different operation
+    /// rather than a parameter on them. A full-width scroll moves whole LINES through the ring: the
     /// top line is promoted to scrollback and a blank one appended. Only part of each line moves
     /// here, so the lines stay where they are and their cells are copied between them -- and nothing
     /// reaches the scrollback, because half a line is not a line anyone could scroll back to.</para>
     /// <para>Copying row by row in the direction of travel, so a region taller than the distance
     /// moved does not overwrite what it has yet to read.</para>
     /// </remarks>
-    public void ScrollMarginColumns(int top, int bottom, int count, bool up, BufferCell fill)
+    internal void ScrollMarginColumns(int top, int bottom, int count, bool up, BufferCell fill)
     {
         if (count <= 0 || top > bottom)
             return;
@@ -628,6 +644,7 @@ public class TerminalBuffer
         // the lower bound with it meant a negative cursor -- which SetCursorRaw exists to allow --
         // survived the resize and left the buffer reporting an out-of-bounds position.
         _x = Math.Clamp(_x, 0, Math.Max(0, newCols - 1));
+        PendingWrap = false;
         // The mirror case. A cursor below the new bottom is NOT simply clamped into place -- its
         // overflow is pushed into scrollback, so the cursor stays on the LINE it was on. Clamping
         // alone moved the cursor onto earlier content: shrink a window with a prompt at row 22 down
@@ -960,21 +977,42 @@ public class TerminalBuffer
     }
 
     /// <summary>
-    /// Sets the cursor position.
+    /// True while the cursor's position is the residue of PRINTING — which is the only way it
+    /// comes to rest one past the last column it wrote, the pending-wrap state.
+    /// </summary>
+    /// <remarks>
+    /// Exists because that one-past column is otherwise two different states with one
+    /// representation: X == ScrollRight + 1 is both "just filled the region's last column, wrap
+    /// due at the margin" and "deliberately placed at the first column right of the margin" — an
+    /// ordinary place for a cursor in the split layouts DECSLRM exists for. xterm keeps a
+    /// separate wrap flag so its column is never ambiguous; this is that flag, mapped onto the
+    /// existing seam: <see cref="SetCursorRaw"/> is how printing advances the cursor and sets it,
+    /// <see cref="SetCursor"/> is how everything else moves the cursor and clears it, matching
+    /// xterm's rule that any explicit movement cancels a pending wrap. When X is inside the
+    /// margins the flag is meaningless and harmlessly stale; only the boundary column reads it.
+    /// </remarks>
+    public bool PendingWrap { get; private set; }
+
+    /// <summary>
+    /// Sets the cursor position — the deliberate, clamped move every cursor-addressing sequence
+    /// uses, which is why it cancels a pending wrap.
     /// </summary>
     public void SetCursor(int x, int y)
     {
         _x = Math.Clamp(x, 0, _cols - 1);
         _y = Math.Clamp(y, 0, _rows - 1);
+        PendingWrap = false;
     }
 
     /// <summary>
-    /// Moves the cursor to the specified position without any clamping.
+    /// Moves the cursor without clamping — the print-path move, which is what may leave X one
+    /// past the last written column and therefore sets <see cref="PendingWrap"/>.
     /// </summary>
     public void SetCursorRaw(int x, int y)
     {
         _x = x;
         _y = y;
+        PendingWrap = true;
     }
 
     public string PrintViewport()

@@ -351,4 +351,125 @@ public class LeftRightMarginTests
 
         terminal.Write($"{Esc}[?69l{Esc}[r");
     }
+
+    // ---- the pending-wrap boundary column ------------------------------------------------------
+
+    /// <summary>
+    /// A full-width line leaves the cursor at X == Cols, the pending-wrap state — and that is the
+    /// ORDINARY place for IL to run from, margins or not. Reading it as "outside the region" made
+    /// IL a silent no-op on the default path after any full-width line.
+    /// </summary>
+    [Fact]
+    public void Inserting_a_line_still_works_from_the_pending_wrap_state()
+    {
+        var terminal = Fresh();
+        terminal.Write($"{Esc}[2;1Hbelow");
+        terminal.Write($"{Esc}[1;1H{new string('A', terminal.Cols)}");
+
+        terminal.Write($"{Esc}[L");
+
+        Assert.Equal("", Row(terminal, 0));
+        Assert.Equal(new string('A', terminal.Cols), Row(terminal, 1));
+        Assert.Equal("below", Row(terminal, 2));
+    }
+
+    [Fact]
+    public void Deleting_a_line_still_works_from_the_pending_wrap_state()
+    {
+        var terminal = Fresh();
+        terminal.Write($"{Esc}[2;1Hsecond");
+        terminal.Write($"{Esc}[1;1H{new string('A', terminal.Cols)}");
+
+        terminal.Write($"{Esc}[M");
+
+        Assert.Equal("second", Row(terminal, 0));
+    }
+
+    /// <summary>
+    /// ScrollRight + 1 is two states with one column: the pending-wrap residue of filling the
+    /// region's last column, and a deliberate placement at the first column of the NEXT pane — an
+    /// ordinary cursor position in the layout this feature exists for. The buffer's PendingWrap
+    /// flag tells them apart: a deliberately placed cursor is outside the region, so writing there
+    /// stays there instead of wrapping back into the pane to its left.
+    /// </summary>
+    [Fact]
+    public void Writing_just_right_of_the_margin_does_not_wrap_into_the_pane()
+    {
+        var terminal = WithMargins(left: 4, right: 9);   // zero-based columns 3..8
+
+        terminal.Write($"{Esc}[1;10Hx");                 // column 9: the next pane's first column
+
+        var line = terminal.Buffer.Lines[terminal.Buffer.YBase]!;
+        Assert.Equal("x", line[9].Content);
+        Assert.Equal(0, terminal.Buffer.Y);              // no wrap happened...
+        Assert.False(terminal.Buffer.Lines[terminal.Buffer.YBase + 1]!.IsWrapped);   // ...marked or otherwise
+    }
+
+    // ---- ICH and DCH are bounded by BOTH margins -----------------------------------------------
+
+    /// <summary>
+    /// A cursor outside the margins on either side must make ICH/DCH do nothing. Only the right
+    /// side was guarded at first: from LEFT of the left margin, ICH shifted the left pane's
+    /// columns across the margin into the right pane, and DCH pulled the right pane's columns
+    /// back across — content crossing the exact boundary margins exist to seal.
+    /// </summary>
+    [Theory]
+    [InlineData("@", 2)]     // ICH, cursor left of the left margin
+    [InlineData("@", 12)]    // ICH, cursor right of the right margin
+    [InlineData("P", 2)]     // DCH, left
+    [InlineData("P", 12)]    // DCH, right
+    public void Insert_and_delete_chars_do_nothing_from_outside_the_margins(string op, int column)
+    {
+        var terminal = WithMargins(left: 4, right: 9);
+        terminal.Write($"{Esc}[1;1Habcdefghijklmnopqrst");
+
+        terminal.Write($"{Esc}[1;{column}H{Esc}[3{op}");
+
+        Assert.Equal("abcdefghijklmnopqrst", Row(terminal, 0));
+    }
+
+    // ---- relative cursor movement honours the margins ------------------------------------------
+
+    /// <summary>
+    /// CUF stops at the right margin when the cursor starts inside the region and at the screen
+    /// edge when it starts outside — in/out decides, not origin mode, as in xterm. An application
+    /// that queried DECRQM for 69 and moved within its pane with CUF must not end up in the
+    /// neighbouring one.
+    /// </summary>
+    [Fact]
+    public void CursorForward_stops_at_the_right_margin_from_inside()
+    {
+        var terminal = WithMargins(left: 4, right: 9);
+        terminal.Write($"{Esc}[1;5H{Esc}[200C");
+        Assert.Equal(8, terminal.Buffer.X);
+
+        terminal.Write($"{Esc}[1;12H{Esc}[200C");
+        Assert.Equal(terminal.Cols - 1, terminal.Buffer.X);
+    }
+
+    [Fact]
+    public void CursorBackward_stops_at_the_left_margin_from_inside()
+    {
+        var terminal = WithMargins(left: 4, right: 9);
+        terminal.Write($"{Esc}[1;7H{Esc}[200D");
+        Assert.Equal(3, terminal.Buffer.X);
+
+        terminal.Write($"{Esc}[1;2H{Esc}[200D");
+        Assert.Equal(0, terminal.Buffer.X);
+    }
+
+    /// <summary>
+    /// CNL and CPL home to "column 1", and under origin mode column 1 is the left margin —
+    /// the same resolution MoveCursorToHome uses.
+    /// </summary>
+    [Fact]
+    public void CursorNextLine_homes_to_the_left_margin_under_origin_mode()
+    {
+        var terminal = WithMargins(left: 4, right: 9);
+        terminal.Write($"{Esc}[?6h{Esc}[E");
+        Assert.Equal(3, terminal.Buffer.X);
+
+        terminal.Write($"{Esc}[?6l{Esc}[F");
+        Assert.Equal(0, terminal.Buffer.X);
+    }
 }

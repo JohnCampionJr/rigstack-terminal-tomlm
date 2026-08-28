@@ -2640,25 +2640,35 @@ public class InputHandler
     private void CursorForward(Params parameters)
     {
         var count = Math.Max(parameters.GetParam(0, 1), 1);
-        _buffer.SetCursor(Math.Min(_buffer.X + count, _terminal.Cols - 1), _buffer.Y);
+        // Stops at the right margin when the cursor starts inside the region, the screen edge
+        // when it starts outside — in/out decides, not origin mode, as in xterm. Without the
+        // bound, CSI 200 C walks the cursor out of its pane and the next write lands in the
+        // neighbouring one. (Full-width margins make the two limits the same column.)
+        var limit = CursorInMarginColumns() ? _buffer.ScrollRight : _terminal.Cols - 1;
+        _buffer.SetCursor(Math.Min(_buffer.X + count, limit), _buffer.Y);
     }
 
     private void CursorBackward(Params parameters)
     {
         var count = Math.Max(parameters.GetParam(0, 1), 1);
-        _buffer.SetCursor(Math.Max(_buffer.X - count, 0), _buffer.Y);
+        // The mirror of CursorForward: the left margin stops a cursor that starts inside.
+        var home = CursorInMarginColumns() ? _buffer.ScrollLeft : 0;
+        _buffer.SetCursor(Math.Max(_buffer.X - count, home), _buffer.Y);
     }
 
     private void CursorNextLine(Params parameters)
     {
         var count = Math.Max(parameters.GetParam(0, 1), 1);
-        _buffer.SetCursor(0, Math.Min(_buffer.Y + count, _terminal.Rows - 1));
+        // Column 1 under origin mode is the left margin, exactly as MoveCursorToHome resolves it.
+        var col = _terminal.OriginMode ? _buffer.ScrollLeft : 0;
+        _buffer.SetCursor(col, Math.Min(_buffer.Y + count, _terminal.Rows - 1));
     }
 
     private void CursorPrecedingLine(Params parameters)
     {
         var count = Math.Max(parameters.GetParam(0, 1), 1);
-        _buffer.SetCursor(0, Math.Max(_buffer.Y - count, 0));
+        var col = _terminal.OriginMode ? _buffer.ScrollLeft : 0;
+        _buffer.SetCursor(col, Math.Max(_buffer.Y - count, 0));
     }
 
     private void CursorCharAbsolute(Params parameters)
@@ -2784,6 +2794,23 @@ public class InputHandler
     }
 
     /// <summary>
+    /// Whether the cursor is inside the margin columns — the ONE in/out answer every
+    /// column-sensitive operation shares, so no two of them can disagree about the same column.
+    /// </summary>
+    /// <remarks>
+    /// The boundary column is the subtle part. X == ScrollRight + 1 is two different states: the
+    /// pending-wrap residue of filling the region's last column (INSIDE — the wrap is due at the
+    /// margin), and a deliberate placement at the first column right of the margin (OUTSIDE — an
+    /// ordinary cursor position in the split layouts this feature exists for). The buffer's
+    /// <see cref="TerminalBuffer.PendingWrap"/> flag is what tells them apart; deciding by
+    /// position alone either wrapped the next pane's first column into this one, or ran text
+    /// straight through the margin at exactly the moment the wrap was due.
+    /// </remarks>
+    private bool CursorInMarginColumns()
+        => _buffer.X >= _buffer.ScrollLeft
+        && _buffer.X <= _buffer.ScrollRight + (_buffer.PendingWrap ? 1 : 0);
+
+    /// <summary>
     /// The last column a write may land on before it wraps.
     /// </summary>
     /// <remarks>
@@ -2794,14 +2821,7 @@ public class InputHandler
     /// </remarks>
     private int WrapLimit()
     {
-        // ScrollRight + 1 is INSIDE, not outside. The cursor is allowed to rest one past the last
-        // column it wrote, which is how a pending wrap is represented -- so a cursor that has just
-        // filled to the right margin sits at ScrollRight + 1 and is still in the region. Reading
-        // that as outside handed the limit back to the screen edge at exactly the moment the wrap
-        // was due, and the text ran straight through the margin.
-        if (_buffer.MarginsAreFullWidth
-            || _buffer.X < _buffer.ScrollLeft
-            || _buffer.X > _buffer.ScrollRight + 1)
+        if (_buffer.MarginsAreFullWidth || !CursorInMarginColumns())
             return _terminal.Cols - 1;
 
         return _buffer.ScrollRight;
@@ -2810,7 +2830,7 @@ public class InputHandler
     /// <summary>The column a wrapped line begins on: the left margin, for the same reason.</summary>
     private int WrapHome()
     {
-        if (_buffer.MarginsAreFullWidth || _buffer.X < _buffer.ScrollLeft || _buffer.X > _buffer.ScrollRight + 1)
+        if (_buffer.MarginsAreFullWidth || !CursorInMarginColumns())
             return 0;
 
         return _buffer.ScrollLeft;
@@ -2822,11 +2842,15 @@ public class InputHandler
     /// <remarks>
     /// IL and DL do nothing from outside it. With margins that has to include the columns: a cursor
     /// in the right-hand pane of a split layout is outside the left pane's region, and shifting the
-    /// left pane's lines from there is the exact corruption margins exist to prevent.
+    /// left pane's lines from there is the exact corruption margins exist to prevent. The column
+    /// test goes through <see cref="CursorInMarginColumns"/> so the pending-wrap state counts as
+    /// inside — with no margins at all, a cursor resting at X == Cols after a full-width line is
+    /// the ORDINARY place for IL/DL to run from, and reading it as outside made them no-ops on the
+    /// default path.
     /// </remarks>
     private bool InsideScrollRegion()
         => _buffer.Y >= _buffer.ScrollTop && _buffer.Y <= _buffer.ScrollBottom
-        && _buffer.X >= _buffer.ScrollLeft && _buffer.X <= _buffer.ScrollRight;
+        && CursorInMarginColumns();
 
     /// <summary>A blank carrying the current attributes, which is what BCE fills with.</summary>
     private BufferCell BlankCell()
@@ -2886,10 +2910,12 @@ public class InputHandler
         if (line == null)
             return;
 
-        // The right margin bounds this, not the screen. Shifting past it would push characters out
-        // of one pane and into the next, which is the whole thing margins are for.
+        // The MARGINS bound this, not the screen — both of them. Shifting past the right margin
+        // would push characters out of one pane and into the next; running from a cursor LEFT of
+        // the left margin shifts the neighbouring pane's columns across it from outside, the same
+        // corruption from the other side. Outside the region on either side, ICH does nothing.
         var right = _buffer.ScrollRight;
-        if (_buffer.X > right)
+        if (_buffer.X > right || _buffer.X < _buffer.ScrollLeft)
             return;
 
         count = Math.Min(count, right - _buffer.X + 1);
@@ -2907,10 +2933,12 @@ public class InputHandler
         if (line == null)
             return;
 
-        // As with ICH, the right margin is the edge -- so what is pulled in comes from inside the
-        // region and the blanks appear at the margin, not at the screen edge.
+        // As with ICH, the margins are the edges — what is pulled in comes from inside the
+        // region, the blanks appear at the margin rather than the screen edge, and a cursor
+        // outside the region on EITHER side does nothing rather than dragging the next pane's
+        // columns across the boundary.
         var right = _buffer.ScrollRight;
-        if (_buffer.X > right)
+        if (_buffer.X > right || _buffer.X < _buffer.ScrollLeft)
             return;
 
         count = Math.Min(count, right - _buffer.X + 1);
