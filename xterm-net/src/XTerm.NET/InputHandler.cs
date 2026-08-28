@@ -313,6 +313,12 @@ public class InputHandler
         if (cell.CodePoint is var cp && IsRegionalIndicator(cp))
             _regionalPending = (_buffer.Y + _buffer.YBase, _buffer.X, _buffer.X + width);
 
+        // Guarded at the CALL, not only inside a helper: this runs per printed character, the
+        // helper is not reliably inlined, and the same unguarded-call shape cost alt-redraw 12%
+        // once already. The common case -- no link in force, none on the line -- pays two reads.
+        if (line is not null && (_linkUrl is not null || line.HasLinks))
+            line.NoteLinkRun(_buffer.X, width, _linkUrl, _linkId);
+
         // Use MoveCursor to allow X to be one past the last column (pending wrap)
         _buffer.SetCursorRaw(_buffer.X + width, _buffer.Y);
 
@@ -447,6 +453,13 @@ public class InputHandler
 
             var take = Math.Min(_terminal.Cols - _buffer.X, data.Length);
             line.SetSingleWidthRun(_buffer.X, data[..take], _curAttr);
+
+            // This path bypasses Print, so it keeps the link bookkeeping itself -- otherwise a link
+            // would cover the text or not depending on which writer took it. Guarded here, not in a
+            // helper, for the same reason as in Print.
+            if (_linkUrl is not null || line.HasLinks)
+                line.NoteLinkRun(_buffer.X, take, _linkUrl, _linkId);
+
             _buffer.SetCursorRaw(_buffer.X + take, _buffer.Y);
 
             // This path bypasses Print, so it has to keep REP's record itself -- otherwise the same
@@ -510,6 +523,10 @@ public class InputHandler
 
             var take = Math.Min(_terminal.Cols - _buffer.X, remaining);
             line.SetSingleWidthRun(_buffer.X, data.AsSpan(pos, take), _curAttr);
+
+            // As above: bypassing Print means keeping the link bookkeeping here as well.
+            if (_linkUrl is not null || line.HasLinks)
+                line.NoteLinkRun(_buffer.X, take, _linkUrl, _linkId);
 
             // SetCursorRaw, as Print uses, so X may land one past the last column pending a wrap.
             _buffer.SetCursorRaw(_buffer.X + take, _buffer.Y);
@@ -2378,9 +2395,30 @@ public class InputHandler
             _terminal.LastCommandExitCode = exitCode;
         }
 
+        // Anchor it. The event says a mark happened; the line says where, which is the half every
+        // use of shell integration actually needs -- jumping to the previous prompt, selecting a
+        // command's output, putting an exit status beside the command that produced it.
+        //
+        // Deliberately NOT cleared by erasing the cells it sits among. A mark records a position in
+        // the history rather than anything about the content there, and a shell redrawing its prompt
+        // with EL -- which is most of them -- would otherwise destroy the A mark it had just
+        // emitted, a moment before the prompt it marks is even printed.
+        var line = _buffer.Lines[_buffer.Y + _buffer.YBase];
+        line?.AddMark(new Buffer.LineMark(_buffer.X, mark, exitCode));
+
         _terminal.ShellIntegrationState = mark;
         _terminal.RaiseShellIntegrationMark(mark, exitCode);
     }
+
+    /// <summary>
+    /// The link in force, mirrored here from the terminal.
+    /// </summary>
+    /// <remarks>
+    /// Fields rather than a property call, because the print path reads this for every character it
+    /// writes and the answer is null for essentially all of them.
+    /// </remarks>
+    private string? _linkUrl;
+    private string? _linkId;
 
     private void HandleHyperlink(string data)
     {
@@ -2399,12 +2437,19 @@ public class InputHandler
                 // End hyperlink
                 _terminal.CurrentHyperlink = null;
                 _terminal.HyperlinkId = null;
+                _linkUrl = null;
+                _linkId = null;
                 _terminal.RaiseHyperlinkChanged(null);
             }
             else
             {
-                // Start hyperlink
+                // Start hyperlink. The id resets BEFORE the parameters are parsed: a client can
+                // open a new link without closing the last, and one that sends no id= must not
+                // inherit the previous link's -- that would join two unrelated links into one.
                 _terminal.CurrentHyperlink = uri;
+                _terminal.HyperlinkId = null;
+                _linkUrl = uri;
+                _linkId = null;
 
                 // Parse params for id= parameter
                 if (!string.IsNullOrEmpty(params_))
@@ -2415,6 +2460,7 @@ public class InputHandler
                         if (p.StartsWith("id="))
                         {
                             _terminal.HyperlinkId = p.Substring(3);
+                            _linkId = _terminal.HyperlinkId;
                         }
                     }
                 }
