@@ -26,6 +26,7 @@ public static class CsiCommandExtensions
         { "T", CsiCommand.ScrollDown },
         { "X", CsiCommand.EraseChars },
         { "Z", CsiCommand.CursorBackwardTab },
+        { "b", CsiCommand.RepeatPrecedingCharacter },
         { "c", CsiCommand.DeviceAttributes },
         { "d", CsiCommand.LinePositionAbsolute },
         { "f", CsiCommand.CursorPosition }, // HVP - same as CUP

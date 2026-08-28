@@ -1081,6 +1081,14 @@ public class Terminal
     /// </summary>
     private void HandleExecute(int code)
     {
+        // A control character between a print and a REP means there is no preceding character
+        // any more -- cleared here at the dispatch point, like the sequence dispatchers do.
+        // Except ESC: this parser EXECUTES the introducer before transitioning into the sequence,
+        // so clearing on it would cancel REP on the way into REP's own CSI. Whether the sequence
+        // that follows cancels is the sequence dispatcher's decision, not the introducer's.
+        if (code != 0x1B)
+            _inputHandler.CancelRepeat();
+
         switch (code)
         {
             case 0x07: // BEL
