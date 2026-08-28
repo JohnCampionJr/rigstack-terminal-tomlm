@@ -3513,6 +3513,16 @@ public class InputHandler
     /// <summary>
     /// DECRQM — reports whether a DEC private mode is recognised and what it is set to.
     /// </summary>
+    /// <remarks>
+    /// <para>This is how an application finds out whether a feature is worth using: it asks, and a
+    /// terminal that says nothing is one that does not support the query. Emitting a mode without
+    /// answering for it would leave well-behaved applications never using it.</para>
+    /// <para>Answers for every private mode this terminal keeps state for, and stays silent for the
+    /// rest. Silence is what an unsupported query has always got here, and it is the honest answer
+    /// for the modes that are accepted but not stored — DECSET 8 (auto-repeat) and its like change
+    /// nothing, so there is no state to read back and a "reset" reply would be a guess. Telling an
+    /// application a mode is reset when it has just set it is worse than not replying at all.</para>
+    /// </remarks>
     private void HandleRequestMode(Params parameters, bool isPrivate)
     {
         if (!isPrivate)
@@ -3527,6 +3537,17 @@ public class InputHandler
         _terminal.RaiseDataReceived($"\u001b[?{mode};{state}$y");
     }
 
+    /// <summary>
+    /// Reads back the current state of a DEC private mode, or reports that this terminal keeps no
+    /// state for it.
+    /// </summary>
+    /// <remarks>
+    /// The mouse modes are the entries worth reading twice. Tracking level and encoding are each a
+    /// single selection rather than a set of independent flags — setting 1003 replaces 1002, and
+    /// resetting any of them returns the selection to none — so a mouse mode is "set" exactly when
+    /// it is the one currently selected. The three alternate-buffer modes all read the same flag,
+    /// because they differ only in the cursor and erase work they do on the way in and out.
+    /// </remarks>
     private bool TryGetPrivateModeState(int mode, out bool set)
     {
         var mouseTracker = _terminal.GetMouseTracker();
@@ -3534,6 +3555,9 @@ public class InputHandler
         {
             case (int)TerminalMode.AppCursorKeys:
                 set = _terminal.ApplicationCursorKeys;
+                return true;
+            case (int)TerminalMode.ReverseVideo:
+                set = _terminal.ReverseVideo;
                 return true;
             case (int)TerminalMode.Origin:
                 set = _terminal.OriginMode;
@@ -3544,6 +3568,24 @@ public class InputHandler
             case (int)TerminalMode.ShowCursor:
                 set = _terminal.CursorVisible;
                 return true;
+            case (int)TerminalMode.ReverseWraparound:
+                set = _terminal.ReverseWraparound;
+                return true;
+            case (int)TerminalMode.AppKeypad:
+                set = _terminal.ApplicationKeypad;
+                return true;
+            case (int)TerminalMode.SixelDisplayMode:
+                set = _terminal.SixelDisplayMode;
+                return true;
+            case (int)TerminalMode.SixelPrivateColorRegisters:
+                set = _terminal.SixelPrivateColorRegisters;
+                return true;
+            case (int)TerminalMode.SixelCursorRight:
+                set = _terminal.SixelCursorRight;
+                return true;
+            case (int)TerminalMode.MouseReportClick:
+                set = mouseTracker.TrackingMode == MouseTrackingMode.X10;
+                return true;
             case (int)TerminalMode.MouseReportNormal:
                 set = mouseTracker.TrackingMode == MouseTrackingMode.VT200;
                 return true;
@@ -3553,17 +3595,40 @@ public class InputHandler
             case (int)TerminalMode.MouseReportAnyEvent:
                 set = mouseTracker.TrackingMode == MouseTrackingMode.AnyEvent;
                 return true;
+            case (int)TerminalMode.MouseReportUtf8:
+                set = mouseTracker.Encoding == MouseEncoding.Utf8;
+                return true;
             case (int)TerminalMode.MouseReportSgr:
                 set = mouseTracker.Encoding == MouseEncoding.SGR;
                 return true;
+            case (int)TerminalMode.MouseReportUrxvt:
+                set = mouseTracker.Encoding == MouseEncoding.URXVT;
+                return true;
+            case (int)TerminalMode.SendFocusEvents:
+                set = _terminal.SendFocusEvents;
+                return true;
+            case (int)TerminalMode.AltBuffer:
+            case (int)TerminalMode.AltBufferCursor:
             case (int)TerminalMode.AltBufferFull:
                 set = _terminal.IsAlternateBufferActive;
+                return true;
+            case (int)TerminalMode.EightBitInput:
+                set = _terminal.EightBitInput;
+                return true;
+            case (int)TerminalMode.MetaSendsEscape:
+                set = _terminal.MetaSendsEscape;
+                return true;
+            case (int)TerminalMode.AltSendsEscape:
+                set = _terminal.AltSendsEscape;
                 return true;
             case (int)TerminalMode.BracketedPasteMode:
                 set = _terminal.BracketedPasteMode;
                 return true;
             case (int)TerminalMode.SynchronizedOutput:
                 set = _terminal.SynchronizedOutput;
+                return true;
+            case (int)TerminalMode.Win32InputMode:
+                set = _terminal.Win32InputMode;
                 return true;
             default:
                 set = false;
