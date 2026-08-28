@@ -343,6 +343,60 @@ public class OscSequenceTests
     }
 
     [Fact]
+    public void OscKittyClipboard_Write_MultipleMimeTypesRaiseSeparateRequests()
+    {
+        // Arrange
+        var terminal = CreateTerminal();
+        var requests = new List<TerminalEvents.ClipboardWriteEventArgs>();
+        terminal.ClipboardWriteRequested += (_, e) => requests.Add(e);
+
+        // Act
+        terminal.Write("\x1B]5522;type=write\x1B\\");
+        terminal.Write("\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;dGV4dA==\x1B\\");
+        terminal.Write("\x1B]5522;type=wdata:mime=dGV4dC9odG1s;PGI+dGV4dDwvYj4=\x1B\\");
+        terminal.Write("\x1B]5522;type=wdata\x1B\\");
+
+        // Assert
+        Assert.Collection(
+            requests,
+            request => { Assert.Equal("text/plain", request.MimeType); Assert.Equal("text", request.Text); },
+            request => { Assert.Equal("text/html", request.MimeType); Assert.Equal("<b>text</b>", request.Text); });
+    }
+
+    [Fact]
+    public void OscKittyClipboard_WriteError_EchoesIdAndIgnoresStrayData()
+    {
+        // Arrange
+        var terminal = CreateTerminal();
+        var responses = new List<string>();
+        terminal.DataReceived += (_, e) => responses.Add(e.Data);
+
+        // Act
+        terminal.Write("\x1B]5522;type=write:id=w1;\x1B\\");
+        terminal.Write("\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;invalid!\x1B\\");
+        terminal.Write("\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;dGV4dA==\x1B\\");
+
+        // Assert
+        Assert.Equal(["\x1B]5522;type=write:status=EINVAL:id=w1\x1B\\"], responses);
+    }
+
+    [Fact]
+    public void OscKittyClipboard_WriteHonorsConfiguredSizeLimit()
+    {
+        // Arrange
+        var terminal = new Terminal(new TerminalOptions { MaxClipboardBytes = 1 });
+        string? response = null;
+        terminal.DataReceived += (_, e) => response = e.Data;
+
+        // Act
+        terminal.Write("\x1B]5522;type=write:id=w1\x1B\\");
+        terminal.Write("\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;dHc=\x1B\\");
+
+        // Assert
+        Assert.Equal("\x1B]5522;type=write:status=EFBIG:id=w1\x1B\\", response);
+    }
+
+    [Fact]
     public void OscKittyClipboard_Read_RequiresOptInAndReturnsHostData()
     {
         // Arrange
@@ -371,6 +425,45 @@ public class OscSequenceTests
             ],
             responses);
         Assert.Equal("p", target);
+    }
+
+    [Fact]
+    public void OscKittyClipboard_Read_UsesAnyRequestedMimeType()
+    {
+        // Arrange
+        var terminal = new Terminal(new TerminalOptions { ClipboardReadEnabled = true });
+        var responses = new List<string>();
+        terminal.DataReceived += (_, e) => responses.Add(e.Data);
+        terminal.ClipboardReadRequested += (_, e) =>
+        {
+            if (e.MimeType == "text/plain")
+                e.Data = System.Text.Encoding.UTF8.GetBytes("text");
+        };
+
+        // Act
+        terminal.Write("\x1B]5522;type=read;dGV4dC9odG1sIHRleHQvcGxhaW4=\x1B\\");
+
+        // Assert
+        Assert.Contains("\x1B]5522;type=read:status=DATA:mime=dGV4dC9wbGFpbg==;dGV4dA==\x1B\\", responses);
+    }
+
+    [Fact]
+    public void OscKittyClipboard_ReadTypeList_DecodesDotPayload()
+    {
+        // Arrange
+        var terminal = new Terminal(new TerminalOptions { ClipboardReadEnabled = true });
+        string? requestedMimeType = null;
+        terminal.ClipboardReadRequested += (_, e) =>
+        {
+            requestedMimeType = e.MimeType;
+            e.Data = System.Text.Encoding.UTF8.GetBytes("text/plain");
+        };
+
+        // Act
+        terminal.Write("\x1B]5522;type=read;Lg==\x1B\\");
+
+        // Assert
+        Assert.Equal(".", requestedMimeType);
     }
 
     [Fact]
