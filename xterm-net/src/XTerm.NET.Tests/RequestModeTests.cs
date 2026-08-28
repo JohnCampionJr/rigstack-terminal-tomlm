@@ -1,4 +1,5 @@
 using XTerm.Common;
+using XTerm.Input;
 using XTerm.Options;
 
 namespace XTerm.Tests;
@@ -235,6 +236,44 @@ public class RequestModeTests
         terminal.Write(Esc.Csi("20$p"));
 
         Assert.Empty(replies);
+    }
+
+    /// <summary>
+    /// RIS has to reach the mouse tracker, or DECRQM reports a mode off while the terminal is still
+    /// acting on it. Mode 1004 is kept twice — the terminal's SendFocusEvents and the tracker's own
+    /// FocusEvents — and only the tracker's copy gates output, so a reset that cleared one and not
+    /// the other left focus reports arriving in an application that had been told to expect none.
+    /// The generated sequences are asserted next to the reports because a report agreeing with a
+    /// stale flag is the whole bug: the query alone looked right.
+    /// </summary>
+    [Fact]
+    public void Reports_mouse_and_focus_modes_as_reset_after_ris()
+    {
+        var terminal = Fresh();
+        terminal.Write(Set((int)TerminalMode.MouseReportButtonEvent));
+        terminal.Write(Set((int)TerminalMode.MouseReportSgr));
+        terminal.Write(Set((int)TerminalMode.SendFocusEvents));
+
+        terminal.Write("\u001bc");  // RIS
+
+        var replies = Replies(terminal);
+        terminal.Write(Query((int)TerminalMode.MouseReportButtonEvent));
+        terminal.Write(Query((int)TerminalMode.MouseReportSgr));
+        terminal.Write(Query((int)TerminalMode.SendFocusEvents));
+
+        Assert.Equal(
+            new[]
+            {
+                Report((int)TerminalMode.MouseReportButtonEvent, false),
+                Report((int)TerminalMode.MouseReportSgr, false),
+                Report((int)TerminalMode.SendFocusEvents, false),
+            },
+            replies);
+
+        Assert.Equal(string.Empty, terminal.GenerateFocusEvent(true));
+        Assert.Equal(
+            string.Empty,
+            terminal.GenerateMouseEvent(MouseButton.Left, 0, 0, MouseEventType.Down));
     }
 
     /// <summary>
