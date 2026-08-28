@@ -994,6 +994,17 @@ public class TerminalBuffer
     public bool PendingWrap { get; private set; }
 
     /// <summary>
+    /// Moves the cursor to the line’s start as CR defines it: the LEFT MARGIN when the cursor is
+    /// at or right of it, column 0 when the cursor is left of it. xterm’s rule (CarriageReturn in
+    /// charproc.c), independent of origin mode — a cursor inside the region cannot escape it
+    /// leftward, and one already left of the margin was never in the region to begin with. Every
+    /// operation that “returns the carriage” — CR itself, NEL, CNL/CPL, and a line feed under
+    /// ConvertEol — routes through this so none of them can disagree about where a line starts.
+    /// Clears the pending wrap, as any deliberate movement does.
+    /// </summary>
+    public void CarriageReturn() => SetCursor(_x < _scrollLeft ? 0 : _scrollLeft, _y);
+
+    /// <summary>
     /// Sets the cursor position — the deliberate, clamped move every cursor-addressing sequence
     /// uses, which is why it cancels a pending wrap.
     /// </summary>

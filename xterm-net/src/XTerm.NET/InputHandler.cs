@@ -2658,17 +2658,20 @@ public class InputHandler
 
     private void CursorNextLine(Params parameters)
     {
+        // xterm implements CNL as CUD then CR, so the column is CR’s: the left margin when the
+        // cursor is at or right of it, column 0 when it is left of it — origin mode is not
+        // consulted. The row move cannot change X, so the CR sees the starting column.
         var count = Math.Max(parameters.GetParam(0, 1), 1);
-        // Column 1 under origin mode is the left margin, exactly as MoveCursorToHome resolves it.
-        var col = _terminal.OriginMode ? _buffer.ScrollLeft : 0;
-        _buffer.SetCursor(col, Math.Min(_buffer.Y + count, _terminal.Rows - 1));
+        _buffer.SetCursor(_buffer.X, Math.Min(_buffer.Y + count, _terminal.Rows - 1));
+        _buffer.CarriageReturn();
     }
 
     private void CursorPrecedingLine(Params parameters)
     {
+        // CPL is CUU then CR, mirroring CursorNextLine.
         var count = Math.Max(parameters.GetParam(0, 1), 1);
-        var col = _terminal.OriginMode ? _buffer.ScrollLeft : 0;
-        _buffer.SetCursor(col, Math.Max(_buffer.Y - count, 0));
+        _buffer.SetCursor(_buffer.X, Math.Max(_buffer.Y - count, 0));
+        _buffer.CarriageReturn();
     }
 
     private void CursorCharAbsolute(Params parameters)
@@ -4143,8 +4146,9 @@ public class InputHandler
 
     private void NextLine()
     {
+        // NEL is Index plus carriage return in xterm, so the column follows CR’s margin rule.
         IndexDown();
-        _buffer.SetCursor(0, _buffer.Y);
+        _buffer.CarriageReturn();
     }
 
     private void ReverseIndex()

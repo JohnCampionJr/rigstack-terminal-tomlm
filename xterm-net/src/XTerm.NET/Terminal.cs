@@ -1124,7 +1124,7 @@ public class Terminal
                 break;
 
             case 0x0D: // CR - Carriage Return
-                _buffer.SetCursor(0, _buffer.Y);
+                _buffer.CarriageReturn();
                 break;
 
             case 0x0E: // SO - Shift Out (select G1 charset)
@@ -1153,10 +1153,11 @@ public class Terminal
             _buffer.SetCursor(_buffer.X, _buffer.Y + 1);
         }
 
-        // If ConvertEol is enabled, also do a carriage return (move to column 0)
+        // If ConvertEol is enabled, also do a carriage return — to the line’s start as CR
+        // defines it, which with margins is the left margin, not column 0
         if (Options.ConvertEol)
         {
-            _buffer.SetCursor(0, _buffer.Y);
+            _buffer.CarriageReturn();
         }
 
         LineFed?.Invoke(this, new TerminalEvents.LineFeedEventArgs("\n"));

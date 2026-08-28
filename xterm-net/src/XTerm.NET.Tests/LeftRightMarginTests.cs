@@ -458,18 +458,55 @@ public class LeftRightMarginTests
         Assert.Equal(0, terminal.Buffer.X);
     }
 
+    // ---- carriage return and the left margin ---------------------------------------------------
+
     /// <summary>
-    /// CNL and CPL home to "column 1", and under origin mode column 1 is the left margin —
-    /// the same resolution MoveCursorToHome uses.
+    /// CR goes to the LEFT MARGIN when the cursor is at or right of it, and to column 0 only
+    /// when the cursor is left of it — xterm’s rule, with origin mode not consulted. A cursor
+    /// inside the region cannot escape it leftward: a CRLF emitted by an application drawing
+    /// inside its pane must start the next line at the pane’s edge, not in the pane next door.
     /// </summary>
     [Fact]
-    public void CursorNextLine_homes_to_the_left_margin_under_origin_mode()
+    public void CR_returns_to_the_left_margin_from_inside_the_region()
     {
         var terminal = WithMargins(left: 4, right: 9);
-        terminal.Write($"{Esc}[?6h{Esc}[E");
+        terminal.Write($"{Esc}[1;7H\r");
+        Assert.Equal(3, terminal.Buffer.X);
+    }
+
+    [Fact]
+    public void CR_returns_to_column_zero_from_left_of_the_margin()
+    {
+        var terminal = WithMargins(left: 4, right: 9);
+        terminal.Write($"{Esc}[1;2H\r");
+        Assert.Equal(0, terminal.Buffer.X);
+    }
+
+    /// <summary>
+    /// Everything that "returns the carriage" shares CR’s rule, as in xterm: NEL is Index plus
+    /// CR, and CNL/CPL are CUD/CUU plus CR. None of them consult origin mode.
+    /// </summary>
+    [Theory]
+    [InlineData("E")]     // ESC E, NEL — written as CSI-free below
+    [InlineData("[E")]    // CSI E, CNL
+    [InlineData("[F")]    // CSI F, CPL
+    public void NEL_CNL_and_CPL_follow_the_CR_rule(string tail)
+    {
+        var terminal = WithMargins(left: 4, right: 9);
+
+        terminal.Write($"{Esc}[2;7H{Esc}{tail}");    // from inside the region
         Assert.Equal(3, terminal.Buffer.X);
 
-        terminal.Write($"{Esc}[?6l{Esc}[F");
+        terminal.Write($"{Esc}[2;2H{Esc}{tail}");    // from left of the margin
         Assert.Equal(0, terminal.Buffer.X);
+    }
+
+    [Fact]
+    public void ConvertEol_returns_to_the_left_margin_too()
+    {
+        var terminal = new Terminal(new TerminalOptions { Cols = 20, Rows = 6, ConvertEol = true });
+        terminal.Write($"{Esc}[?69h{Esc}[4;9s");
+        terminal.Write($"{Esc}[1;7H\n");
+        Assert.Equal(3, terminal.Buffer.X);
     }
 }
