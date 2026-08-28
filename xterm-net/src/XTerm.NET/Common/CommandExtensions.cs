@@ -18,29 +18,38 @@ public static class CsiCommandExtensions
         { "H", CsiCommand.CursorPosition },
         { "I", CsiCommand.CursorForwardTab },
         { "J", CsiCommand.EraseInDisplay },
+        { "?J", CsiCommand.EraseInDisplay },
         { "K", CsiCommand.EraseInLine },
+        { "?K", CsiCommand.EraseInLine },
         { "L", CsiCommand.InsertLines },
         { "M", CsiCommand.DeleteLines },
         { "P", CsiCommand.DeleteChars },
         { "S", CsiCommand.ScrollUp },
+        { "?S", CsiCommand.GraphicsAttributes },
         { "T", CsiCommand.ScrollDown },
         { "X", CsiCommand.EraseChars },
         { "Z", CsiCommand.CursorBackwardTab },
         { "b", CsiCommand.RepeatPrecedingCharacter },
         { "c", CsiCommand.DeviceAttributes },
+        { "?c", CsiCommand.DeviceAttributes },
+        { ">c", CsiCommand.DeviceAttributes },
         { "d", CsiCommand.LinePositionAbsolute },
         { "f", CsiCommand.CursorPosition }, // HVP - same as CUP
         { "g", CsiCommand.TabClear },
         { "h", CsiCommand.SetMode },
+        { "?h", CsiCommand.SetMode },
         { "l", CsiCommand.ResetMode },
+        { "?l", CsiCommand.ResetMode },
         { "m", CsiCommand.SelectGraphicRendition },
         { "n", CsiCommand.DeviceStatusReport },
+        { "?n", CsiCommand.DeviceStatusReport },
         { "r", CsiCommand.SetScrollRegion },
         { "s", CsiCommand.SaveCursorAnsi },
         { "t", CsiCommand.WindowManipulation },
         { "u", CsiCommand.RestoreCursorAnsi },
         { " q", CsiCommand.SelectCursorStyle },
         { "$p", CsiCommand.RequestMode },
+        { "?$p", CsiCommand.RequestMode },
         { "q", CsiCommand.SelectCursorStyle }
     };
 
@@ -51,9 +60,7 @@ public static class CsiCommandExtensions
     /// <returns>The corresponding CsiCommand enum value, or Unknown if not recognized</returns>
     public static CsiCommand ToCsiCommand(this string identifier)
     {
-        // Handle DEC private mode sequences (e.g., "?h", "?l", ">c")
-        var cleaned = identifier.TrimStart('?', '>');
-        return _commandMap.GetValueOrDefault(cleaned, CsiCommand.Unknown);
+        return _commandMap.GetValueOrDefault(identifier, CsiCommand.Unknown);
     }
     
     /// <summary>

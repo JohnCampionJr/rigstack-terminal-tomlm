@@ -113,6 +113,11 @@ public enum CsiCommand
     /// Device Attributes (CSI c).
     /// </summary>
     DeviceAttributes,
+
+    /// <summary>
+    /// Graphics Attributes (XTSMGRAPHICS, CSI ? Pi ; Pa ; Pv S).
+    /// </summary>
+    GraphicsAttributes,
     
     /// <summary>
     /// Line Position Absolute (CSI d).

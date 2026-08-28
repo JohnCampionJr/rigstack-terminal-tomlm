@@ -780,13 +780,11 @@ public class InputHandler
                 break;
 
             case CsiCommand.ScrollUp:
-                // "CSI ? ... S" is XTSMGRAPHICS, not SCROLL UP. They share a final character, and
-                // the identifier has its private marker stripped before the lookup, so without
-                // this guard a Sixel program's opening capability query scrolled the screen.
-                if (isPrivate)
-                    GraphicsAttributes(parameters);
-                else
-                    ScrollUp(parameters);
+                ScrollUp(parameters);
+                break;
+
+            case CsiCommand.GraphicsAttributes:
+                GraphicsAttributes(parameters);
                 break;
 
             case CsiCommand.ScrollDown:
