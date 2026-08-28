@@ -982,7 +982,7 @@ public class InputHandler
         RefreshActiveCharset();
     }
 
-    #region DCS / Sixel
+    #region DCS / Sixel / DECRQSS
 
     /// <summary>The Sixel image being decoded, if a DECSIXEL payload is currently arriving.</summary>
     private Graphics.SixelDecoder? _sixelDecoder;
@@ -995,17 +995,31 @@ public class InputHandler
     private Graphics.SixelPalette? _sharedSixelPalette;
 
     /// <summary>
+    /// Accumulates the payload of a DECRQSS sequence (<c>DCS $ q … ST</c>) while it streams in.
+    /// Null when no DECRQSS is active.
+    /// </summary>
+    private StringBuilder? _decrqssPayload;
+
+    /// <summary>
     /// Handles the start of a DCS sequence.
     /// </summary>
     /// <remarks>
     /// The payload that follows is streamed rather than handed over whole, so this is where we
-    /// decide whether it is worth reading at all. Only DECSIXEL is; anything else is left to the
-    /// parser's whole-payload event, which is capped and cheap.
+    /// decide whether it is worth reading at all. Only DECSIXEL and DECRQSS are; anything else is
+    /// left to the parser's whole-payload event, which is capped and cheap.
     /// </remarks>
     public void HandleDcsHook(string identifier, Params parameters)
     {
         CancelRepeat();
         _sixelDecoder = null;
+        _decrqssPayload = null;
+
+        if (identifier == "$q")
+        {
+            // DECRQSS — Request Status String. The payload names the setting to read back.
+            _decrqssPayload = new StringBuilder();
+            return;
+        }
 
         if (identifier != "q" || !_terminal.Options.SixelEnabled)
             return;
@@ -1036,6 +1050,7 @@ public class InputHandler
     public void HandleDcsPut(ReadOnlySpan<char> data)
     {
         _sixelDecoder?.Put(data);
+        _decrqssPayload?.Append(data);
     }
 
     /// <summary>
@@ -1050,12 +1065,141 @@ public class InputHandler
         var decoder = _sixelDecoder;
         _sixelDecoder = null;
 
-        if (decoder is null || !terminatedCleanly)
-            return;
+        var decrqssPayload = _decrqssPayload;
+        _decrqssPayload = null;
 
-        var image = decoder.Finish();
-        if (image is not null)
-            PlaceImage(Graphics.ImagePlacement.Natural(image), Graphics.PlacementKind.Sixel);
+        if (decoder is not null && terminatedCleanly)
+        {
+            var image = decoder.Finish();
+            if (image is not null)
+                PlaceImage(Graphics.ImagePlacement.Natural(image), Graphics.PlacementKind.Sixel);
+        }
+
+        if (decrqssPayload is not null && terminatedCleanly)
+            HandleDecrqss(decrqssPayload.ToString());
+    }
+
+    /// <summary>
+    /// Handles a completed DECRQSS request by reading back the named setting.
+    /// </summary>
+    /// <remarks>
+    /// Reply format: <c>DCS 1 $ r &lt;setting&gt; ST</c> when the setting is recognised, or
+    /// <c>DCS 0 $ r ST</c> when it is not. ST is ESC \.
+    /// </remarks>
+    private void HandleDecrqss(string setting)
+    {
+        // DCS 0 $ r ST — unrecognised setting
+        const string Deny = "\x1bP0$r\x1b\\";
+
+        var reply = setting switch
+        {
+            "m" => $"\x1bP1$r{SerializeSgr()}m\x1b\\",
+            "r" => $"\x1bP1$r{_buffer.ScrollTop + 1};{_buffer.ScrollBottom + 1}r\x1b\\",
+            " q" => $"\x1bP1$r{SerializeDecscusr()} q\x1b\\",
+            "\"p" => "\x1bP1$r62;1\"p\x1b\\",
+            "\"q" => "\x1bP1$r0\"q\x1b\\",
+            _ => Deny,
+        };
+
+        _terminal.RaiseDataReceived(reply);
+    }
+
+    /// <summary>
+    /// Serialises the current character attributes as a semicolon-separated SGR parameter string,
+    /// suitable for embedding in a DECRQSS <c>m</c> response.
+    /// </summary>
+    private string SerializeSgr()
+    {
+        var attr = _curAttr;
+
+        // Build a list of SGR code fragments. Each may be a single number ("1") or a
+        // semicolon-separated run ("38;2;255;128;0").
+        var parts = new System.Collections.Generic.List<string>(8);
+
+        if (attr.IsBold()) parts.Add("1");
+        if (attr.IsDim()) parts.Add("2");
+        if (attr.IsItalic()) parts.Add("3");
+
+        var ulStyle = attr.GetUnderlineStyle();
+        switch (ulStyle)
+        {
+            case Common.UnderlineStyle.Single: parts.Add("4"); break;
+            case Common.UnderlineStyle.Double: parts.Add("21"); break;
+            case Common.UnderlineStyle.Curly: parts.Add("4:3"); break;
+            case Common.UnderlineStyle.Dotted: parts.Add("4:4"); break;
+            case Common.UnderlineStyle.Dashed: parts.Add("4:5"); break;
+        }
+
+        if (attr.IsBlink()) parts.Add("5");
+        if (attr.IsInverse()) parts.Add("7");
+        if (attr.IsInvisible()) parts.Add("8");
+        if (attr.IsStrikethrough()) parts.Add("9");
+        if (attr.IsOverline()) parts.Add("53");
+
+        // Foreground colour
+        var fgMode = attr.GetFgColorMode();
+        var fg = attr.GetFgColor();
+        if (fgMode == 1)
+        {
+            // RGB truecolor
+            parts.Add($"38;2;{(fg >> 16) & 0xFF};{(fg >> 8) & 0xFF};{fg & 0xFF}");
+        }
+        else if (fg <= 7)
+        {
+            parts.Add($"{30 + fg}");
+        }
+        else if (fg <= 15)
+        {
+            parts.Add($"{90 + fg - 8}");
+        }
+        else if (fg <= 255)
+        {
+            parts.Add($"38;5;{fg}");
+        }
+        // 256 (default fg) → omit
+
+        // Background colour
+        var bgMode = attr.GetBgColorMode();
+        var bg = attr.GetBgColor();
+        if (bgMode == 1)
+        {
+            // RGB truecolor
+            parts.Add($"48;2;{(bg >> 16) & 0xFF};{(bg >> 8) & 0xFF};{bg & 0xFF}");
+        }
+        else if (bg <= 7)
+        {
+            parts.Add($"{40 + bg}");
+        }
+        else if (bg <= 15)
+        {
+            parts.Add($"{100 + bg - 8}");
+        }
+        else if (bg <= 255)
+        {
+            parts.Add($"48;5;{bg}");
+        }
+        // 257 (default bg) → omit
+
+        return parts.Count == 0 ? "0" : string.Join(";", parts);
+    }
+
+    /// <summary>
+    /// Serialises the current cursor style as the numeric DECSCUSR parameter.
+    /// </summary>
+    private string SerializeDecscusr()
+    {
+        var style = _terminal.Options.CursorStyle;
+        var blink = _terminal.Options.CursorBlink;
+        return (style, blink) switch
+        {
+            (Common.CursorStyle.Block, true) => "1",
+            (Common.CursorStyle.Block, false) => "2",
+            (Common.CursorStyle.Underline, true) => "3",
+            (Common.CursorStyle.Underline, false) => "4",
+            (Common.CursorStyle.Bar, true) => "5",
+            (Common.CursorStyle.Bar, false) => "6",
+            _ => "0",
+        };
     }
 
     /// <summary>The text of the APC sequence currently arriving.</summary>
