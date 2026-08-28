@@ -830,7 +830,9 @@ public class InputHandler
                 break;
 
             case CsiCommand.DeviceAttributes:
-                DeviceAttributes(parameters, isPrivate);
+                // The identifier goes in whole, not as isPrivate: "?c" and ">c" both set that flag,
+                // and only one of them is the secondary DA.
+                DeviceAttributes(identifier, parameters);
                 break;
 
             case CsiCommand.LinePositionAbsolute:
@@ -3059,32 +3061,77 @@ public class InputHandler
         }
     }
 
-    private void DeviceAttributes(Params parameters, bool isPrivate)
+    /// <summary>
+    /// DA -- CSI c (primary) and CSI &gt; c (secondary). Tells the program on the other end of the
+    /// wire what this terminal is and what it can do.
+    /// </summary>
+    /// <remarks>
+    /// <para>The reply is a promise, not a boast. Every attribute listed here names a sequence the
+    /// program will now go ahead and send, so claiming a feature this emulator does not implement
+    /// does not flatter it, it breaks it: the program emits the sequence, nothing happens, and the
+    /// screen it believes it drew is not the screen that is there. A program that reads attribute
+    /// 21 sets left and right margins and then draws inside them. One that reads attribute 2 pushes
+    /// a print job through printer-controller mode, which an emulator that never enters that mode
+    /// prints onto the screen instead.</para>
+    /// <para>So the list is the intersection of the DA attribute numbers with what the code
+    /// actually does, and nothing else. Deliberately absent, each checked against the tree:
+    /// 1 (132 columns -- <c>TerminalMode.ColumnMode</c> is in the enum, but <c>SetCSIMode</c> has
+    /// no case for it), 2 (printer -- there is no media copy command), 6 (selective erase -- no
+    /// DECSCA), 9 (national replacement character sets -- <c>Charsets</c> holds only the default,
+    /// the line drawing set and UK), 15 (technical characters), 21 (horizontal scrolling -- no
+    /// left and right margins).</para>
+    /// <para>Attribute 4, Sixel, is the one that visibly matters: libsixel, chafa, img2sixel and
+    /// everything built on them read this reply, and send text art instead of pictures unless they
+    /// see it. Claiming it while Sixel is switched off would be the same lie pointed the other
+    /// way, so it follows the option.</para>
+    /// </remarks>
+    private void DeviceAttributes(string identifier, Params parameters)
     {
-        // DA - Device Attributes (CSI c or CSI > c)
-        if (isPrivate)
+        // Only an absent or zero parameter is a request. A non-zero one is another terminal's
+        // reply that has arrived on our input, and answering that starts a ping-pong.
+        if (parameters.GetParam(0, 0) != 0)
+            return;
+
+        if (identifier.StartsWith('>'))
         {
-            // Secondary DA (CSI > c) - Report terminal ID and version
-            // Response: CSI > 0 ; version ; 0 c
-            // We report as VT100-compatible
-            _terminal.RaiseDataReceived("\u001b[>0;10;0c");
+            // Secondary DA: CSI > Pp ; Pv ; Pc c. Pp = 1 is a VT220, matching the conformance
+            // level the primary reply claims -- the old 0 said VT100 and contradicted it. Pv
+            // carries this library's version so a program can tell builds apart, and Pc = 0 is
+            // "no cartridge ROM".
+            _terminal.RaiseDataReceived(SecondaryDeviceAttributes);
         }
-        else
+        else if (identifier.Length == 1)
         {
-            // Primary DA (CSI c) - Report device attributes
-            // Response: CSI ? 1 ; 2 c (VT100 with AVO)
-            // More complete: CSI ? 1 ; 2 ; 6 ; 9 c
-            // 1 = 132 columns, 2 = Printer, 6 = Selective erase, 9 = National replacement character sets
-            //
-            // Attribute 4 is Sixel graphics, and it is not decoration: libsixel, chafa, img2sixel
-            // and everything built on them read this reply, and send text art instead of pictures
-            // unless they see it. Claiming it while Sixel is switched off would be a lie in the
-            // other direction, so it follows the option.
+            // Primary DA: CSI ? 62 ; ... c. 62 is service class 2 (VT220), the level whose core --
+            // scrolling regions, insert and delete line and character, erase character, the
+            // alternate buffer, DECSC/DECRC -- this emulator does implement. 22 is ANSI colour.
             _terminal.RaiseDataReceived(_terminal.Options.SixelEnabled
-                ? "\u001b[?1;2;4c"
-                : "\u001b[?1;2c");
+                ? "\u001b[?62;4;22c"
+                : "\u001b[?62;22c");
         }
+
+        // Any other prefix is left unanswered. "?c" is the one that used to go wrong: it is not the
+        // secondary DA, but it sets isPrivate, so it was handed the secondary reply -- the answer to
+        // a question the program had not asked, while it was still waiting for the one it had. The
+        // tertiary DA, "=c", never reaches this method at all, because ToCsiCommand strips only "?"
+        // and ">" before the lookup and so resolves it to Unknown. Silence is the right outcome for
+        // it regardless: it asks for a unit ID this terminal does not have, and terminals without
+        // DECRPTUI say nothing.
     }
+
+    /// <summary>
+    /// The Pv field of the secondary DA reply: this assembly's version flattened into one number,
+    /// so 2.0 reports 200.
+    /// </summary>
+    private static int FirmwareVersion =>
+        typeof(InputHandler).Assembly.GetName().Version is { } version
+            ? version.Major * 100 + version.Minor
+            : 0;
+
+    /// <summary>
+    /// The secondary DA reply, CSI &gt; Pp ; Pv ; Pc c.
+    /// </summary>
+    private static string SecondaryDeviceAttributes => $"\u001b[>1;{FirmwareVersion};0c";
 
     /// <summary>
     /// XTSMGRAPHICS -- CSI ? Pi ; Pa ; Pv S. Reports the terminal's graphics limits.
