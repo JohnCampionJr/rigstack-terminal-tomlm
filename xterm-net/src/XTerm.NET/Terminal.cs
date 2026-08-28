@@ -18,7 +18,6 @@ public class Terminal
     private readonly EscapeSequenceParser _parser;
     private readonly InputHandler _inputHandler;
     private readonly KeyboardInputGenerator _keyboardInput;
-    private readonly KittyKeyboard _kittyKeyboard = new();
     private readonly MouseTracker _mouseTracker;
     private readonly SelectionManager _selectionManager;
     private Buffer.TerminalBuffer _buffer;
@@ -903,7 +902,7 @@ public class Terminal
     /// <returns>The bytes to send to the application, or null to send nothing.</returns>
     public string? GenerateKittyKeyInput(KeyEvent ev, KittyKeyboardEventType eventType = KittyKeyboardEventType.Press)
     {
-        return _kittyKeyboard.Evaluate(ev, KittyKeyboardState.Flags, eventType, Options.MacOptionIsMeta);
+        return KittyKeyboard.Evaluate(ev, KittyKeyboardState.Flags, eventType, Options.MacOptionIsMeta);
     }
 
     /// <summary>

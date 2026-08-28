@@ -112,11 +112,29 @@ public class KittyKeyboardStateTests
         t.Write("\u001b[<u");
         Assert.Equal(KittyKeyboardFlags.ReportEventTypes, Flags(t));
 
-        // Spec: "If a pop request is received that empties the stack, all flags are reset" — so
-        // the LAST pop yields zero, not the value it popped. The base state set with CSI = is
-        // not stack-tracked; draining the stack is a return to protocol-off.
+        // The base state set with CSI = IS on the stack — kitty's
+        // screen_set_key_encoding_flags creates a stack entry when it is empty, and the active
+        // flags are just the top of the stack. So the second pop restores what CSI = 1 u
+        // established; it does not zero it. (The spec's "a pop that empties the stack resets all
+        // flags" describes popping PAST that base entry, which the over-pop test below covers.)
+        t.Write("\u001b[<u");
+        Assert.Equal(KittyKeyboardFlags.DisambiguateEscapeCodes, Flags(t));
+
         t.Write("\u001b[<u");
         Assert.Equal(KittyKeyboardFlags.None, Flags(t));
+    }
+
+    [Fact]
+    public void A_matched_push_pop_pair_preserves_the_base_flags()
+    {
+        // The ordinary lifecycle, and the case the stack exists to make safe: the shell sets its
+        // base flags, a well-behaved application pushes on entry and pops on exit. The shell must
+        // get ITS flags back — not legacy encoding.
+        var t = NewTerminal();
+        t.Write("\u001b[=1u");   // the shell's flags
+        t.Write("\u001b[>8u");   // an application pushes
+        t.Write("\u001b[<u");    // and pops on exit
+        Assert.Equal(KittyKeyboardFlags.DisambiguateEscapeCodes, Flags(t));
     }
 
     [Fact]
@@ -156,8 +174,52 @@ public class KittyKeyboardStateTests
             t.Write("\u001b[<u");
         Assert.Equal((KittyKeyboardFlags)8, Flags(t));
 
+        // The base entry CSI = 1 u created was itself evicted by the churn, so draining the
+        // stack really is protocol-off here.
         t.Write("\u001b[<u");
         Assert.Equal(KittyKeyboardFlags.None, Flags(t));
+    }
+
+    // ----- Flag masking --------------------------------------------------------------------
+
+    [Fact]
+    public void Out_of_range_flags_round_trip_through_the_query_masked()
+    {
+        // kitty masks to the five defined bits on both set and push (val & 0x7f, less its
+        // stack-occupied marker). CSI = 255 u must answer the query with 31 — echoing back 255
+        // hands the application a value it never sent and cannot interpret as flags.
+        var t = NewTerminal();
+        var responses = new List<string>();
+        t.DataReceived += (_, e) => responses.Add(e.Data);
+
+        t.Write("\u001b[=255u");
+        t.Write("\u001b[?u");
+
+        Assert.Equal(new[] { "\u001b[?31u" }, responses);
+    }
+
+    [Fact]
+    public void A_push_of_only_undefined_bits_does_not_activate_the_protocol()
+    {
+        // Without masking, CSI > 32 u leaves KittyKeyboardActive true with no bit the encoder
+        // understands — the exact state where an unhandled chord would otherwise send nothing.
+        var t = NewTerminal();
+        t.Write("\u001b[>32u");
+        Assert.Equal(KittyKeyboardFlags.None, Flags(t));
+        Assert.False(t.KittyKeyboardActive);
+    }
+
+    [Fact]
+    public void An_explicit_mode_of_zero_does_nothing()
+    {
+        // An OMITTED mode defaults to 1, but kitty's switch takes no branch for an explicit 0 —
+        // it is an unknown mode, not an alias for assign.
+        var t = NewTerminal();
+        t.Write("\u001b[=5u");
+        t.Write("\u001b[=1;0u");
+        Assert.Equal(
+            KittyKeyboardFlags.DisambiguateEscapeCodes | KittyKeyboardFlags.ReportAlternateKeys,
+            Flags(t));
     }
 
     // ----- Per-screen flags ----------------------------------------------------------------
@@ -196,8 +258,8 @@ public class KittyKeyboardStateTests
     {
         var t = NewTerminal();
         t.Write("\u001b[=1u");
-        t.Write("\u001b[>2u");           // main stack: [1]
-        t.Write("\u001b[>4u");           // main stack: [1, 2], flags 4
+        t.Write("\u001b[>2u");           // main stack: [1, 2]
+        t.Write("\u001b[>4u");           // main stack: [1, 2, 4], flags 4
         t.Write("\u001b[?1049h");
         t.Write("\u001b[<u");            // alt stack is empty: flags stay 0
         Assert.Equal(KittyKeyboardFlags.None, Flags(t));

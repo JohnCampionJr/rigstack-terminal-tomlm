@@ -3569,9 +3569,9 @@ public class InputHandler
             return;
 
         var flags = (Input.KittyKeyboardFlags)parameters.GetParam(0, 0);
-        var mode = parameters.GetParam(1, 1);
-        if (mode == 0)
-            mode = 1;
+        // An OMITTED mode means 1; an explicit 0 is an unknown mode and does nothing, matching
+        // kitty's switch, which takes no branch for it.
+        var mode = parameters.Length > 1 ? parameters.GetParam(1, 1) : 1;
         _terminal.KittyKeyboardState.Set(flags, mode);
     }
 

@@ -49,12 +49,16 @@ public enum KittyKeyboardEventType
 /// Enter/Tab/Backspace keep their legacy bytes in disambiguate mode, shift alone never disambiguates
 /// a character key, lock keys are suppressed like modifier presses unless every key is being
 /// reported, and enabling only "report event types" must not swallow keys.</para>
-/// <para><see cref="Evaluate"/> returns the bytes to send, or null when the event produces
-/// nothing — a modifier pressed on its own, or a release the active flags say not to report.
-/// The protocol never falls back to the legacy generator: when the flags call for legacy bytes
-/// (plain text, a bare arrow key), this class produces those bytes itself.</para>
+/// <para><see cref="Evaluate"/> returns the bytes to send, or null when the event GENUINELY
+/// produces nothing — a modifier pressed on its own, or a release the active flags say not to
+/// report. Null never means "try the legacy generator": when the active flags call for legacy
+/// bytes — plain text, a bare arrow key, or a Ctrl/Alt chord under flags that do not ask for
+/// escape-code reporting (bare <see cref="KittyKeyboardFlags.ReportAlternateKeys"/> or
+/// <see cref="KittyKeyboardFlags.ReportAssociatedText"/>) — this class produces those bytes
+/// itself, exactly as kitty falls back to the legacy encoding for anything the flags do not
+/// cover. Ctrl+C must send 0x03 under every legal flag value.</para>
 /// </remarks>
-public class KittyKeyboard
+public static class KittyKeyboard
 {
     /// <summary>
     /// Keys that do not produce text, and the codepoints the protocol assigns them.
@@ -204,9 +208,14 @@ public class KittyKeyboard
     /// all — a dead key with no way back to the physical key, for instance.
     /// </summary>
     /// <remarks>
-    /// The base-layout rule is why <see cref="KeyEvent.Code"/> matters: Shift+5 arrives with the
-    /// key name "%", but the protocol wants 53 ('5'). The same unwinding recovers the letter under
-    /// a macOS Option chord ("ƒ" back to 'f') when the host treats Option as Alt.
+    /// <para>The base-layout rule is why <see cref="KeyEvent.Code"/> matters: Shift+5 arrives with
+    /// the key name "%", but the protocol wants 53 ('5'). The same unwinding recovers the letter
+    /// under a macOS Option chord ("ƒ" back to 'f') when the host treats Option as Alt.</para>
+    /// <para>The <c>Length == 1</c> gate means an astral-plane character — a Key that is a
+    /// surrogate pair, "𐍈" — returns null and sends nothing once any flag is set, where the legacy
+    /// path would have sent its UTF-8. Upstream xterm.js has the same gate
+    /// (KittyKeyboard.ts <c>key.length === 1</c>), so this is inherited from the port, not
+    /// introduced by it; fixing it means fixing it upstream first.</para>
     /// </remarks>
     private static int? GetKeyCode(KeyEvent ev, bool macOptionAsAlt)
     {
@@ -352,9 +361,11 @@ public class KittyKeyboard
             && !ev.CtrlKey;
         int? textCode = reportText ? ev.Key[0] : null;
 
-        var needsEventType = reportEventTypes
-            && eventType != KittyKeyboardEventType.Press
-            && (eventType == KittyKeyboardEventType.Release || textCode is null);
+        // The event-type sub-parameter and the text field are independent in the spec's form
+        // (CSI code:alt ; mods:event ; text u): a repeat carries its :2 whether or not text rides
+        // along, or an application that asked for event types cannot tell a held key from a
+        // hammered one.
+        var needsEventType = reportEventTypes && eventType != KittyKeyboardEventType.Press;
 
         if (modifiers > 0 || needsEventType || textCode is not null)
         {
@@ -385,7 +396,7 @@ public class KittyKeyboard
     /// unwound to the letter under it via <see cref="KeyEvent.Code"/>.
     /// </param>
     /// <returns>The bytes to send, or null when this event sends nothing.</returns>
-    public string? Evaluate(
+    public static string? Evaluate(
         KeyEvent ev,
         KittyKeyboardFlags flags,
         KittyKeyboardEventType eventType = KittyKeyboardEventType.Press,
@@ -455,11 +466,39 @@ public class KittyKeyboard
         if (specialKey)
             return keyCode switch { 13 => "\r", 9 => "\t", _ => "\u007f" };
 
-        if (ev.Key.Length == 1 && !ev.CtrlKey && !ev.AltKey && !ev.MetaKey)
-            return ev.Key;
+        // The flags did not ask for an escape code, so the key sends its LEGACY bytes — the
+        // same ones KeyboardInputGenerator.GenerateCharSequence produces: Ctrl maps to the
+        // control code, Alt prefixes ESC (even combined with Ctrl), Super has no legacy
+        // representation and passes through. Returning null here instead would swallow Ctrl+C
+        // under bare ReportAlternateKeys or ReportAssociatedText — legal flag values — and the
+        // host does not fall back on null, so the chord would send nothing at all.
+        if (ev.Key.Length == 1)
+        {
+            var text = ev.CtrlKey ? ControlCode(ev.Key[0]) : ev.Key;
+            return ev.AltKey ? "\u001b" + text : text;
+        }
 
         return null;
     }
+
+    /// <summary>
+    /// The legacy control code for Ctrl+key — the same mapping
+    /// <see cref="KeyboardInputGenerator.GenerateCharSequence"/> uses, kept byte-identical so a
+    /// chord encodes the same whether or not any protocol flag happens to be set.
+    /// </summary>
+    private static string ControlCode(char c) => c switch
+    {
+        >= 'a' and <= 'z' => ((char)(c - 'a' + 1)).ToString(),
+        >= 'A' and <= 'Z' => ((char)(c - 'A' + 1)).ToString(),
+        ' ' or '@' => "\u0000",
+        '[' => "\u001b",
+        '\\' => "\u001c",
+        ']' => "\u001d",
+        '^' => "\u001e",
+        '_' => "\u001f",
+        '?' => "\u007f",
+        _ => c.ToString()
+    };
 
     /// <summary>
     /// Whether the active flags call for this protocol at all. Zero flags is legacy encoding.
