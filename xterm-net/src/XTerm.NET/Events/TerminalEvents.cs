@@ -39,7 +39,12 @@ public static class TerminalEvents
     }
 
     /// <summary>
-    /// A request for clipboard data. Leave <see cref="Data"/> null to decline it.
+    /// A request for clipboard data (OSC 52 or Kitty OSC 5522). Answer by setting
+    /// <see cref="Data"/> (or <see cref="Text"/>) before the handler returns; leave it null to
+    /// decline. A host whose clipboard API is asynchronous cannot do that without deadlocking
+    /// the thread the terminal is driven on, so it calls <see cref="Defer"/> in the handler and
+    /// <see cref="Respond(byte[]?)"/> when its await completes — a terminal-to-application
+    /// message is legal at any time, so the response is simply emitted then.
     /// </summary>
     public class ClipboardReadEventArgs : EventArgs
     {
@@ -52,6 +57,52 @@ public static class TerminalEvents
         public string Target { get; }
         public string MimeType { get; }
         public byte[]? Data { get; set; }
+
+        /// <summary>The answer as UTF-8 text — a convenience over <see cref="Data"/>.</summary>
+        public string? Text
+        {
+            get => Data is null ? null : System.Text.Encoding.UTF8.GetString(Data);
+            set => Data = value is null ? null : System.Text.Encoding.UTF8.GetBytes(value);
+        }
+
+        /// <summary>
+        /// True once <see cref="Defer"/> is called: the answer arrives via
+        /// <see cref="Respond(byte[]?)"/> after the handler returns, and the request stays open
+        /// until it does. OSC 52 treats a request that never answers as a decline (silence), but
+        /// Kitty OSC 5522 must answer EVERY request — its reply cannot begin until each
+        /// requested mime has resolved — so a deferring host must always complete the call.
+        /// </summary>
+        public bool Deferred { get; private set; }
+
+        /// <summary>Marks the request as answered later; call inside the handler.</summary>
+        public void Defer() => Deferred = true;
+
+        private Action<byte[]?>? _respond;
+
+        /// <summary>
+        /// Completes a deferred request. Null declines — for OSC 52 that is the same silence an
+        /// unhandled request produces; for OSC 5522 it counts the mime as unavailable. Call it
+        /// from the thread the terminal is driven on. A synchronous answer wins: once
+        /// <see cref="Data"/> was set when the handler returned, and after the first call here,
+        /// further calls are ignored.
+        /// </summary>
+        public void Respond(byte[]? data)
+        {
+            var respond = _respond;
+            _respond = null;
+            respond?.Invoke(data);
+        }
+
+        /// <summary>Completes a deferred request with UTF-8 text; null declines.</summary>
+        public void Respond(string? text) =>
+            Respond(text is null ? null : System.Text.Encoding.UTF8.GetBytes(text));
+
+        /// <summary>Installs what <see cref="Respond(byte[]?)"/> emits; disarmed once used or
+        /// once the synchronous path has answered.</summary>
+        internal void Arm(Action<byte[]?> respond) => _respond = respond;
+
+        /// <summary>The synchronous path answered, so a later Respond must not.</summary>
+        internal void Disarm() => _respond = null;
     }
 
     /// <summary>
@@ -248,6 +299,7 @@ public static class TerminalEvents
         /// </summary>
         public string Text { get; }
     }
+
 
     /// <summary>
     /// Raw OSC event - fired for EVERY OSC sequence the parser completes, including ones this

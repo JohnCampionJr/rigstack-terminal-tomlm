@@ -271,14 +271,214 @@ public class OscSequenceTests
     }
 
     [Fact]
-    public void OscClipboard_SetData_DoesNotThrow()
+    public void OscClipboard_Query_IsIgnoredByDefault()
+    {
+        // Reads are opt-in, and a disabled read answers NOTHING — the host is not even asked.
+        var terminal = new Terminal(new TerminalOptions());
+        string? response = null;
+        var readRequested = false;
+        terminal.DataReceived += (sender, e) => response = e.Data;
+        terminal.ClipboardReadRequested += (_, _) => readRequested = true;
+
+        // Act
+        terminal.Write("\x1B]52;c;?\x07");
+
+        // Assert
+        Assert.Null(response);
+        Assert.False(readRequested);
+    }
+
+    [Fact]
+    public void OscClipboard_SetData_RaisesWriteRequest()
     {
         // Arrange
         var terminal = CreateTerminal();
+        TerminalEvents.ClipboardWriteEventArgs? request = null;
+        terminal.ClipboardWriteRequested += (_, e) => request = e;
         var base64Data = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("Hello, World!"));
 
-        // Act & Assert - Should not throw
+        // Act
         terminal.Write($"\x1B]52;c;{base64Data}\x07");
+
+        // Assert
+        Assert.NotNull(request);
+        Assert.Equal("c", request.Target);
+        Assert.Equal("Hello, World!", request.Text);
+    }
+
+    [Fact]
+    public void OscClipboard_Query_WhenEnabledAndHandled_ReturnsClipboardText()
+    {
+        // Arrange
+        var terminal = CreateTerminal();
+        terminal.Options.ClipboardReadEnabled = true;
+        string? response = null;
+        terminal.ClipboardReadRequested += (_, e) =>
+        {
+            Assert.Equal("p", e.Target);
+            e.Text = "Hello, World!";
+        };
+        terminal.DataReceived += (_, e) => response = e.Data;
+
+        // Act
+        terminal.Write("\x1B]52;p;?\x07");
+
+        // Assert
+        Assert.Equal("\x1B]52;p;SGVsbG8sIFdvcmxkIQ==\x07", response);
+    }
+
+    [Fact]
+    public void OscClipboard_Query_CanBeAnsweredAfterTheHandlerReturns()
+    {
+        // The async-host path: an Avalonia clipboard is awaited, so the handler returns first
+        // and answers later. The response must be byte-identical to the synchronous one.
+        var terminal = new Terminal(new TerminalOptions { ClipboardReadEnabled = true });
+        string? response = null;
+        terminal.DataReceived += (_, e) => response = e.Data;
+        TerminalEvents.ClipboardReadEventArgs? pending = null;
+        terminal.ClipboardReadRequested += (_, e) => { e.Defer(); pending = e; };
+
+        terminal.Write("\u001b]52;c;?\u0007");
+        Assert.Null(response);                        // nothing answered yet...
+        pending!.Respond("deferred");
+        Assert.Equal("\u001b]52;c;ZGVmZXJyZWQ=\u0007", response);
+
+        response = null;
+        pending.Respond("again");                     // a second call is ignored
+        Assert.Null(response);
+    }
+
+    [Fact]
+    public void OscClipboard_DeferredDecline_StaysSilent()
+    {
+        var terminal = new Terminal(new TerminalOptions { ClipboardReadEnabled = true });
+        string? response = null;
+        terminal.DataReceived += (_, e) => response = e.Data;
+        TerminalEvents.ClipboardReadEventArgs? pending = null;
+        terminal.ClipboardReadRequested += (_, e) => { e.Defer(); pending = e; };
+
+        terminal.Write("\u001b]52;c;?\u0007");
+        pending!.Respond((string?)null);
+        Assert.Null(response);
+    }
+
+    [Fact]
+    public void OscClipboard_SyncAnswerDisarmsRespond()
+    {
+        // Handled synchronously answers as the handler returns; Respond afterwards must not
+        // produce a SECOND response.
+        var terminal = new Terminal(new TerminalOptions { ClipboardReadEnabled = true });
+        var responses = new List<string>();
+        terminal.DataReceived += (_, e) => responses.Add(e.Data);
+        TerminalEvents.ClipboardReadEventArgs? pending = null;
+        terminal.ClipboardReadRequested += (_, e) => { e.Text = "sync"; pending = e; };
+
+        terminal.Write("\u001b]52;c;?\u0007");
+        pending!.Respond("late");
+        Assert.Single(responses);
+        Assert.Equal("\u001b]52;c;c3luYw==\u0007", responses[0]);
+    }
+
+    [Fact]
+    public void OscClipboard_Query_WhenEnabledAndDeclined_DoesNotRespond()
+    {
+        // Arrange
+        var terminal = CreateTerminal();
+        terminal.Options.ClipboardReadEnabled = true;
+        string? response = null;
+        var raised = false;
+        terminal.ClipboardReadRequested += (_, e) =>
+        {
+            raised = true;
+            Assert.Equal("s", e.Target);
+        };
+        terminal.DataReceived += (_, e) => response = e.Data;
+
+        // Act
+        terminal.Write("\x1B]52;s;?\x07");
+
+        // Assert
+        Assert.True(raised);
+        Assert.Null(response);
+    }
+
+    [Fact]
+    public void OscClipboard_SetInvalidData_RaisesClearRequest()
+    {
+        // Arrange
+        var terminal = CreateTerminal();
+        TerminalEvents.ClipboardWriteEventArgs? request = null;
+        terminal.ClipboardWriteRequested += (_, e) => request = e;
+
+        // Act
+        terminal.Write("\x1B]52;c;!\x07");
+
+        // Assert
+        Assert.NotNull(request);
+        Assert.Equal("c", request.Target);
+        Assert.Equal(string.Empty, request.Text);
+    }
+
+    [Fact]
+    public void OscClipboard_EmptyTarget_DefaultsToSelectionZero()
+    {
+        // Arrange
+        var terminal = CreateTerminal();
+        TerminalEvents.ClipboardWriteEventArgs? request = null;
+        terminal.ClipboardWriteRequested += (_, e) => request = e;
+        var base64Data = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("Hello, World!"));
+
+        // Act
+        terminal.Write($"\x1B]52;;{base64Data}\x07");
+
+        // Assert
+        Assert.NotNull(request);
+        Assert.Equal("s0", request.Target);
+    }
+
+    [Fact]
+    public void OscClipboard_InvalidTarget_IsIgnored()
+    {
+        // Arrange
+        var terminal = CreateTerminal();
+        var raised = false;
+        terminal.ClipboardWriteRequested += (_, _) => raised = true;
+        var base64Data = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("Hello, World!"));
+
+        // Act
+        terminal.Write($"\x1B]52;x;{base64Data}\x07");
+
+        // Assert
+        Assert.False(raised);
+    }
+
+    [Fact]
+    public void OscClipboard_SetData_PropagatesHostExceptions()
+    {
+        // Arrange
+        var terminal = CreateTerminal();
+        terminal.ClipboardWriteRequested += (_, _) => throw new InvalidOperationException();
+        var base64Data = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("Hello, World!"));
+
+        // Act & Assert
+        Assert.Throws<InvalidOperationException>(() => terminal.Write($"\x1B]52;c;{base64Data}\x07"));
+    }
+
+    [Fact]
+    public void OscClipboard_SetData_WhenDisabled_IsIgnored()
+    {
+        // Arrange
+        var terminal = CreateTerminal();
+        terminal.Options.ClipboardWriteEnabled = false;
+        var raised = false;
+        terminal.ClipboardWriteRequested += (_, _) => raised = true;
+        var base64Data = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("Hello, World!"));
+
+        // Act
+        terminal.Write($"\x1B]52;s;{base64Data}\x07");
+
+        // Assert
+        Assert.False(raised);
     }
 
     [Fact]
@@ -537,6 +737,59 @@ public class OscSequenceTests
         // Assert
         Assert.False(requested);
         Assert.Equal("\x1B]5522;type=read:status=EPERM\x1B\\", response);
+    }
+
+    [Fact]
+    public void OscKittyClipboard_Read_CanBeAnsweredAfterTheHandlerReturns()
+    {
+        // The async-host path: the reply cannot begin until every requested mime resolves, so a
+        // mixed sync/deferred pair emits nothing until the deferred one lands — then the whole
+        // OK/DATA/DONE flow goes out in order.
+        var terminal = new Terminal(new TerminalOptions { ClipboardReadEnabled = true });
+        var responses = new List<string>();
+        terminal.DataReceived += (_, e) => responses.Add(e.Data);
+        TerminalEvents.ClipboardReadEventArgs? pending = null;
+        terminal.ClipboardReadRequested += (_, e) =>
+        {
+            if (e.MimeType == "text/plain")
+                e.Text = "sync";
+            else
+            {
+                e.Defer();
+                pending = e;
+            }
+        };
+
+        var mimes = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("text/plain text/html"));
+        terminal.Write($"\u001b]5522;type=read:id=r1;{mimes}\u001b\\");
+        Assert.Empty(responses);
+
+        pending!.Respond("<b>late</b>");
+
+        Assert.Equal("\u001b]5522;type=read:status=OK:id=r1\u001b\\", responses[0]);
+        Assert.Contains("status=DATA", responses[1]);
+        Assert.Contains("status=DATA", responses[2]);
+        Assert.Equal("\u001b]5522;type=read:status=DONE:id=r1\u001b\\", responses[^1]);
+        Assert.Equal(4, responses.Count);
+    }
+
+    [Fact]
+    public void OscKittyClipboard_DeferredDeclineOfEveryMime_AnswersEperm()
+    {
+        // Unlike OSC 52, 5522 must ANSWER a decline: all-deferred, all-null resolves to EPERM.
+        var terminal = new Terminal(new TerminalOptions { ClipboardReadEnabled = true });
+        var responses = new List<string>();
+        terminal.DataReceived += (_, e) => responses.Add(e.Data);
+        var pending = new List<TerminalEvents.ClipboardReadEventArgs>();
+        terminal.ClipboardReadRequested += (_, e) => { e.Defer(); pending.Add(e); };
+
+        var mimes = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("text/plain"));
+        terminal.Write($"\u001b]5522;type=read:id=r2;{mimes}\u001b\\");
+        Assert.Empty(responses);
+
+        pending.Single().Respond((byte[]?)null);
+
+        Assert.Equal("\u001b]5522;type=read:status=EPERM:id=r2\u001b\\", responses.Single());
     }
 
     [Fact]

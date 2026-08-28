@@ -974,18 +974,15 @@ public class Terminal
     internal void RaiseClipboardWriteRequested(string target, string mimeType, byte[] data) =>
         ClipboardWriteRequested?.Invoke(this, new TerminalEvents.ClipboardWriteEventArgs(target, mimeType, data));
 
-    internal TerminalEvents.ClipboardReadEventArgs RaiseClipboardReadRequested(string target, string mimeType)
-    {
-        var args = new TerminalEvents.ClipboardReadEventArgs(target, mimeType);
+    internal void RaiseClipboardReadRequested(TerminalEvents.ClipboardReadEventArgs args) =>
         ClipboardReadRequested?.Invoke(this, args);
-        return args;
-    }
     
     internal void RaiseTitleChanged(string title) => 
         TitleChanged?.Invoke(this, new TerminalEvents.TitleChangeEventArgs(title));
     
     internal void RaiseDirectoryChanged(string directory) => 
         DirectoryChanged?.Invoke(this, new TerminalEvents.DirectoryChangeEventArgs(directory));
+
 
     internal void RaiseHyperlinkChanged(string? url) =>
         HyperlinkChanged?.Invoke(this, new TerminalEvents.HyperlinkEventArgs(url ?? string.Empty, url == null));

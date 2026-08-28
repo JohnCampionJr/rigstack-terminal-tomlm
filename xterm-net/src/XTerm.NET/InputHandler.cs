@@ -2827,29 +2827,54 @@ public class InputHandler
     {
         var parts = data.Split(new[] { ';' }, 2);
 
-        if (parts.Length != 2 || !IsValidOsc52ClipboardTarget(parts[0]))
+        if (parts.Length != 2)
             return;
 
         var target = parts[0];
         var clipdata = parts[1];
 
+        // xterm defaults an empty Pc to "s 0"; anything outside the Pc charset is not OSC 52.
+        if (target.Length == 0)
+            target = "s0";
+        else if (!IsValidOsc52ClipboardTarget(target))
+            return;
+
         if (clipdata == "?")
         {
-            if (_terminal.Options.ClipboardReadEnabled)
+            // Per issue #54 a disabled read answers NOTHING: silence is how this terminal
+            // declines, and an unanswered probe cannot leak whether a clipboard exists.
+            if (!_terminal.Options.ClipboardReadEnabled)
+                return;
+
+            // Armed BEFORE the handler runs, so a host whose clipboard is asynchronous can
+            // Defer() and answer via Respond when its await completes — the response is
+            // byte-identical either way, and null (or never answering) is the same silence an
+            // unhandled request produces.
+            var args = new Events.TerminalEvents.ClipboardReadEventArgs(target, "text/plain");
+            args.Arm(bytes =>
             {
-                var request = _terminal.RaiseClipboardReadRequested(target, "text/plain");
-                if (request.Data is not null)
-                    _terminal.RaiseDataReceived($"\u001b]52;{target};{Convert.ToBase64String(request.Data)}\u0007");
-            }
-            else
+                if (bytes is null)
+                    return;
+                _terminal.RaiseDataReceived($"\u001b]52;{target};{Convert.ToBase64String(bytes)}\u0007");
+            });
+            _terminal.RaiseClipboardReadRequested(args);
+            if (args.Data is { } sync)
             {
-                _terminal.RaiseDataReceived($"\u001b]52;{target};\u0007");
+                args.Disarm();
+                _terminal.RaiseDataReceived($"\u001b]52;{target};{Convert.ToBase64String(sync)}\u0007");
             }
             return;
         }
 
-        if (_terminal.Options.ClipboardWriteEnabled && TryDecodeBase64(clipdata, out var decoded))
-            _terminal.RaiseClipboardWriteRequested(target, "text/plain", decoded);
+        if (!_terminal.Options.ClipboardWriteEnabled)
+            return;
+
+        // Invalid base64 is xterm's documented clear idiom: the host is told "empty", not
+        // nothing. The raise sits outside any catch, so a host handler's own exception
+        // propagates instead of being mistaken for a malformed payload.
+        if (!TryDecodeBase64(clipdata, out var decoded))
+            decoded = Array.Empty<byte>();
+        _terminal.RaiseClipboardWriteRequested(target, "text/plain", decoded);
     }
 
     private void HandleKittyClipboard(string data)
@@ -3026,24 +3051,63 @@ public class InputHandler
             return;
         }
 
-        var responses = requestedMimeTypes
-            .Select(mimeType => (MimeType: mimeType, Data: _terminal.RaiseClipboardReadRequested(target, mimeType).Data))
-            .Where(response => response.Data is not null)
-            .ToList();
-        if (responses.Count == 0)
+        // The reply cannot begin until EVERY requested mime has resolved: OK precedes the
+        // first DATA, and EPERM is only true when none answered. Answers may arrive
+        // synchronously, later (a host that Defer()s while it awaits its clipboard), or as a
+        // mix — the last one to land emits the whole reply. A deferred request the host never
+        // completes leaves the read unanswered, which is why the args' contract says a
+        // deferring host must always call Respond.
+        var answers = new byte[]?[requestedMimeTypes.Length];
+        var outstanding = 0;
+        var dispatched = false;
+
+        void Deliver()
         {
-            RaiseKittyClipboardResponse("read", "EPERM", id);
-            return;
+            var responses = requestedMimeTypes
+                .Zip(answers, (mimeType, bytes) => (MimeType: mimeType, Data: bytes))
+                .Where(response => response.Data is not null)
+                .ToList();
+            if (responses.Count == 0)
+            {
+                RaiseKittyClipboardResponse("read", "EPERM", id);
+                return;
+            }
+
+            RaiseKittyClipboardResponse("read", "OK", id);
+            foreach (var (mimeType, clipboardData) in responses)
+            {
+                var encodedMime = Convert.ToBase64String(Encoding.UTF8.GetBytes(mimeType));
+                foreach (var chunk in clipboardData!.Chunk(4096))
+                    _terminal.RaiseDataReceived($"\u001b]5522;type=read:status=DATA:mime={encodedMime}{FormatKittyId(id)};{Convert.ToBase64String(chunk)}\u001b\\");
+            }
+            RaiseKittyClipboardResponse("read", "DONE", id);
         }
 
-        RaiseKittyClipboardResponse("read", "OK", id);
-        foreach (var (mimeType, clipboardData) in responses)
+        for (var i = 0; i < requestedMimeTypes.Length; i++)
         {
-            var encodedMime = Convert.ToBase64String(Encoding.UTF8.GetBytes(mimeType));
-            foreach (var chunk in clipboardData!.Chunk(4096))
-                _terminal.RaiseDataReceived($"\u001b]5522;type=read:status=DATA:mime={encodedMime}{FormatKittyId(id)};{Convert.ToBase64String(chunk)}\u001b\\");
+            var index = i;
+            var args = new Events.TerminalEvents.ClipboardReadEventArgs(target, requestedMimeTypes[i]);
+            args.Arm(bytes =>
+            {
+                answers[index] = bytes;
+                if (--outstanding == 0 && dispatched)
+                    Deliver();
+            });
+            _terminal.RaiseClipboardReadRequested(args);
+            if (args.Deferred)
+            {
+                outstanding++;
+            }
+            else
+            {
+                args.Disarm();
+                answers[index] = args.Data;
+            }
         }
-        RaiseKittyClipboardResponse("read", "DONE", id);
+
+        dispatched = true;
+        if (outstanding == 0)
+            Deliver();
     }
 
     private void HandleKittyClipboardAlias(string metadata, string? payload)
