@@ -169,6 +169,7 @@ public class TerminalOptions : ICloneable
     /// </summary>
     public int MaxClipboardBytes { get; set; } = 64 * 1024 * 1024;
 
+    /// <summary>
     /// Whether the Kitty keyboard protocol sequences (CSI u) are honoured.
     /// </summary>
     /// <remarks>
