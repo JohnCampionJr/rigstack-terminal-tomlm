@@ -18,6 +18,12 @@ jobs:
     #   github.event.pull_request.user.login == 'new-developer' ||
     #   github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'
 
+    # Humans only. Two different bot cases, both worth refusing:
+    #   pull_request.user.type -- the PR was OPENED by a bot (Copilot and friends).
+    #   github.actor           -- a human's PR that Claude then PUSHED to. The push fires
+    #                             `synchronize`, and Claude would review its own commit.
+    # Ask for a review on a bot's PR by commenting @claude on it.
+    if: github.event.pull_request.user.type != 'Bot' && github.actor != 'claude[bot]'
     runs-on: ubuntu-latest
     permissions:
       contents: read
