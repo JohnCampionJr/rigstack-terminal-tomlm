@@ -39,6 +39,10 @@ jobs:
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
           prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
+          # Same gating as claude.yml: .claude/settings.json does not reach the Action, so a
+          # reviewer without this cannot build or run the suite, and every finding it reports
+          # is unverified reasoning about code it never executed.
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
+          claude_args: '--allowedTools "Bash(dotnet:*)"'
 
