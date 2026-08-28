@@ -15,6 +15,15 @@ public class InputHandlerTests
         return new Terminal(options);
     }
 
+    private static string ExpectedSecondaryDeviceAttributes()
+    {
+        var version = typeof(InputHandler).Assembly.GetName().Version;
+        var firmwareVersion = version is null
+            ? "0"
+            : $"{version.Major}{version.Minor:D2}{Math.Max(version.Build, 0):D2}";
+        return $"\u001b[>41;{firmwareVersion};0c";
+    }
+
     [Fact]
     public void Constructor_InitializesHandler()
     {
@@ -1090,10 +1099,11 @@ public class InputHandlerTests
         // Act
         handler.HandleCsi("c", params_);
 
-        // Assert - CSI ? 1 ; 2 ; 4 c: VT100 with AVO, plus Sixel graphics.
+        // Assert - CSI ? 64 ; 1 ; 2 ; 4 ; 6 ; 9 ; 15 ; 21 ; 22 c: VT420 with Sixel and the
+        // capabilities this emulator actually implements.
         // Attribute 4 is how libsixel-based programs decide whether to send a picture at all, so
         // dropping it from this reply silently turns every image back into text art.
-        Assert.Equal("\u001b[?1;2;4c", receivedData);
+        Assert.Equal("\u001b[?64;1;2;4;6;9;15;21;22c", receivedData);
     }
 
     [Fact]
@@ -1113,7 +1123,7 @@ public class InputHandlerTests
         handler.HandleCsi("c", params_);
 
         // Assert - claiming Sixel while it is switched off would send pictures we then drop
-        Assert.Equal("\u001b[?1;2c", receivedData);
+        Assert.Equal("\u001b[?64;1;2;6;9;15;21;22c", receivedData);
     }
 
     [Fact]
@@ -1131,8 +1141,8 @@ public class InputHandlerTests
         // Act - Use ">c" for secondary DA
         handler.HandleCsi(">c", params_);
 
-        // Assert - Should respond with CSI > 0 ; 10 ; 0 c
-        Assert.Equal("\u001b[>0;10;0c", receivedData);
+        // Assert - Should respond with CSI > 41 ; package-version ; 0 c
+        Assert.Equal(ExpectedSecondaryDeviceAttributes(), receivedData);
     }
 
     #endregion

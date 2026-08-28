@@ -2915,25 +2915,34 @@ public class InputHandler
         if (isPrivate)
         {
             // Secondary DA (CSI > c) - Report terminal ID and version
-            // Response: CSI > 0 ; version ; 0 c
-            // We report as VT100-compatible
-            _terminal.RaiseDataReceived("\u001b[>0;10;0c");
+            // Response: CSI > 41 ; version ; 0 c (VT420)
+            _terminal.RaiseDataReceived(GetSecondaryDeviceAttributes());
         }
         else
         {
             // Primary DA (CSI c) - Report device attributes
-            // Response: CSI ? 1 ; 2 c (VT100 with AVO)
-            // More complete: CSI ? 1 ; 2 ; 6 ; 9 c
-            // 1 = 132 columns, 2 = Printer, 6 = Selective erase, 9 = National replacement character sets
+            // Response: CSI ? 64 ; ... c (VT420)
+            // 1 = 132 columns, 2 = Printer, 4 = Sixel, 6 = Selective erase,
+            // 9 = National replacement character sets, 15 = Technical characters,
+            // 21 = Horizontal scrolling, 22 = ANSI colour
             //
             // Attribute 4 is Sixel graphics, and it is not decoration: libsixel, chafa, img2sixel
             // and everything built on them read this reply, and send text art instead of pictures
             // unless they see it. Claiming it while Sixel is switched off would be a lie in the
             // other direction, so it follows the option.
             _terminal.RaiseDataReceived(_terminal.Options.SixelEnabled
-                ? "\u001b[?1;2;4c"
-                : "\u001b[?1;2c");
+                ? "\u001b[?64;1;2;4;6;9;15;21;22c"
+                : "\u001b[?64;1;2;6;9;15;21;22c");
         }
+    }
+
+    private static string GetSecondaryDeviceAttributes()
+    {
+        var version = typeof(InputHandler).Assembly.GetName().Version;
+        var firmwareVersion = version is null
+            ? "0"
+            : $"{version.Major}{version.Minor:D2}{Math.Max(version.Build, 0):D2}";
+        return $"\u001b[>41;{firmwareVersion};0c";
     }
 
     /// <summary>
