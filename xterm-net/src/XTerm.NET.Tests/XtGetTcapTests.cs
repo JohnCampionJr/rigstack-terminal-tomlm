@@ -186,7 +186,7 @@ public class XtGetTcapTests
         terminal.DataReceived += (_, e) => replies.Add(e.Data);
 
         terminal.Write($"{Esc}P+q54");
-        terminal.Write("4e");
+        terminal.Write("4E");
         terminal.Write(St);
 
         Assert.Equal(new[] { Valid("TN", "xterm") }, replies);
