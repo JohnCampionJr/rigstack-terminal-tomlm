@@ -52,5 +52,4 @@ jobs:
           # repository: no build, no tests, so nothing it reports can have been verified.
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
-          claude_args: '--allowedTools "Bash(dotnet:*)"'
-
+          claude_args: '--allowedTools "Bash(dotnet:*),Bash(gh pr edit:*),Bash(gh pr ready:*),Bash(gh pr view:*)"'
