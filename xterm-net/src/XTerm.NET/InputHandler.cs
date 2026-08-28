@@ -784,6 +784,22 @@ public class InputHandler
                 ResetCSIModeParameters(parameters, isPrivate: isPrivate);
                 break;
 
+            case CsiCommand.KittyKeyboardSet:
+                KittyKeyboardSet(parameters);
+                break;
+
+            case CsiCommand.KittyKeyboardQuery:
+                KittyKeyboardQuery();
+                break;
+
+            case CsiCommand.KittyKeyboardPush:
+                KittyKeyboardPush(parameters);
+                break;
+
+            case CsiCommand.KittyKeyboardPop:
+                KittyKeyboardPop(parameters);
+                break;
+
             case CsiCommand.Unknown:
                 // Log unknown sequence for debugging
                 System.Diagnostics.Debug.WriteLine($"Unknown CSI sequence: {identifier}");
@@ -3391,6 +3407,67 @@ public class InputHandler
         // DECRPM: 1 = set, 2 = reset.
         var state = _terminal.SynchronizedOutput ? 1 : 2;
         _terminal.RaiseDataReceived($"\u001b[?{mode};{state}$y");
+    }
+
+    /// <summary>
+    /// CSI = flags ; mode u — set the Kitty keyboard protocol flags.
+    /// Mode 1 assigns, 2 sets only the given bits, 3 clears only the given bits.
+    /// </summary>
+    /// <remarks>
+    /// All four Kitty keyboard sequences are consumed even when the option is off — silently
+    /// dropped, never allowed to fall through to whatever a stripped identifier would have
+    /// matched. See <see cref="KittyKeyboardQuery"/> for why that matters.
+    /// </remarks>
+    private void KittyKeyboardSet(Params parameters)
+    {
+        if (!_terminal.Options.KittyKeyboardEnabled)
+            return;
+
+        var flags = (Input.KittyKeyboardFlags)parameters.GetParam(0, 0);
+        var mode = parameters.GetParam(1, 1);
+        if (mode == 0)
+            mode = 1;
+        _terminal.KittyKeyboardState.Set(flags, mode);
+    }
+
+    /// <summary>
+    /// CSI ? u — query the Kitty keyboard protocol flags. The terminal answers CSI ? flags u.
+    /// </summary>
+    /// <remarks>
+    /// This is the probe applications actually send: Neovim asks on startup and enables the
+    /// protocol on the answer. Before these handlers existed, the identifier's "?" was stripped
+    /// and the probe executed RESTORE CURSOR — so merely asking about Kitty support teleported
+    /// the cursor. When the option is off there is deliberately no answer at all: silence is how
+    /// a terminal says "legacy encoding" to this probe.
+    /// </remarks>
+    private void KittyKeyboardQuery()
+    {
+        if (!_terminal.Options.KittyKeyboardEnabled)
+            return;
+
+        _terminal.RaiseDataReceived($"\u001b[?{(int)_terminal.KittyKeyboardState.Flags}u");
+    }
+
+    /// <summary>
+    /// CSI > flags u — push the current flags onto this screen's stack and set new ones.
+    /// </summary>
+    private void KittyKeyboardPush(Params parameters)
+    {
+        if (!_terminal.Options.KittyKeyboardEnabled)
+            return;
+
+        _terminal.KittyKeyboardState.Push((Input.KittyKeyboardFlags)parameters.GetParam(0, 0));
+    }
+
+    /// <summary>
+    /// CSI < count u — pop flags from this screen's stack.
+    /// </summary>
+    private void KittyKeyboardPop(Params parameters)
+    {
+        if (!_terminal.Options.KittyKeyboardEnabled)
+            return;
+
+        _terminal.KittyKeyboardState.Pop(Math.Max(1, parameters.GetParam(0, 1)));
     }
 
     private void SetCSIModeParameters(Params parameters, bool isPrivate)
