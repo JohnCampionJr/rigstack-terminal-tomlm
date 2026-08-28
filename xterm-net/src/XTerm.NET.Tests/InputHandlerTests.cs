@@ -2344,12 +2344,32 @@ public class InputHandlerTests
 
     #region DECRQSS
 
+    /// <summary>Everything the terminal writes back to the host while <paramref name="input"/> is parsed.</summary>
     private static string Capture(Terminal terminal, string input)
     {
         var received = new System.Text.StringBuilder();
-        terminal.DataReceived += (_, e) => received.Append(e.Data);
-        terminal.Write(input);
+        void Collect(object? _, TerminalEvents.DataEventArgs e) => received.Append(e.Data);
+
+        terminal.DataReceived += Collect;
+        try
+        {
+            terminal.Write(input);
+        }
+        finally
+        {
+            terminal.DataReceived -= Collect;
+        }
+
         return received.ToString();
+    }
+
+    /// <summary>The SGR parameters out of a DECRQSS <c>m</c> reply, asserting the envelope on the way.</summary>
+    private static string RequestSgr(Terminal terminal)
+    {
+        var reply = Capture(terminal, "\x1bP$qm\x1b\\");
+        Assert.StartsWith("\x1bP1$r", reply);
+        Assert.EndsWith("m\x1b\\", reply);
+        return reply["\x1bP1$r".Length..^"m\x1b\\".Length];
     }
 
     [Fact]
@@ -2364,23 +2384,26 @@ public class InputHandlerTests
     public void Decrqss_TruecolorForeground_ReturnsRgb()
     {
         var terminal = CreateTerminal();
-        // Set fg to RGB 1;2;3 via SGR 38;2;...
         terminal.Write("\x1b[38;2;1;2;3m");
-        var reply = Capture(terminal, "\x1bP$qm\x1b\\");
-        Assert.Contains("38;2;1;2;3", reply);
-        Assert.StartsWith("\x1bP1$r", reply);
-        Assert.EndsWith("m\x1b\\", reply);
+        Assert.Equal("38;2;1;2;3", RequestSgr(terminal));
     }
 
     [Fact]
     public void Decrqss_TruecolorForeground_SubParams_ReturnsRgb()
     {
         var terminal = CreateTerminal();
-        // Set fg to RGB 1;2;3 via SGR 38:2::1:2:3 (colon-separated sub-params)
+        // The colon form, with the empty colour-space slot programs conventionally leave blank.
         terminal.Write("\x1b[38:2::1:2:3m");
-        var reply = Capture(terminal, "\x1bP$qm\x1b\\");
-        Assert.Contains("38;2;1;2;3", reply);
-        Assert.StartsWith("\x1bP1$r", reply);
+        Assert.Equal("38;2;1;2;3", RequestSgr(terminal));
+    }
+
+    [Fact]
+    public void Decrqss_TruecolorForeground_SubParamsWithoutColorSpace_ReturnsRgb()
+    {
+        var terminal = CreateTerminal();
+        // The shorter colon form, without the colour-space slot at all.
+        terminal.Write("\x1b[38:2:1:2:3m");
+        Assert.Equal("38;2;1;2;3", RequestSgr(terminal));
     }
 
     [Fact]
@@ -2388,9 +2411,23 @@ public class InputHandlerTests
     {
         var terminal = CreateTerminal();
         terminal.Write("\x1b[48;2;10;20;30m");
-        var reply = Capture(terminal, "\x1bP$qm\x1b\\");
-        Assert.Contains("48;2;10;20;30", reply);
-        Assert.StartsWith("\x1bP1$r", reply);
+        Assert.Equal("48;2;10;20;30", RequestSgr(terminal));
+    }
+
+    [Fact]
+    public void Decrqss_TruecolorBackground_SubParams_ReturnsRgb()
+    {
+        var terminal = CreateTerminal();
+        terminal.Write("\x1b[48:2::10:20:30m");
+        Assert.Equal("48;2;10;20;30", RequestSgr(terminal));
+    }
+
+    [Fact]
+    public void Decrqss_TruecolorForegroundAndBackground_ReportsBothInOrder()
+    {
+        var terminal = CreateTerminal();
+        terminal.Write("\x1b[38;2;1;2;3;48;2;10;20;30m");
+        Assert.Equal("38;2;1;2;3;48;2;10;20;30", RequestSgr(terminal));
     }
 
     [Fact]
@@ -2398,18 +2435,67 @@ public class InputHandlerTests
     {
         var terminal = CreateTerminal();
         terminal.Write("\x1b[38;5;200m");
-        var reply = Capture(terminal, "\x1bP$qm\x1b\\");
-        Assert.Contains("38;5;200", reply);
+        Assert.Equal("38;5;200", RequestSgr(terminal));
     }
 
     [Fact]
-    public void Decrqss_BoldAttribute_ReturnsBold()
+    public void Decrqss_256ColorForeground_SubParams_Returns256Code()
     {
         var terminal = CreateTerminal();
-        terminal.Write("\x1b[1m");
-        var reply = Capture(terminal, "\x1bP$qm\x1b\\");
-        Assert.Contains("1", reply);
-        Assert.StartsWith("\x1bP1$r", reply);
+        terminal.Write("\x1b[38:5:200m");
+        Assert.Equal("38;5;200", RequestSgr(terminal));
+    }
+
+    [Theory]
+    [InlineData("\x1b[31m", "31")]          // ANSI foreground
+    [InlineData("\x1b[91m", "91")]          // bright foreground
+    [InlineData("\x1b[44m", "44")]          // ANSI background
+    [InlineData("\x1b[104m", "104")]        // bright background
+    [InlineData("\x1b[38;5;9m", "91")]      // palette 9 is the bright red the 16 already name
+    [InlineData("\x1b[39;49m", "0")]        // back to the defaults, which are left out
+    public void Decrqss_Colors_ReportsTheShortestFormThatParsesBack(string sgr, string expected)
+    {
+        var terminal = CreateTerminal();
+        terminal.Write(sgr);
+        Assert.Equal(expected, RequestSgr(terminal));
+    }
+
+    [Theory]
+    [InlineData("\x1b[1m", "1")]            // bold
+    [InlineData("\x1b[2m", "2")]            // dim
+    [InlineData("\x1b[3m", "3")]            // italic
+    [InlineData("\x1b[4m", "4")]            // underline
+    [InlineData("\x1b[21m", "21")]          // double underline
+    [InlineData("\x1b[4:3m", "4:3")]        // curly underline
+    [InlineData("\x1b[4:4m", "4:4")]        // dotted underline
+    [InlineData("\x1b[4:5m", "4:5")]        // dashed underline
+    [InlineData("\x1b[5m", "5")]            // blink
+    [InlineData("\x1b[7m", "7")]            // inverse
+    [InlineData("\x1b[8m", "8")]            // invisible
+    [InlineData("\x1b[9m", "9")]            // strikethrough
+    [InlineData("\x1b[1;3;4;7m", "1;3;4;7")]
+    [InlineData("\x1b[1m\x1b[22m", "0")]    // set then cleared reads as the reset
+    public void Decrqss_Attributes_ReportsWhatIsOn(string sgr, string expected)
+    {
+        var terminal = CreateTerminal();
+        terminal.Write(sgr);
+        Assert.Equal(expected, RequestSgr(terminal));
+    }
+
+    [Fact]
+    public void Decrqss_Sgr_RoundTripsThroughItsOwnReply()
+    {
+        // The reply is only useful if replaying it lands on the same attributes it described.
+        const string Attributes = "\x1b[1;3;4:3;7;9;38;2;1;2;3;48;5;200m";
+
+        var source = CreateTerminal();
+        source.Write(Attributes);
+        var reported = RequestSgr(source);
+
+        var replayed = CreateTerminal();
+        replayed.Write($"\x1b[{reported}m");
+
+        Assert.Equal(reported, RequestSgr(replayed));
     }
 
     [Fact]
@@ -2429,13 +2515,38 @@ public class InputHandlerTests
         Assert.Equal("\x1bP1$r1;24r\x1b\\", reply);
     }
 
-    [Fact]
-    public void Decrqss_CursorStyleBlock_ReturnsCode()
+    [Theory]
+    [InlineData("", "2")]                   // TerminalOptions starts on a block that does not blink
+    [InlineData("\x1b[1 q", "1")]
+    [InlineData("\x1b[2 q", "2")]
+    [InlineData("\x1b[3 q", "3")]
+    [InlineData("\x1b[4 q", "4")]
+    [InlineData("\x1b[5 q", "5")]
+    [InlineData("\x1b[6 q", "6")]
+    public void Decrqss_CursorStyle_ReturnsCode(string decscusr, string expected)
     {
         var terminal = CreateTerminal();
-        terminal.Write("\x1b[2 q"); // steady block
+        if (decscusr.Length > 0)
+            terminal.Write(decscusr);
+
         var reply = Capture(terminal, "\x1bP$q q\x1b\\");
-        Assert.Equal("\x1bP1$r2 q\x1b\\", reply);
+        Assert.Equal($"\x1bP1$r{expected} q\x1b\\", reply);
+    }
+
+    [Fact]
+    public void Decrqss_ConformanceLevel_ReturnsVt220()
+    {
+        var terminal = CreateTerminal();
+        var reply = Capture(terminal, "\x1bP$q\"p\x1b\\");
+        Assert.Equal("\x1bP1$r62;1\"p\x1b\\", reply);
+    }
+
+    [Fact]
+    public void Decrqss_ProtectionAttribute_ReturnsUnprotected()
+    {
+        var terminal = CreateTerminal();
+        var reply = Capture(terminal, "\x1bP$q\"q\x1b\\");
+        Assert.Equal("\x1bP1$r0\"q\x1b\\", reply);
     }
 
     [Fact]
@@ -2443,6 +2554,22 @@ public class InputHandlerTests
     {
         var terminal = CreateTerminal();
         var reply = Capture(terminal, "\x1bP$qXYZ\x1b\\");
+        Assert.Equal("\x1bP0$r\x1b\\", reply);
+    }
+
+    [Fact]
+    public void Decrqss_EmptyRequest_ReturnsDeny()
+    {
+        var terminal = CreateTerminal();
+        var reply = Capture(terminal, "\x1bP$q\x1b\\");
+        Assert.Equal("\x1bP0$r\x1b\\", reply);
+    }
+
+    [Fact]
+    public void Decrqss_OversizedPayload_IsRefusedWithoutBuffering()
+    {
+        var terminal = CreateTerminal();
+        var reply = Capture(terminal, "\x1bP$qm" + new string('x', 100_000) + "\x1b\\");
         Assert.Equal("\x1bP0$r\x1b\\", reply);
     }
 
@@ -2456,11 +2583,22 @@ public class InputHandlerTests
     }
 
     [Fact]
-    public void Decrqss_ConformanceLevel_ReturnsVt220()
+    public void Decrqss_SecondRequest_DoesNotSeeTheFirstPayload()
     {
         var terminal = CreateTerminal();
-        var reply = Capture(terminal, "\x1bP$q\"p\x1b\\");
-        Assert.Equal("\x1bP1$r62;1\"p\x1b\\", reply);
+        Assert.Equal("\x1bP1$r1;24r\x1b\\", Capture(terminal, "\x1bP$qr\x1b\\"));
+        Assert.Equal("\x1bP1$r0m\x1b\\", Capture(terminal, "\x1bP$qm\x1b\\"));
+    }
+
+    [Fact]
+    public void Decrqss_AfterAnUnrelatedDcs_StillAnswers()
+    {
+        // DECRQSS shares the DCS hook with every other DCS sequence, so an intervening one must
+        // not leave the payload collector holding someone else's bytes.
+        var terminal = CreateTerminal();
+        terminal.Write("\x1bP0;1|17/ab\x1b\\"); // DECUDK, which this terminal does not implement
+
+        Assert.Equal("\x1bP1$r0m\x1b\\", Capture(terminal, "\x1bP$qm\x1b\\"));
     }
 
     #endregion

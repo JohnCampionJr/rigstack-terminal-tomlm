@@ -1001,6 +1001,16 @@ public class InputHandler
     private StringBuilder? _decrqssPayload;
 
     /// <summary>
+    /// The most of a DECRQSS payload worth keeping.
+    /// </summary>
+    /// <remarks>
+    /// Every setting that can be asked for is three characters at most, so a longer payload is one
+    /// we are going to refuse anyway. Truncating at the door keeps a <c>DCS $ q</c> followed by a
+    /// megabyte of anything from being buffered on its way to that refusal.
+    /// </remarks>
+    private const int MaxDecrqssPayloadLength = 16;
+
+    /// <summary>
     /// Handles the start of a DCS sequence.
     /// </summary>
     /// <remarks>
@@ -1050,7 +1060,9 @@ public class InputHandler
     public void HandleDcsPut(ReadOnlySpan<char> data)
     {
         _sixelDecoder?.Put(data);
-        _decrqssPayload?.Append(data);
+
+        if (_decrqssPayload is { } decrqss && decrqss.Length < MaxDecrqssPayloadLength)
+            decrqss.Append(data[..Math.Min(data.Length, MaxDecrqssPayloadLength - decrqss.Length)]);
     }
 
     /// <summary>
@@ -1108,26 +1120,31 @@ public class InputHandler
     /// Serialises the current character attributes as a semicolon-separated SGR parameter string,
     /// suitable for embedding in a DECRQSS <c>m</c> response.
     /// </summary>
+    /// <remarks>
+    /// Every code emitted here is one this handler parses back, so a program can read the reply,
+    /// replay it, and land on the attributes it started from — which is the point of asking. What
+    /// is off, and a colour that is still the default, is left out; nothing at all reads as
+    /// <c>0</c>, the reset.
+    /// </remarks>
     private string SerializeSgr()
     {
         var attr = _curAttr;
 
         // Build a list of SGR code fragments. Each may be a single number ("1") or a
         // semicolon-separated run ("38;2;255;128;0").
-        var parts = new System.Collections.Generic.List<string>(8);
+        var parts = new List<string>(8);
 
         if (attr.IsBold()) parts.Add("1");
         if (attr.IsDim()) parts.Add("2");
         if (attr.IsItalic()) parts.Add("3");
 
-        var ulStyle = attr.GetUnderlineStyle();
-        switch (ulStyle)
+        switch (attr.GetUnderlineStyle())
         {
-            case Common.UnderlineStyle.Single: parts.Add("4"); break;
-            case Common.UnderlineStyle.Double: parts.Add("21"); break;
-            case Common.UnderlineStyle.Curly: parts.Add("4:3"); break;
-            case Common.UnderlineStyle.Dotted: parts.Add("4:4"); break;
-            case Common.UnderlineStyle.Dashed: parts.Add("4:5"); break;
+            case UnderlineStyle.Single: parts.Add("4"); break;
+            case UnderlineStyle.Double: parts.Add("21"); break;
+            case UnderlineStyle.Curly: parts.Add("4:3"); break;
+            case UnderlineStyle.Dotted: parts.Add("4:4"); break;
+            case UnderlineStyle.Dashed: parts.Add("4:5"); break;
         }
 
         if (attr.IsBlink()) parts.Add("5");
@@ -1192,12 +1209,12 @@ public class InputHandler
         var blink = _terminal.Options.CursorBlink;
         return (style, blink) switch
         {
-            (Common.CursorStyle.Block, true) => "1",
-            (Common.CursorStyle.Block, false) => "2",
-            (Common.CursorStyle.Underline, true) => "3",
-            (Common.CursorStyle.Underline, false) => "4",
-            (Common.CursorStyle.Bar, true) => "5",
-            (Common.CursorStyle.Bar, false) => "6",
+            (CursorStyle.Block, true) => "1",
+            (CursorStyle.Block, false) => "2",
+            (CursorStyle.Underline, true) => "3",
+            (CursorStyle.Underline, false) => "4",
+            (CursorStyle.Bar, true) => "5",
+            (CursorStyle.Bar, false) => "6",
             _ => "0",
         };
     }
@@ -3379,8 +3396,40 @@ public class InputHandler
         return index;
     }
 
+    /// <summary>
+    /// SGR 38 and 48 — a foreground or background colour beyond the sixteen, either as a 256-palette
+    /// index or as direct RGB.
+    /// </summary>
+    /// <remarks>
+    /// Accepts the colour as sub-parameters (<c>38:2::r:g:b</c>) as well as separate parameters
+    /// (<c>38;2;r;g;b</c>), for the reason SGR 58 already does: both forms are in use, and taking
+    /// only one of them looks broken to half the callers. The colon form was already reaching the
+    /// parser, which collects it as sub-parameters, and then being dropped here — so a program that
+    /// asked for truecolor that way got no colour at all.
+    /// </remarks>
     private int HandleExtendedColor(Params parameters, int index, bool isForeground)
     {
+        var sub = parameters.GetSubParams(index);
+
+        if (sub is { Count: > 0 })
+        {
+            // 38:2::r:g:b — the empty slot is a colour space id nobody uses, and some programs
+            // leave it out entirely, so the run's length says where red starts.
+            if (sub[0] == 2 && sub.Count >= 4)
+            {
+                var offset = sub.Count >= 5 ? 2 : 1;
+                var rgb = (sub[offset] << 16) | (sub[offset + 1] << 8) | sub[offset + 2];
+                SetExtendedColor(rgb, 1, isForeground);
+            }
+            else if (sub[0] == 5 && sub.Count >= 2)
+            {
+                SetExtendedColor(sub[1], 0, isForeground);
+            }
+
+            // Sub-parameters belong to this parameter, so no later one was consumed.
+            return index;
+        }
+
         if (index + 1 >= parameters.Length)
             return index;
 
@@ -3391,28 +3440,26 @@ public class InputHandler
             var r = parameters.GetParam(index + 2, 0);
             var g = parameters.GetParam(index + 3, 0);
             var b = parameters.GetParam(index + 4, 0);
-            var rgb = (r << 16) | (g << 8) | b;
 
-            if (isForeground)
-                _curAttr.SetFgColor(rgb, 1);
-            else
-                _curAttr.SetBgColor(rgb, 1);
-
+            SetExtendedColor((r << 16) | (g << 8) | b, 1, isForeground);
             return index + 4;
         }
         else if (colorType == 5 && index + 2 < parameters.Length) // 256 color
         {
-            var color = parameters.GetParam(index + 2, 0);
-
-            if (isForeground)
-                _curAttr.SetFgColor(color);
-            else
-                _curAttr.SetBgColor(color);
-
+            SetExtendedColor(parameters.GetParam(index + 2, 0), 0, isForeground);
             return index + 2;
         }
 
         return index;
+    }
+
+    /// <summary>Applies a colour from SGR 38 or 48 to whichever side asked for it.</summary>
+    private void SetExtendedColor(int color, int mode, bool isForeground)
+    {
+        if (isForeground)
+            _curAttr.SetFgColor(color, mode);
+        else
+            _curAttr.SetBgColor(color, mode);
     }
 
     private void SetScrollRegion(Params parameters)
