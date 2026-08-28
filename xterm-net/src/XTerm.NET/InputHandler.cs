@@ -2385,8 +2385,11 @@ public class InputHandler
             }
             else
             {
-                // Start hyperlink
+                // Start hyperlink. The id resets BEFORE the parameters are parsed: a client can
+                // open a new link without closing the last, and one that sends no id= must not
+                // inherit the previous link's -- that would join two unrelated links into one.
                 _terminal.CurrentHyperlink = uri;
+                _terminal.HyperlinkId = null;
                 _linkUrl = uri;
                 _linkId = null;
 

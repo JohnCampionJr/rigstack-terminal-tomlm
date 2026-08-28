@@ -188,6 +188,64 @@ public class HyperlinkAnchorTests
         Assert.Empty(Row(t).Links);
     }
 
+    /// <summary>
+    /// Erasing takes the link with the text. Unlike a mark: a mark records a position in the
+    /// history, but a link is a property of its text, and an erased span left clickable is an
+    /// invisible link.
+    /// </summary>
+    [Fact]
+    public void Erasing_the_text_takes_the_link_with_it()
+    {
+        var t = Fresh();
+        t.Write(Link("https://example.com") + "abcdefgh" + EndLink());
+        t.Write($"{Esc}[1;3H{Esc}[K");   // erase from column 3 to end of line
+
+        Assert.True(Row(t).TryGetLinkAt(0, out var kept), "the unerased head should keep its link");
+        Assert.Equal(2, kept.Cols);
+        Assert.False(Row(t).TryGetLinkAt(4, out _), "the erased span must not stay clickable");
+    }
+
+    /// <summary>
+    /// A new link that names no id must not inherit the previous link's — that would join two
+    /// unrelated links into one.
+    /// </summary>
+    [Fact]
+    public void A_new_link_without_an_id_does_not_inherit_the_old_one()
+    {
+        var t = Fresh(cols: 30);
+        t.Write(Link("https://a.example", "id=7") + "aa" + EndLink());
+        t.Write(Link("https://b.example") + "bb" + EndLink());
+
+        Assert.True(Row(t).TryGetLinkAt(2, out var second));
+        Assert.Null(second.Id);
+    }
+
+    /// <summary>Splitting a link in the middle keeps Links in left-to-right order.</summary>
+    [Fact]
+    public void A_split_keeps_the_spans_in_order()
+    {
+        var t = Fresh(cols: 40);
+        t.Write(Link("https://a.example") + "aaaaaa" + EndLink()
+              + Link("https://b.example") + "bbbbbb" + EndLink());
+        t.Write($"{Esc}[1;3HXX");   // split the first link through the middle
+
+        var columns = Row(t).Links.Select(l => l.Column).ToList();
+        Assert.Equal(columns.OrderBy(c => c), columns);
+    }
+
+    /// <summary>The prompt walks clamp extreme rows instead of wrapping the arithmetic.</summary>
+    [Fact]
+    public void Prompt_navigation_survives_extreme_rows()
+    {
+        var t = Fresh();
+        t.Write($"{Esc}]133;A\u0007$ ");
+
+        Assert.True(t.TryFindPreviousPrompt(int.MaxValue, out _));
+        Assert.False(t.TryFindPreviousPrompt(int.MinValue, out _));
+        Assert.True(t.TryFindNextPrompt(int.MinValue, out _));
+        Assert.False(t.TryFindNextPrompt(int.MaxValue, out _));
+    }
+
     private static string Describe(Terminal t)
         => string.Join(" ", Row(t).Links.Select(l => $"{l.Url}@{l.Column}+{l.Cols}"));
 }

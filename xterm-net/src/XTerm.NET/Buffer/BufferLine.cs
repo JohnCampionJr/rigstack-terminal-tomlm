@@ -246,6 +246,13 @@ public class BufferLine : IEnumerable<BufferCell>
             SplitPlacementsOver(startCol, Math.Max(0, Math.Min(endCol, _length) - startCol),
                                 includeOverlays: true);
 
+        // And a LINK, unlike a mark. A mark records a position in the history and survives the
+        // shell redrawing its prompt; a link is a property of its text, and text that has been
+        // erased cannot be the thing a URL was attached to -- leaving it would keep an invisible
+        // span of the screen clickable.
+        if (_links is not null)
+            SplitLinksOver(startCol, Math.Max(0, Math.Min(endCol, _length) - startCol));
+
         Cache = null;
     }
 
@@ -481,11 +488,15 @@ public class BufferLine : IEnumerable<BufferCell>
 
             _links.RemoveAt(i);
 
+            var at = i;
             if (link.Column < column)
-                _links.Insert(i, new LineHyperlink(link.Column, column - link.Column, link.Url, link.Id));
+                _links.Insert(at++, new LineHyperlink(link.Column, column - link.Column, link.Url, link.Id));
 
+            // Inserted in place, NOT appended. Links is documented left to right, and NoteLinkRun's
+            // join-the-last-span optimisation relies on the last entry being the rightmost -- an
+            // appended fragment from a split in the middle would break both.
             if (link.EndColumn > end)
-                _links.Add(new LineHyperlink(end, link.EndColumn - end, link.Url, link.Id));
+                _links.Insert(at, new LineHyperlink(end, link.EndColumn - end, link.Url, link.Id));
         }
 
         if (_links.Count == 0)

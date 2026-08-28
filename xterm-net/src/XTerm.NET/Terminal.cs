@@ -940,7 +940,8 @@ public class Terminal
     public bool TryFindPreviousPrompt(int fromRow, out int row)
     {
         var lines = Buffer.Lines;
-        for (var i = Math.Min(fromRow, lines.Length) - 1; i >= 0; i--)
+        // Clamped before the subtraction: int.MinValue - 1 wraps to a huge positive index.
+        for (var i = Math.Clamp(fromRow, 0, lines.Length) - 1; i >= 0; i--)
         {
             if (HasPromptStart(lines[i]))
             {
@@ -957,7 +958,8 @@ public class Terminal
     public bool TryFindNextPrompt(int fromRow, out int row)
     {
         var lines = Buffer.Lines;
-        for (var i = Math.Max(fromRow, -1) + 1; i < lines.Length; i++)
+        // Clamped before the addition: int.MaxValue + 1 wraps negative and indexes below zero.
+        for (var i = Math.Clamp(fromRow, -1, lines.Length - 1) + 1; i < lines.Length; i++)
         {
             if (HasPromptStart(lines[i]))
             {
