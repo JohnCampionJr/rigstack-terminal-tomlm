@@ -216,6 +216,44 @@ public static class TerminalEvents
     }
 
     /// <summary>
+    /// Clipboard write event - fired for an enabled OSC 52 clipboard write request.
+    /// </summary>
+    public class ClipboardWriteEventArgs : EventArgs
+    {
+        public ClipboardWriteEventArgs(string target, string text)
+        {
+            Target = target;
+            Text = text;
+        }
+
+        /// <summary>The requested clipboard selection.</summary>
+        public string Target { get; }
+
+        /// <summary>The decoded UTF-8 clipboard text.</summary>
+        public string Text { get; }
+    }
+
+    /// <summary>
+    /// Clipboard read request event - fired for an enabled OSC 52 clipboard read request.
+    /// </summary>
+    public class ClipboardReadEventArgs : EventArgs
+    {
+        public ClipboardReadEventArgs(string target)
+        {
+            Target = target;
+        }
+
+        /// <summary>The requested clipboard selection.</summary>
+        public string Target { get; }
+
+        /// <summary>Set to true to return <see cref="Text"/> to the application.</summary>
+        public bool Handled { get; set; }
+
+        /// <summary>The clipboard text to return when <see cref="Handled"/> is true.</summary>
+        public string? Text { get; set; }
+    }
+
+    /// <summary>
     /// Raw OSC event - fired for EVERY OSC sequence the parser completes, including ones this
     /// library does not implement.
     /// </summary>

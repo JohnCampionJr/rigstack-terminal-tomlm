@@ -2531,21 +2531,23 @@ public class InputHandler
 
             if (clipdata == "?")
             {
-                // Query clipboard - respond with clipboard content
-                // Format: OSC 52 ; c ; base64data ST
-                // For security, many terminals don't support this
-                // We'll send an empty response
-                _terminal.RaiseDataReceived($"\u001b]52;{target};\u0007");
+                if (!_terminal.Options.ClipboardReadEnabled)
+                    return;
+
+                var args = _terminal.RaiseClipboardReadRequested(target);
+                if (args.Handled)
+                {
+                    var encoded = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(args.Text ?? string.Empty));
+                    _terminal.RaiseDataReceived($"\u001b]52;{target};{encoded}\u0007");
+                }
             }
-            else
+            else if (_terminal.Options.ClipboardWriteEnabled)
             {
-                // Set clipboard
                 try
                 {
                     var decoded = Convert.FromBase64String(clipdata);
                     var text = System.Text.Encoding.UTF8.GetString(decoded);
-                    // TODO: Integrate with system clipboard
-                    // For now, we just acknowledge receipt
+                    _terminal.RaiseClipboardWriteRequested(target, text);
                 }
                 catch
                 {

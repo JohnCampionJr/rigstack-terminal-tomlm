@@ -212,6 +212,17 @@ public class Terminal
     public event EventHandler<TerminalEvents.NotificationEventArgs>? NotificationReceived;
 
     /// <summary>
+    /// Fired for an enabled OSC 52 clipboard write request.
+    /// </summary>
+    public event EventHandler<TerminalEvents.ClipboardWriteEventArgs>? ClipboardWriteRequested;
+
+    /// <summary>
+    /// Fired for an enabled OSC 52 clipboard read request. A handler can set <c>Handled</c> and
+    /// <c>Text</c> to return clipboard contents to the application.
+    /// </summary>
+    public event EventHandler<TerminalEvents.ClipboardReadEventArgs>? ClipboardReadRequested;
+
+    /// <summary>
     /// Fired for every OSC sequence, including ones this terminal does not implement.
     /// </summary>
     /// <remarks>
@@ -921,6 +932,16 @@ public class Terminal
     
     internal void RaiseDirectoryChanged(string directory) => 
         DirectoryChanged?.Invoke(this, new TerminalEvents.DirectoryChangeEventArgs(directory));
+
+    internal void RaiseClipboardWriteRequested(string target, string text) =>
+        ClipboardWriteRequested?.Invoke(this, new TerminalEvents.ClipboardWriteEventArgs(target, text));
+
+    internal TerminalEvents.ClipboardReadEventArgs RaiseClipboardReadRequested(string target)
+    {
+        var args = new TerminalEvents.ClipboardReadEventArgs(target);
+        ClipboardReadRequested?.Invoke(this, args);
+        return args;
+    }
 
     internal void RaiseHyperlinkChanged(string? url) =>
         HyperlinkChanged?.Invoke(this, new TerminalEvents.HyperlinkEventArgs(url ?? string.Empty, url == null));

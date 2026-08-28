@@ -152,6 +152,20 @@ public class TerminalOptions : ICloneable
     public bool KittyGraphicsEnabled { get; set; } = true;
 
     /// <summary>
+    /// Whether OSC 52 clipboard write requests are raised for the host to handle.
+    /// </summary>
+    public bool ClipboardWriteEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Whether OSC 52 clipboard read requests are raised for the host to handle.
+    /// </summary>
+    /// <remarks>
+    /// Disabled by default because a process that writes to the terminal could otherwise read the
+    /// user's clipboard.
+    /// </remarks>
+    public bool ClipboardReadEnabled { get; set; }
+
+    /// <summary>
     /// Budget for images held by client id but not currently on screen, in bytes.
     /// </summary>
     /// <remarks>
@@ -264,6 +278,8 @@ public class TerminalOptions : ICloneable
         RendererType = other.RendererType;
         SixelEnabled = other.SixelEnabled;
         KittyGraphicsEnabled = other.KittyGraphicsEnabled;
+        ClipboardWriteEnabled = other.ClipboardWriteEnabled;
+        ClipboardReadEnabled = other.ClipboardReadEnabled;
         MaxImageRegistryBytes = other.MaxImageRegistryBytes;
         CellWidthPixels = other.CellWidthPixels;
         CellHeightPixels = other.CellHeightPixels;
