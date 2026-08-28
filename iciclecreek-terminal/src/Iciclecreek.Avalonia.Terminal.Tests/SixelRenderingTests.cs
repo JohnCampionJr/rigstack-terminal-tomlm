@@ -133,6 +133,45 @@ public class SixelRenderingTests
     /// An image cell holds a space, so without an explicit break it would be swallowed by the text run beside
     /// it and never drawn.
     /// </summary>
+    /// <summary>
+    /// Narrowing the window draws less of a picture, and widening it draws the rest back.
+    /// </summary>
+    /// <remarks>
+    /// <para>The end-to-end half of what <c>A_clipped_run_narrows_the_source_by_the_same_proportion</c>
+    /// asserts about the arithmetic. That one hands the blit a run already clipped to two columns;
+    /// this one narrows an actual terminal and checks that a clipped run is what comes out, and that
+    /// widening restores the picture whole.</para>
+    /// <para>Worth having as its own test because it is the claim the placement model exists for, and
+    /// it is the half that used to be false. When a picture was scattered across cells, narrowing the
+    /// window destroyed the cells past the edge and there was nothing left to widen back into -- the
+    /// picture returned with a piece missing, and that was taken to be inherent. A run keeping its
+    /// NATURAL width is what makes the resize a no-op, and nothing else here would notice if that
+    /// stopped being true.</para>
+    /// </remarks>
+    [AvaloniaTest]
+    public void Narrowing_shows_less_of_a_picture_and_widening_shows_it_again()
+    {
+        var (view, window) = Realised();
+        try
+        {
+            PlaceImage(view);
+            Assert.That(ImageRuns(view, 0)[0].CellCount, Is.EqualTo(2), "the picture starts two columns wide");
+
+            view.Terminal.Resize(1, view.Terminal.Rows);
+            var narrowed = ImageRuns(view, 0);
+            Assert.That(narrowed.Count, Is.EqualTo(1), "the picture should still be there, only narrower");
+            Assert.That(narrowed[0].CellCount, Is.EqualTo(1), "only one column can be shown");
+            Assert.That(narrowed[0].Placement!.Value.Cols, Is.EqualTo(2),
+                "the run keeps its natural width -- that is what there is to widen back into");
+
+            view.Terminal.Resize(20, view.Terminal.Rows);
+            var widened = ImageRuns(view, 0);
+            Assert.That(widened.Count, Is.EqualTo(1));
+            Assert.That(widened[0].CellCount, Is.EqualTo(2), "the second column should come back");
+        }
+        finally { window.Close(); }
+    }
+
     [AvaloniaTest]
     public void An_image_does_not_join_the_text_run_beside_it()
     {
