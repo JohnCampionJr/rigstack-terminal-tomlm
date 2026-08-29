@@ -151,6 +151,9 @@ public class TerminalOptions : ICloneable
     /// </remarks>
     public bool KittyGraphicsEnabled { get; set; } = true;
 
+    /// <summary>Whether iTerm2 OSC 1337 inline images are honoured.</summary>
+    public bool ITerm2ImagesEnabled { get; set; } = true;
+
     /// <summary>
     /// Whether Kitty desktop notification requests (OSC 99) are honoured.
     /// </summary>
@@ -213,6 +216,12 @@ public class TerminalOptions : ICloneable
     /// </remarks>
     public long MaxImageRegistryBytes { get; set; } = 32L * 1024 * 1024;
 
+    /// <summary>Maximum number of iTerm2 OSC 1337 user variables retained.</summary>
+    public int MaxUserVariables { get; set; } = 128;
+
+    /// <summary>Maximum decoded UTF-8 bytes retained for one iTerm2 user variable.</summary>
+    public int MaxUserVariableBytes { get; set; } = 4096;
+
     /// <summary>
     /// Width of a character cell in pixels.
     /// </summary>
@@ -230,6 +239,13 @@ public class TerminalOptions : ICloneable
     /// Height of a character cell in pixels. See <see cref="CellWidthPixels"/>.
     /// </summary>
     public int CellHeightPixels { get; set; } = 20;
+
+    /// <summary>
+    /// Device pixels per logical point on the display the terminal renders to — 2.0 on a Retina
+    /// display, 1.0 (the default) where pixels are points. Set by the host beside the cell pixel
+    /// metrics; iTerm2's ReportCellSize divides by it, because that query speaks points.
+    /// </summary>
+    public double DisplayScale { get; set; } = 1.0;
 
     /// <summary>
     /// Largest Sixel image accepted, in pixels. Larger ones are discarded as they decode.
@@ -316,6 +332,7 @@ public class TerminalOptions : ICloneable
         RendererType = other.RendererType;
         SixelEnabled = other.SixelEnabled;
         KittyGraphicsEnabled = other.KittyGraphicsEnabled;
+        ITerm2ImagesEnabled = other.ITerm2ImagesEnabled;
         KittyNotificationsEnabled = other.KittyNotificationsEnabled;
         ClipboardWriteEnabled = other.ClipboardWriteEnabled;
         ClipboardReadEnabled = other.ClipboardReadEnabled;
@@ -323,8 +340,11 @@ public class TerminalOptions : ICloneable
         KittyKeyboardEnabled = other.KittyKeyboardEnabled;
         PointerShapesEnabled = other.PointerShapesEnabled;
         MaxImageRegistryBytes = other.MaxImageRegistryBytes;
+        MaxUserVariables = other.MaxUserVariables;
+        MaxUserVariableBytes = other.MaxUserVariableBytes;
         CellWidthPixels = other.CellWidthPixels;
         CellHeightPixels = other.CellHeightPixels;
+        DisplayScale = other.DisplayScale;
         MaxSixelPixels = other.MaxSixelPixels;
         MaxImageBytes = other.MaxImageBytes;
         WindowOptions = new WindowOptions(other.WindowOptions);
@@ -395,6 +415,7 @@ public class WindowOptions : ICloneable
     public bool MaximizeWin { get; set; } = false;
     public bool MinimizeWin { get; set; } = false;
     public bool FullscreenWin { get; set; } = false;
+    public bool RequestAttention { get; set; } = false;
 
     /// <summary>
     /// Default constructor.
@@ -426,6 +447,7 @@ public class WindowOptions : ICloneable
         MaximizeWin = other.MaximizeWin;
         MinimizeWin = other.MinimizeWin;
         FullscreenWin = other.FullscreenWin;
+        RequestAttention = other.RequestAttention;
     }
 
     /// <summary>

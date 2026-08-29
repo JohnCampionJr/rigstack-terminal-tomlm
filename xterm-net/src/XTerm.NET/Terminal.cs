@@ -104,6 +104,26 @@ public class Terminal
     public string? CurrentDirectory { get; set; }
     public string? CurrentHyperlink { get; set; }
 
+    /// <summary>The values exported through iTerm2's OSC 1337 SetUserVar extension.</summary>
+    public IReadOnlyDictionary<string, string> UserVariables => _userVariables;
+    private readonly Dictionary<string, string> _userVariables = new();
+
+    internal bool TrySetUserVariable(string name, string value)
+    {
+        if (value.Length > Options.MaxUserVariableBytes
+            || (!_userVariables.ContainsKey(name) && _userVariables.Count >= Options.MaxUserVariables))
+            return false;
+
+        _userVariables[name] = value;
+        return true;
+    }
+
+    /// <summary>The shell integration version reported through iTerm2's OSC 1337 extension.</summary>
+    public string? ShellIntegrationVersion { get; internal set; }
+
+    /// <summary>The remote host reported through iTerm2's OSC 1337 extension.</summary>
+    public string? RemoteHost { get; internal set; }
+
     /// <summary>
     /// The most recent OSC 133 shell integration mark, or null if the shell has never sent one.
     /// </summary>
@@ -330,6 +350,9 @@ public class Terminal
     /// Fired when a desktop notification is requested via OSC 9.
     /// </summary>
     public event EventHandler<TerminalEvents.NotificationEventArgs>? NotificationReceived;
+
+    /// <summary>Fired when iTerm2 requests the user's attention.</summary>
+    public event EventHandler<TerminalEvents.AttentionRequestedEventArgs>? AttentionRequested;
 
     /// <summary>
     /// Fired for every OSC sequence, including ones this terminal does not implement.
@@ -1169,6 +1192,8 @@ public class Terminal
 
     internal void RaiseNotificationReceived(string text) =>
         NotificationReceived?.Invoke(this, new TerminalEvents.NotificationEventArgs(text));
+    internal void RaiseAttentionRequested(string action) =>
+        AttentionRequested?.Invoke(this, new TerminalEvents.AttentionRequestedEventArgs(action));
 
     internal void RaiseKittyNotificationReceived(string? identifier, string? title, string? body, int? urgency, string? icon) =>
         NotificationReceived?.Invoke(this, new TerminalEvents.NotificationEventArgs(identifier, title, body, urgency, icon));
@@ -1384,6 +1409,7 @@ public class Terminal
         PointerShapeChanged = null;
         ProgressChanged = null;
         NotificationReceived = null;
+        AttentionRequested = null;
         OscReceived = null;
         
         // Clear window manipulation events

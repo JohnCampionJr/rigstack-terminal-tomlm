@@ -2592,6 +2592,10 @@ public class InputHandler
                     HandleShellIntegration(arg);
                     break;
 
+                case OscCommand.ITerm2:
+                    recognized = HandleITerm2(arg);
+                    break;
+
                 case OscCommand.ForegroundColor:
                     HandleColorQuery(((int)command).ToString(), arg);
                     break;
@@ -2700,6 +2704,155 @@ public class InputHandler
                 _terminal.CurrentDirectory = Uri.UnescapeDataString(path);
                 _terminal.RaiseDirectoryChanged(_terminal.CurrentDirectory);
             }
+        }
+    }
+
+    /// <summary>
+    /// Handles the useful iTerm2 OSC 1337 extensions. Unknown extension keys are intentionally
+    /// ignored, matching iTerm2's permissive extension namespace.
+    /// </summary>
+    private bool HandleITerm2(string data)
+    {
+        var separator = data.IndexOf('=');
+        if (separator == 0)
+            return false;
+
+        var key = separator < 0 ? data : data[..separator];
+        var value = separator < 0 ? string.Empty : data[(separator + 1)..];
+        switch (key)
+        {
+            case "File":
+                return HandleITerm2File(value);
+
+            case "SetUserVar":
+                return HandleITerm2UserVariable(value);
+
+            case "CurrentDir":
+                HandleITerm2CurrentDirectory(value);
+                return true;
+
+            case "ShellIntegrationVersion":
+                _terminal.ShellIntegrationVersion = value;
+                return true;
+
+            case "RemoteHost":
+                _terminal.RemoteHost = value;
+                return true;
+
+            case "StealFocus":
+                if (_terminal.Options.WindowOptions.RaiseWin)
+                    _terminal.RaiseWindowRaised();
+                return _terminal.Options.WindowOptions.RaiseWin;
+
+            case "RequestAttention":
+                if (_terminal.Options.WindowOptions.RequestAttention)
+                    _terminal.RaiseAttentionRequested(value);
+                return _terminal.Options.WindowOptions.RequestAttention;
+
+            case "ReportCellSize":
+                if (!_terminal.Options.WindowOptions.GetCellSizePixels)
+                    return false;
+                // iTerm2 defines the first two fields as floating-point sizes in POINTS with an
+                // optional pixels-per-point scale — reporting physical pixels as points reads
+                // double on a Retina display. The host supplies DisplayScale alongside the pixel
+                // metrics; at the default 1.0 the numbers are unchanged.
+                var cellScale = Math.Max(1.0, _terminal.Options.DisplayScale);
+                var cellHeightPoints = _terminal.Options.CellHeightPixels / cellScale;
+                var cellWidthPoints = _terminal.Options.CellWidthPixels / cellScale;
+                _terminal.RaiseDataReceived(string.Create(System.Globalization.CultureInfo.InvariantCulture,
+                    $"\u001b]1337;ReportCellSize={cellHeightPoints:0.0###};{cellWidthPoints:0.0###};{cellScale:0.0###}\u001b\\"));
+                return true;
+
+            default:
+                return false;
+        }
+    }
+
+    private bool HandleITerm2File(string data)
+    {
+        // Only PNG at its natural size is supported. Sized and non-PNG File payloads remain
+        // unrecognized so a host can implement iTerm2's wider image-format and sizing surface.
+        if (!_terminal.Options.ITerm2ImagesEnabled)
+            return false;
+
+        var separator = data.IndexOf(':');
+        if (separator < 0)
+            return false;
+
+        var parameters = data[..separator].Split(';');
+        if (!parameters.Contains("inline=1") || parameters.Any(p => p.StartsWith("width=") || p.StartsWith("height=")))
+            return false;
+
+        var payload = data[(separator + 1)..];
+
+        // Bounded BEFORE decoding: FromBase64String materialises the whole decoded payload, so
+        // without this a very large valid-base64 blob forces the allocation first and gets
+        // rejected after. The registry budget is the natural ceiling — an image whose COMPRESSED
+        // form already exceeds what the registry would hold has no chance of being kept.
+        if (_terminal.Options.MaxImageRegistryBytes > 0
+            && (long)payload.Length > _terminal.Options.MaxImageRegistryBytes / 3 * 4 + 4)
+            return false;
+
+        byte[] encoded;
+        try
+        {
+            encoded = Convert.FromBase64String(payload);
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
+
+        if (!Graphics.PngDecoder.TryDecode(encoded, _terminal.Options.MaxSixelPixels,
+                                           out var pixels, out var width, out var height))
+            return false;
+        if (_terminal.Options.MaxImageRegistryBytes > 0
+            && pixels.LongLength > _terminal.Options.MaxImageRegistryBytes)
+            return false;
+
+        var image = new Graphics.TerminalImage(
+            pixels, width, height,
+            Math.Max(1, _terminal.Options.CellWidthPixels),
+            Math.Max(1, _terminal.Options.CellHeightPixels));
+        PlaceImage(Graphics.ImagePlacement.Natural(image), Graphics.PlacementKind.Sixel);
+        return true;
+    }
+
+    private bool HandleITerm2UserVariable(string data)
+    {
+        var separator = data.IndexOf('=');
+        if (separator < 1)
+            return false;
+
+        try
+        {
+            var encoded = Convert.FromBase64String(data[(separator + 1)..]);
+            if (encoded.Length > _terminal.Options.MaxUserVariableBytes)
+                return false;
+
+            return _terminal.TrySetUserVariable(
+                data[..separator],
+                new System.Text.UTF8Encoding(false, true).GetString(encoded));
+        }
+        catch (ArgumentException)
+        {
+            // Invalid base64 or UTF-8 is untrusted terminal output, so ignore it.
+            return false;
+        }
+    }
+
+    private void HandleITerm2CurrentDirectory(string data)
+    {
+        if (data.StartsWith("file://"))
+        {
+            HandleCurrentDirectory(data);
+            return;
+        }
+
+        if (!string.IsNullOrEmpty(data))
+        {
+            _terminal.CurrentDirectory = data;
+            _terminal.RaiseDirectoryChanged(_terminal.CurrentDirectory);
         }
     }
 
