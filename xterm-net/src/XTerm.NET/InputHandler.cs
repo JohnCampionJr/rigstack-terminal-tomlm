@@ -315,6 +315,57 @@ public class InputHandler
         return false;
     }
 
+    /// <summary>
+    /// Extended_Pictographic, near enough for GB11: the emoji blocks plus the handful of older
+    /// symbols that carry the property. A tighter answer needs the Unicode property data; this
+    /// errs toward the blocks emoji actually come from, and the cost of being wrong at the edges
+    /// is a cluster that splits rather than one that swallows unrelated text.
+    /// </summary>
+    private static bool IsExtendedPictographic(int codePoint) => codePoint switch
+    {
+        >= 0x1F000 and <= 0x1FAFF => true,   // the emoji planes
+        >= 0x2600 and <= 0x27BF => true,     // Misc Symbols, Dingbats
+        0x00A9 or 0x00AE or 0x203C or 0x2049 => true,
+        >= 0x2100 and <= 0x21FF => true,     // Letterlike, arrows used as emoji
+        >= 0x2300 and <= 0x23FF => true,     // Misc Technical (watch, hourglass)
+        >= 0x2B00 and <= 0x2BFF => true,     // stars, arrows
+        >= 0xFE0F and <= 0xFE0F => true,     // VS16 keeps a pictographic cluster together
+        _ => false,
+    };
+
+    /// <summary>
+    /// Blanks the half of a wide character that the cell about to be written would orphan.
+    /// </summary>
+    /// <remarks>
+    /// A two-column character occupies its cell and the spacer after it. Writing over either half
+    /// leaves the other behind, and a renderer meeting a width-2 cell whose second column holds
+    /// something else draws a two-column glyph into one column and shifts the rest of the row.
+    /// </remarks>
+    /// <param name="here">
+    /// The width already under the cursor, read by the caller. It decides both cases on its own --
+    /// 2 means a wide character whose spacer at X+1 is about to be orphaned, 0 means this IS a
+    /// spacer and the character at X-1 is -- and the caller needs it anyway to decide whether
+    /// there is a repair to make, so reading it twice would be reading it once too often.
+    /// </param>
+    private void RepairSplitWideCell(BufferLine line, int here)
+    {
+        if (here == 2)
+        {
+            if (_buffer.X + 1 < _terminal.Cols)
+            {
+                var orphan = BufferCell.Space;
+                orphan.Attributes = line[_buffer.X].Attributes;
+                line.SetCell(_buffer.X + 1, ref orphan);
+            }
+        }
+        else if (here == 0 && _buffer.X > 0)
+        {
+            var orphan = BufferCell.Space;
+            orphan.Attributes = line[_buffer.X - 1].Attributes;
+            line.SetCell(_buffer.X - 1, ref orphan);
+        }
+    }
+
     /// <summary>The Fitzpatrick skin tone modifiers, U+1F3FB to U+1F3FF.</summary>
     private static bool IsSkinToneModifier(int codePoint)
         => codePoint >= SkinToneFirst && codePoint <= SkinToneLast;
@@ -393,9 +444,14 @@ public class InputHandler
                 return;
 
             // A character standing exactly where a ZWJ was just merged continues that cluster.
+            // GB11 is ZWJ x \p{Extended_Pictographic}: the ZWJ keeps the cluster only when what
+            // follows is itself a pictograph. Accepting anything meant an emoji followed by a
+            // letter -- man, ZWJ, e-acute -- swallowed the letter into the emoji's cell, where it
+            // stopped being text the user could see or select.
             var continuesCluster = _zwjContinuation is { } pending
                                    && pending.Row == _buffer.Y + _buffer.YBase
-                                   && pending.Col == _buffer.X;
+                                   && pending.Col == _buffer.X
+                                   && IsExtendedPictographic(codePoint);
             _zwjContinuation = null;
 
             // A second regional indicator lands beside the first and turns it into a flag: one glyph, two
@@ -443,7 +499,36 @@ public class InputHandler
         // Handle autowrap. The wrap TEST stays inline: it runs once per printed character, and
         // hiding it inside ResolveAutowrap cost alt-redraw 9% in method-call overhead -- the same
         // lesson NoteLinkRun's guard learned. The method only runs when a wrap is actually due.
-        if (_buffer.X > WrapLimit() && !ResolveAutowrap())
+        // Translate and measure ONCE, before the wrap decision, because both need the answer: a
+        // wide character written at the last column has no room for its spacer, so the wrap test
+        // has to know the width, and the write below needs it too. Measuring in both places cost
+        // alt-redraw 32% -- every printed character paid for two translations and two width
+        // lookups to learn the same thing twice.
+        var translatedData = data;
+        if (data.Length == 1)
+        {
+            translatedData = Charsets.TranslateChar(data[0], _activeCharset);
+        }
+
+        var width = GetStringCellWidth(translatedData);
+
+        // WrapLimit is not free -- it asks whether the cursor is inside the margin columns -- and
+        // the wide-character test made a second call to it for every printed character. Computed
+        // once and shared with the autowrap test below, which is the only other reader.
+        var wrapLimit = WrapLimit();
+
+        // A wide character needs TWO columns, so the wrap test has to know its width: written at
+        // the last column it was stored there with no room for its spacer, leaving a width-2 cell
+        // in one column and the cursor one past the pending-wrap position.
+        if (width == 2 && _buffer.X == wrapLimit && _terminal.Options.Wraparound)
+            _buffer.SetCursorRaw(wrapLimit + 1, _buffer.Y);
+
+        // Whether the cursor moved to another row, which is the only thing that can make the limit
+        // computed above stale -- WrapLimit asks where the cursor is, and a wrap is the one event
+        // here that puts it somewhere else.
+        var wrapped = false;
+
+        if (_buffer.X > wrapLimit && !(wrapped = ResolveAutowrap()))
         {
             // Wrapping is off and the cursor is past the last column. DECAWM off does not mean
             // "discard": the VT100, xterm and xterm.js all keep OVERWRITING the last column, so a
@@ -454,18 +539,19 @@ public class InputHandler
             // Done here rather than inside ResolveAutowrap because that helper answers "was the
             // wrap resolved", and the OSC 66 sized-block path depends on its false to move a whole
             // block back by its own width instead of one column.
-            _buffer.SetCursorRaw(WrapLimit(), _buffer.Y);
+            //
+            // The value computed above, not a second call: reaching here means wrapping is off, so
+            // the early-wrap block did not run and nothing has moved the cursor since.
+            _buffer.SetCursorRaw(wrapLimit, _buffer.Y);
         }
 
-        // Translate character through active charset
-        var translatedData = data;
-        if (data.Length == 1)
-        {
-            translatedData = Charsets.TranslateChar(data[0], _activeCharset);
-        }
-
-        // Get character width
-        var width = GetStringCellWidth(translatedData);
+        // DECAWM off and a two-column character at the last column: it does not fit, and there is
+        // nowhere to wrap it to. Stored anyway it became a width-2 cell whose spacer the margin
+        // then refused -- the orphaned half this change exists to prevent, produced by the one
+        // path that skipped the early wrap above. xterm.js parks the cursor at the last column
+        // and drops the character; so does this.
+        if (width == 2 && _buffer.X >= wrapLimit && !_terminal.Options.Wraparound)
+            return;
 
         // A cell belonging to a scaled block anchored on an earlier row is not written into: the
         // cursor moves past the block's cells on this row and the text lands after them. Known
@@ -509,22 +595,51 @@ public class InputHandler
         // it; a Kitty run is left alone, because it is an overlay whose z-index orders it against
         // the text. Both fall out of where a picture is stored rather than from anything done here.
 
+        // Overwriting half of a wide character leaves the other half behind: a width-2 cell whose
+        // second column now holds something else, or a spacer with nothing in front of it. Both
+        // make the renderer draw a two-column glyph into one column. The erase paths get this from
+        // BufferLine.Fill; printing writes a single cell and has to say so itself.
+        // The margin the spacer has to fit inside, for a wide character only -- ASCII never asks,
+        // so it never pays for it. Recomputed only when a wrap actually moved the cursor: the
+        // limit is a question about where the cursor is, and nothing else between there and here
+        // moves it. Asking again unconditionally meant a WrapLimit call for every CJK character in
+        // a corpus made of them, to be told what the value at the top of the method already said.
+        var spacerLimit = width == 2 ? (wrapped ? WrapLimit() : wrapLimit) : 0;
+        var writesSpacer = width == 2 && _buffer.X + 1 <= spacerLimit;
+
+        // Guarded at the CALL, the lesson this file keeps teaching: the repair is array reads on
+        // EVERY printed character, and a line that has never held a wide character cannot have an
+        // orphan to fix. HasWideCells is one field read, and it is false for the ASCII that makes
+        // up most of every frame.
+        //
+        // The width under the cursor is read here too, so the ordinary case reaches no call at
+        // all: on a line that HAS wide cells -- which is every line of CJK, where the latch is
+        // true from the first character on -- an unconditional call is one per printed character.
+        if (line is not null && line.HasWideCells)
+        {
+            var here = line.GetWidth(_buffer.X);
+
+            // here == 2 means a wide character is being overwritten and its spacer at X+1 is
+            // orphaned; here == 0 means this IS a spacer and the character at X-1 is. But a wide
+            // character about to be written covers X+1 ITSELF, so blanking it first is a write the
+            // spacer below immediately repeats -- and CJK over CJK is what the unicode corpus is
+            // made of. Only the half the incoming character does not cover needs repairing.
+            if (here == 0 || (here == 2 && !writesSpacer))
+                RepairSplitWideCell(line, here);
+        }
+
         // Set the cell
         line?.SetCell(_buffer.X, ref cell);
 
-        // Handle wide characters
-        if (width == 2)
+        // Handle wide characters. The spacer is bounded by the right MARGIN rather than the screen
+        // -- otherwise a double-width character sitting on the last column of a region plants its
+        // spacer in the pane next door. Identical to the old test when no margins are set, since
+        // the limit is then the last column.
+        if (writesSpacer)
         {
-            // Set following cell as a spacer, bounded by the right MARGIN rather than the screen --
-            // otherwise a double-width character sitting on the last column of a region plants its
-            // spacer in the pane next door. Identical to the old test when no margins are set, since
-            // the limit is then the last column.
-            if (_buffer.X + 1 <= WrapLimit())
-            {
-                var spacer = BufferCell.Empty;
-                spacer.Attributes = _curAttr;
-                line?.SetCell(_buffer.X + 1, ref spacer);
-            }
+            var spacer = BufferCell.Empty;
+            spacer.Attributes = _curAttr;
+            line?.SetCell(_buffer.X + 1, ref spacer);
         }
 
         // A lone regional indicator may turn out to be the first half of a flag. Remember where it went and
@@ -761,6 +876,24 @@ public class InputHandler
             return;
         }
 
+        // A pending ZWJ continuation is per-character state the run path does not carry: it writes
+        // its span directly and never consults or clears _zwjContinuation, so an emoji ending in
+        // ZWJ followed by an ASCII chunk lost the continuation that Print would have honoured --
+        // the two paths disagreed about the same bytes depending only on how they were chunked.
+        //
+        // ONE character, not the whole run. The state belongs to the character standing where the
+        // ZWJ was merged, and the first Print clears it unconditionally, so only that character
+        // needs the slow path. Handing the entire run over meant every ASCII run following an
+        // emoji printed a character at a time -- and text that mixes emoji with words is the
+        // ordinary case, not an exotic one.
+        if (_zwjContinuation is not null)
+        {
+            Print(CodePointText.Get((char)data[0]));
+            data = data[1..];
+            if (data.IsEmpty)
+                return;
+        }
+
         while (!data.IsEmpty)
         {
             if (_buffer.X > WrapLimit())
@@ -794,6 +927,12 @@ public class InputHandler
             // other side -- and only when the fast path takes the write, which is the difference
             // that reads as an intermittent fault rather than a missing case.
             var take = Math.Min(WrapLimit() + 1 - _buffer.X, data.Length);
+            // Guarded HERE rather than inside SetSingleWidthRun: putting the check in that method
+            // pushed it past the JIT's inlining budget and cost the ASCII corpus 8%. A line that
+            // never held a wide cell cannot have a half to orphan.
+            if (line.HasWideCells)
+                line.RepairAround(_buffer.X, _buffer.X + data[..take].Length);
+
             line.SetSingleWidthRun(_buffer.X, data[..take], _curAttr);
 
             // This path bypasses Print, so it keeps the link bookkeeping itself -- otherwise a link
@@ -844,6 +983,17 @@ public class InputHandler
             return;
         }
 
+        // As in the span overload: the pending ZWJ continuation belongs to ONE character, and the
+        // first Print clears it, so only that character takes the slow path rather than the run.
+        if (_zwjContinuation is not null)
+        {
+            Print(CodePointText.Get(data[start]));
+            start++;
+            count--;
+            if (count == 0)
+                return;
+        }
+
         var pos = start;
         var remaining = count;
 
@@ -879,6 +1029,12 @@ public class InputHandler
 
             // As above: the margin bounds the batch, or the fast path leaks past it.
             var take = Math.Min(WrapLimit() + 1 - _buffer.X, remaining);
+            // Guarded HERE rather than inside SetSingleWidthRun: putting the check in that method
+            // pushed it past the JIT's inlining budget and cost the ASCII corpus 8%. A line that
+            // never held a wide cell cannot have a half to orphan.
+            if (line.HasWideCells)
+                line.RepairAround(_buffer.X, _buffer.X + take);
+
             line.SetSingleWidthRun(_buffer.X, data.AsSpan(pos, take), _curAttr);
 
             // As above: bypassing Print means keeping the link bookkeeping here as well.
@@ -6794,7 +6950,11 @@ public class InputHandler
             }
         }
 
-        return width;
+        // Clamped for the same reason TryAppendToPreviousCell clamps its incremental answer: a
+        // grid cell is one or two columns and nothing else, so a cluster with two spacing marks
+        // (or a double conjunct) measuring 3 gave the two paths different answers about the same
+        // text and put a width the cell machinery has never seen into the buffer.
+        return Math.Min(width, (ushort)2);
     }
 
     public void SetBuffer(Buffer.TerminalBuffer buffer)

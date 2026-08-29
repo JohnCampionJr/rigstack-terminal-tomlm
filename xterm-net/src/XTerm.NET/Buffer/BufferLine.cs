@@ -87,6 +87,9 @@ public class BufferLine : IEnumerable<BufferCell>
         _lineAttribute = LineAttribute.Normal;
 
         var fill = fillCell ?? BufferCell.Space;
+        if (fill.Width == 2)
+            HasWideCells = true;
+
         for (int i = 0; i < cols; i++)
         {
             _cells[i] = fill;
@@ -109,9 +112,47 @@ public class BufferLine : IEnumerable<BufferCell>
         {
             if (index >= 0 && index < _length)
             {
+                if (value.Width == 2)
+                    HasWideCells = true;
+
                 _cells[index] = value;
                 Cache = null;
             }
+        }
+    }
+
+    /// <summary>
+    /// Whether this line has ever held a two-column character. A latch, not a count: it exists so
+    /// the print path can skip its orphan check with one field read, and the only cost of a stale
+    /// true is doing a check that finds nothing. Clearing it accurately would mean scanning the
+    /// row on every erase, which is the work it was added to avoid.
+    /// </summary>
+    public bool HasWideCells { get; private set; }
+
+    /// <summary>
+    /// Blanks either half of a wide character that the range [start, end) would orphan.
+    /// </summary>
+    /// <remarks>
+    /// Callers on the run path must guard this with <see cref="HasWideCells"/> themselves.
+    /// Putting the guard INSIDE SetSingleWidthRun cost scroll-ascii 8%: the extra call pushed that
+    /// method past the JIT's inlining budget, so every run paid a real call and lost the
+    /// optimizations that come with being inlined. One bool read cannot cost 8%; not being inlined
+    /// can.
+    /// </remarks>
+    internal void RepairAround(int start, int end)
+    {
+        if (start > 0 && start < _length && GetWidth(start - 1) == 2)
+        {
+            var orphan = BufferCell.Space;
+            orphan.Attributes = _cells[start - 1].Attributes;
+            _cells[start - 1] = orphan;
+        }
+
+        if (end < _length && end > 0 && _cells[end - 1].Width == 2)
+        {
+            var orphan = BufferCell.Space;
+            orphan.Attributes = _cells[end].Attributes;
+            _cells[end] = orphan;
         }
     }
 
@@ -122,6 +163,9 @@ public class BufferLine : IEnumerable<BufferCell>
     {
         if (index >= 0 && index < _length)
         {
+            if (cell.Width == 2)
+                HasWideCells = true;
+
             _cells[index] = cell;
 
             // Printing over a Sixel picture replaces that part of it. With tiles in cells this
@@ -251,6 +295,21 @@ public class BufferLine : IEnumerable<BufferCell>
         if (endCol == -1)
             endCol = _length;
 
+        // A wide character straddles two columns, so a range that cuts through one leaves the
+        // other half behind: a width-2 cell whose second column is now a space, or a spacer with
+        // nothing in front of it. The renderer then draws a two-column glyph into one column and
+        // the rest of the row shifts. ReplaceCells has carried this repair all along and only
+        // reflow ever reached it; erasing needs it just as much, and widening the range here also
+        // gives the link, image and sized-run bookkeeping below the true span that was cleared.
+        if (HasWideCells)
+        {
+            if (startCol > 0 && startCol < _length && GetWidth(startCol - 1) == 2)
+                startCol--;
+
+            if (endCol < _length && endCol > 0 && GetWidth(endCol - 1) == 2)
+                endCol++;
+        }
+
         for (int i = startCol; i < endCol && i < _length; i++)
         {
             _cells[i] = fillCell;
@@ -289,6 +348,13 @@ public class BufferLine : IEnumerable<BufferCell>
         // that shifts right within a line is safe now whatever it passes.
         if (ReferenceEquals(src, this) && destCol > srcCol && destCol < srcCol + length)
             applyInReverse = true;
+
+        // Inherit the source's latch rather than inspecting what was copied. It is a latch, so
+        // over-approximating costs one repair check that finds nothing, while UNDER-approximating
+        // costs the invariant: margin scrolling and reflow copy cells straight into _cells, and a
+        // wide character arriving that way into a line whose latch stayed false would have every
+        // later repair skip it -- reintroducing exactly the orphan this PR exists to prevent.
+        HasWideCells |= src.HasWideCells;
 
         if (applyInReverse)
         {
@@ -1008,6 +1074,7 @@ public class BufferLine : IEnumerable<BufferCell>
         {
             newLine._cells[i] = _cells[i];
         }
+        newLine.HasWideCells = HasWideCells;
         newLine.Cache = this.Cache;
         return newLine;
     }
@@ -1029,6 +1096,11 @@ public class BufferLine : IEnumerable<BufferCell>
         }
         _isWrapped = line._isWrapped;
         _lineAttribute = line._lineAttribute;
+
+        // Assigned, not OR-ed: this REPLACES the line's contents rather than adding to them, so
+        // the latch belongs to the incoming cells. A recycled scrollback line that once held a
+        // wide character would otherwise carry that latch forever.
+        HasWideCells = line.HasWideCells;
         this.Cache = line.Cache;
     }
 
