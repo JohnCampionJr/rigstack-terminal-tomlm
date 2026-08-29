@@ -152,18 +152,22 @@ public class TerminalOptions : ICloneable
     public bool KittyGraphicsEnabled { get; set; } = true;
 
     /// <summary>
-    /// Whether OSC 52 clipboard write requests are raised for the host to handle.
+    /// Whether applications may write to the host clipboard using OSC 52 or Kitty OSC 5522.
     /// </summary>
     public bool ClipboardWriteEnabled { get; set; } = true;
 
     /// <summary>
-    /// Whether OSC 52 clipboard read requests are raised for the host to handle.
+    /// Whether applications may read from the host clipboard using OSC 52 or Kitty OSC 5522.
     /// </summary>
     /// <remarks>
-    /// Disabled by default because a process that writes to the terminal could otherwise read the
-    /// user's clipboard.
+    /// Disabled by default because terminal output can otherwise exfiltrate clipboard contents.
     /// </remarks>
-    public bool ClipboardReadEnabled { get; set; }
+    public bool ClipboardReadEnabled { get; set; } = false;
+
+    /// <summary>
+    /// Maximum decoded clipboard bytes accepted in a Kitty OSC 5522 write.
+    /// </summary>
+    public int MaxClipboardBytes { get; set; } = 64 * 1024 * 1024;
 
     /// <summary>
     /// Whether the Kitty keyboard protocol sequences (CSI u) are honoured.
@@ -289,6 +293,7 @@ public class TerminalOptions : ICloneable
         KittyGraphicsEnabled = other.KittyGraphicsEnabled;
         ClipboardWriteEnabled = other.ClipboardWriteEnabled;
         ClipboardReadEnabled = other.ClipboardReadEnabled;
+        MaxClipboardBytes = other.MaxClipboardBytes;
         KittyKeyboardEnabled = other.KittyKeyboardEnabled;
         MaxImageRegistryBytes = other.MaxImageRegistryBytes;
         CellWidthPixels = other.CellWidthPixels;

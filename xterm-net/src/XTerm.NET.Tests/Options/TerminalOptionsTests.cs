@@ -44,6 +44,9 @@ public class TerminalOptionsTests
         Assert.Equal(1, options.MinimumContrastRatio);
         Assert.True(options.DrawBoldTextInBrightColors);
         Assert.Null(options.CustomKeyEventHandler);
+        Assert.True(options.ClipboardWriteEnabled);
+        Assert.False(options.ClipboardReadEnabled);
+        Assert.Equal(64 * 1024 * 1024, options.MaxClipboardBytes);
     }
 
     [Fact]

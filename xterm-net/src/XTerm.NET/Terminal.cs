@@ -169,6 +169,16 @@ public class Terminal
     public event EventHandler<TerminalEvents.DataEventArgs>? DataReceived;
 
     /// <summary>
+    /// Fired when an application writes clipboard data through OSC 52 or Kitty OSC 5522.
+    /// </summary>
+    public event EventHandler<TerminalEvents.ClipboardWriteEventArgs>? ClipboardWriteRequested;
+
+    /// <summary>
+    /// Fired when an application requests clipboard data through OSC 52 or Kitty OSC 5522.
+    /// </summary>
+    public event EventHandler<TerminalEvents.ClipboardReadEventArgs>? ClipboardReadRequested;
+
+    /// <summary>
     /// Fired when the terminal title changes.
     /// </summary>
     public event EventHandler<TerminalEvents.TitleChangeEventArgs>? TitleChanged;
@@ -231,17 +241,6 @@ public class Terminal
     /// Fired when a desktop notification is requested via OSC 9.
     /// </summary>
     public event EventHandler<TerminalEvents.NotificationEventArgs>? NotificationReceived;
-
-    /// <summary>
-    /// Fired for an enabled OSC 52 clipboard write request.
-    /// </summary>
-    public event EventHandler<TerminalEvents.ClipboardWriteEventArgs>? ClipboardWriteRequested;
-
-    /// <summary>
-    /// Fired for an enabled OSC 52 clipboard read request. A handler can set <c>Handled</c> and
-    /// <c>Text</c> to return clipboard contents to the application.
-    /// </summary>
-    public event EventHandler<TerminalEvents.ClipboardReadEventArgs>? ClipboardReadRequested;
 
     /// <summary>
     /// Fired for every OSC sequence, including ones this terminal does not implement.
@@ -977,6 +976,16 @@ public class Terminal
     // Internal methods for raising events (called by InputHandler)
     internal void RaiseDataReceived(string data) => 
         DataReceived?.Invoke(this, new TerminalEvents.DataEventArgs(data));
+
+    internal void RaiseClipboardWriteRequested(string target, string mimeType, byte[] data) =>
+        RaiseClipboardWriteRequested(target, new[] { new TerminalEvents.ClipboardFormat(mimeType, data) });
+
+    internal void RaiseClipboardWriteRequested(
+        string target, IReadOnlyList<TerminalEvents.ClipboardFormat> formats) =>
+        ClipboardWriteRequested?.Invoke(this, new TerminalEvents.ClipboardWriteEventArgs(target, formats));
+
+    internal void RaiseClipboardReadRequested(TerminalEvents.ClipboardReadEventArgs args) =>
+        ClipboardReadRequested?.Invoke(this, args);
     
     internal void RaiseTitleChanged(string title) => 
         TitleChanged?.Invoke(this, new TerminalEvents.TitleChangeEventArgs(title));
@@ -984,11 +993,6 @@ public class Terminal
     internal void RaiseDirectoryChanged(string directory) => 
         DirectoryChanged?.Invoke(this, new TerminalEvents.DirectoryChangeEventArgs(directory));
 
-    internal void RaiseClipboardWriteRequested(string target, string text) =>
-        ClipboardWriteRequested?.Invoke(this, new TerminalEvents.ClipboardWriteEventArgs(target, text));
-
-    internal void RaiseClipboardReadRequested(TerminalEvents.ClipboardReadEventArgs args) =>
-        ClipboardReadRequested?.Invoke(this, args);
 
     internal void RaiseHyperlinkChanged(string? url) =>
         HyperlinkChanged?.Invoke(this, new TerminalEvents.HyperlinkEventArgs(url ?? string.Empty, url == null));
