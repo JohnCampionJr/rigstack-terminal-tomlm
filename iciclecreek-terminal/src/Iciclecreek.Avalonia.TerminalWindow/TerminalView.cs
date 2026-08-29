@@ -62,7 +62,7 @@ namespace Iciclecreek.Terminal
         private Cursor? _savedCursor;
         private bool _cursorOverridden;
         private (int Line, int Col)? _lastHoverProbe;
-        private string? _pendingUrlClick;
+        private HoveredUrl? _pendingUrlClick;
 
         // Pointer-shape (OSC 22) override state, kept apart from the hover pair above because the two
         // nest: a shape can arrive during a hover and a hover can start over a shape. This is what the
@@ -958,6 +958,202 @@ namespace Iciclecreek.Terminal
         public event EventHandler<UrlClickedEventArgs>? UrlClicked;
 
         /// <summary>
+        /// Width in pixels of a margin down the left, for marking where commands began and how they
+        /// ended. Zero, the default, means no gutter and no layout change at all.
+        /// </summary>
+        /// <remarks>
+        /// Off unless a host asks for it, and then it is the host's brushes that decide what appears:
+        /// a mark with no brush set draws nothing. There is no default glyph and no default colour,
+        /// because "an exit status beside the command" is a design decision and this control has no
+        /// business making it. A host that wants something other than a bar reads
+        /// <see cref="VisibleMarks"/> and draws over the top instead.
+        /// </remarks>
+        public static readonly StyledProperty<double> GutterWidthProperty =
+            AvaloniaProperty.Register<TerminalView, double>(nameof(GutterWidth), 0.0);
+
+        public double GutterWidth
+        {
+            get => GetValue(GutterWidthProperty);
+            set => SetValue(GutterWidthProperty, value);
+        }
+
+        /// <summary>Marks a prompt whose command has not finished, or reported no status.</summary>
+        public static readonly StyledProperty<IBrush?> GutterPromptBrushProperty =
+            AvaloniaProperty.Register<TerminalView, IBrush?>(nameof(GutterPromptBrush));
+
+        public IBrush? GutterPromptBrush
+        {
+            get => GetValue(GutterPromptBrushProperty);
+            set => SetValue(GutterPromptBrushProperty, value);
+        }
+
+        /// <summary>Marks a command that exited zero.</summary>
+        public static readonly StyledProperty<IBrush?> GutterSuccessBrushProperty =
+            AvaloniaProperty.Register<TerminalView, IBrush?>(nameof(GutterSuccessBrush));
+
+        public IBrush? GutterSuccessBrush
+        {
+            get => GetValue(GutterSuccessBrushProperty);
+            set => SetValue(GutterSuccessBrushProperty, value);
+        }
+
+        /// <summary>Marks a command that exited non-zero.</summary>
+        public static readonly StyledProperty<IBrush?> GutterFailureBrushProperty =
+            AvaloniaProperty.Register<TerminalView, IBrush?>(nameof(GutterFailureBrush));
+
+        public IBrush? GutterFailureBrush
+        {
+            get => GetValue(GutterFailureBrushProperty);
+            set => SetValue(GutterFailureBrushProperty, value);
+        }
+
+        // ---- shell integration, for a host to drive ------------------------------------------
+        //
+        // Methods and data rather than gestures. Nothing here binds a key, opens a menu or decides
+        // what a mark should look like: the terminal knows where the prompts are and what the
+        // commands exited with, and the host decides what that is worth on screen. A keybinding
+        // baked in here would be one the host cannot move.
+
+        /// <summary>
+        /// Scrolls to the nearest prompt above what is on screen.
+        /// </summary>
+        /// <returns>False when there is no earlier prompt, so a host can leave the gesture unhandled.</returns>
+        public bool ScrollToPreviousPrompt()
+        {
+            if (!_terminal.TryFindPreviousPrompt(_terminal.Buffer.ViewportY, out var row))
+                return false;
+
+            ViewportY = row;
+            return true;
+        }
+
+        /// <summary>Scrolls to the nearest prompt below what is on screen.</summary>
+        /// <returns>False when there is no later prompt.</returns>
+        public bool ScrollToNextPrompt()
+        {
+            if (!_terminal.TryFindNextPrompt(_terminal.Buffer.ViewportY, out var row))
+                return false;
+
+            ViewportY = row;
+            return true;
+        }
+
+        /// <summary>
+        /// Selects the output of the command that ran at <paramref name="bufferRow"/>.
+        /// </summary>
+        /// <remarks>
+        /// <para>Output means what the command PRODUCED, not the line it was typed on: the range runs
+        /// from the row after the command was executed to the row before the next prompt begins. So
+        /// selecting the output of a build gives the build log without the command that started it or
+        /// the prompt that followed.</para>
+        /// <para>A command still running has no next prompt, and its output runs to the end of what
+        /// has arrived so far — which is the useful answer rather than a refusal.</para>
+        /// </remarks>
+        /// <returns>False when that row is not part of a command, or the command produced nothing.</returns>
+        public bool SelectCommandOutput(int bufferRow)
+        {
+            var lines = _terminal.Buffer.Lines;
+            if (bufferRow < 0 || bufferRow >= lines.Length)
+                return false;
+
+            // Walk back to the command this row belongs to. A C mark is where output starts.
+            var start = -1;
+            for (var i = bufferRow; i >= 0; i--)
+            {
+                if (HasMark(lines[i], XT.Common.ShellIntegrationMark.CommandExecuted))
+                {
+                    start = i + 1;
+                    break;
+                }
+
+                // A prompt above with no command between means this row is not output at all.
+                if (i != bufferRow && HasMark(lines[i], XT.Common.ShellIntegrationMark.PromptStart))
+                    return false;
+            }
+
+            if (start < 0)
+                return false;
+
+            var end = lines.Length - 1;
+            for (var i = start; i < lines.Length; i++)
+            {
+                if (HasMark(lines[i], XT.Common.ShellIntegrationMark.PromptStart))
+                {
+                    end = i - 1;
+                    break;
+                }
+            }
+
+            if (end < start)
+                return false;
+
+            _terminal.Selection.StartSelection(0, start, XT.Selection.SelectionMode.Normal);
+            _terminal.Selection.UpdateSelection(Math.Max(0, _terminal.Cols - 1), end);
+            _terminal.Selection.EndSelection();
+            InvalidateVisual();
+            return true;
+        }
+
+        /// <summary>
+        /// Every shell-integration mark on the rows currently on screen.
+        /// </summary>
+        /// <remarks>
+        /// What a host draws its own gutter, minimap or margin from. Handed over as data rather than
+        /// rendered here, because "an exit status beside the command" is a design decision — a glyph,
+        /// a colour, a change bar, nothing at all — and the terminal has no business making it.
+        /// <see cref="GutterWidth"/> is the built-in answer for hosts that would rather not.
+        /// </remarks>
+        public IReadOnlyList<VisibleMark> VisibleMarks
+        {
+            get
+            {
+                var found = new List<VisibleMark>();
+                var lines = _terminal.Buffer.Lines;
+                var top = _terminal.Buffer.ViewportY;
+
+                for (var row = 0; row < _terminal.Rows; row++)
+                {
+                    var bufferRow = top + row;
+                    if (bufferRow < 0 || bufferRow >= lines.Length)
+                        continue;
+
+                    if (lines[bufferRow] is not { } line || !line.HasMarks)
+                        continue;
+
+                    foreach (var mark in line.Marks)
+                        found.Add(new VisibleMark(row, bufferRow, mark.Kind, mark.ExitCode));
+                }
+
+                return found;
+            }
+        }
+
+        private static bool HasMark(BufferLine? line, XT.Common.ShellIntegrationMark kind)
+        {
+            if (line is null || !line.HasMarks)
+                return false;
+
+            foreach (var mark in line.Marks)
+            {
+                if (mark.Kind == kind)
+                    return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>A shell-integration mark on a row the viewport is showing.</summary>
+        /// <param name="ViewportRow">Row on screen, 0 at the top.</param>
+        /// <param name="BufferRow">The same row as an absolute buffer index, which survives scrolling.</param>
+        /// <param name="Kind">Which of the four OSC 133 marks.</param>
+        /// <param name="ExitCode">The status a CommandFinished reported, or null where none was.</param>
+        public readonly record struct VisibleMark(
+            int ViewportRow,
+            int BufferRow,
+            XT.Common.ShellIntegrationMark Kind,
+            int? ExitCode);
+
+        /// <summary>
         /// Event raised when the terminal title changes.
         /// </summary>
         public event EventHandler<TitleChangedEventArgs>? TitleChanged;
@@ -1030,9 +1226,17 @@ namespace Iciclecreek.Terminal
                 CursorColorProperty,
                 CursorStyleProperty,
                 CursorBlinkProperty,
-                SuppressCursorProperty);   // toggling it must repaint immediately
+                SuppressCursorProperty,   // toggling it must repaint immediately
+                // The gutter: a brush change must repaint the marks, and a width change moves the
+                // whole grid sideways -- it affects measure below as well, since columns come out
+                // of the width.
+                GutterWidthProperty,
+                GutterPromptBrushProperty,
+                GutterSuccessBrushProperty,
+                GutterFailureBrushProperty);
 
             AffectsMeasure<TerminalView>(
+                GutterWidthProperty,
                 FontFamilyProperty,
                 FontSizeProperty,
                 FontStyleProperty,
@@ -2958,7 +3162,7 @@ namespace Iciclecreek.Terminal
             try
             {
                 var point = e.GetPosition(this);
-                var col = (int)(point.X / _charWidth);
+                var col = PointerColumn(point.X);
                 var row = (int)(point.Y / _charHeight);
 
                 // Any press hands selection back to the mouse — a later Shift+arrow re-anchors at the
@@ -2977,7 +3181,7 @@ namespace Iciclecreek.Terminal
                     var pressed = FindUrlAtColumn(_terminal.Buffer.ViewportY + row, col);
                     if (pressed != null)
                     {
-                        _pendingUrlClick = pressed.Url;
+                        _pendingUrlClick = pressed;
                         e.Handled = true;
                         return;
                     }
@@ -3073,13 +3277,14 @@ namespace Iciclecreek.Terminal
                 if (pendingUrl != null)
                 {
                     var releasePoint = e.GetPosition(this);
-                    var releaseCol = (int)(releasePoint.X / _charWidth);
+                    var releaseCol = PointerColumn(releasePoint.X);
                     var releaseRow = (int)(releasePoint.Y / _charHeight);
                     var released = FindUrlAtColumn(_terminal.Buffer.ViewportY + releaseRow, releaseCol);
 
                     // Only fire if the pointer is still on the same url it was pressed on.
-                    if (released != null && released.Url == pendingUrl)
-                        UrlClicked?.Invoke(this, new UrlClickedEventArgs(pendingUrl));
+                    if (released != null && released.Url == pendingUrl.Url)
+                        UrlClicked?.Invoke(this,
+                            new UrlClickedEventArgs(pendingUrl.Url, pendingUrl.FromSequence));
 
                     e.Handled = true;
                     return;
@@ -3108,7 +3313,7 @@ namespace Iciclecreek.Terminal
                     return;
 
                 var point = e.GetPosition(this);
-                var col = (int)(point.X / _charWidth);
+                var col = PointerColumn(point.X);
                 var row = (int)(point.Y / _charHeight);
 
                 var button = ConvertPointerButton(e.GetCurrentPoint(this).Properties, e.InitialPressMouseButton);
@@ -3133,7 +3338,7 @@ namespace Iciclecreek.Terminal
             try
             {
                 var point = e.GetPosition(this);
-                var col = (int)(point.X / _charWidth);
+                var col = PointerColumn(point.X);
                 var row = (int)(point.Y / _charHeight);
 
                 // If we're selecting, update the selection
@@ -3221,7 +3426,7 @@ namespace Iciclecreek.Terminal
                 }
 
                 var point = e.GetPosition(this);
-                var col = (int)(point.X / _charWidth);
+                var col = PointerColumn(point.X);
                 var row = (int)(point.Y / _charHeight);
                 var modifiers = ConvertAvaloniaModifiers(e.KeyModifiers);
 
@@ -3661,15 +3866,28 @@ namespace Iciclecreek.Terminal
         /// A url currently under the pointer, resolved to the buffer cells it occupies.
         /// A url that wrapped across the right edge covers more than one segment.
         /// </summary>
-        private sealed class HoveredUrl
+        internal sealed class HoveredUrl
         {
-            public HoveredUrl(string url, List<(int Line, int StartCol, int EndCol)> segments)
+            public HoveredUrl(string url, List<(int Line, int StartCol, int EndCol)> segments,
+                              bool fromSequence = false)
             {
                 Url = url;
                 Segments = segments;
+                FromSequence = fromSequence;
             }
 
             public string Url { get; }
+
+            /// <summary>
+            /// Whether the program declared this link with OSC 8, rather than the text merely looking
+            /// like a URL.
+            /// </summary>
+            /// <remarks>
+            /// Surfaced to the host because the two deserve different trust. A declared link is a
+            /// statement of intent from the program; a matched one is a guess about characters that
+            /// happened to be on screen, and its target is whatever the user can already read.
+            /// </remarks>
+            public bool FromSequence { get; }
 
             /// <summary>Inclusive cell ranges, one per buffer line the url spans.</summary>
             public List<(int Line, int StartCol, int EndCol)> Segments { get; }
@@ -3795,8 +4013,25 @@ namespace Iciclecreek.Terminal
             return count;
         }
 
-        private HoveredUrl? FindUrlAtColumn(int bufferLine, int col)
+        /// <summary>
+        /// The link under a cell: one the program declared with OSC 8, or failing that one the text
+        /// happens to look like.
+        /// </summary>
+        /// <remarks>
+        /// <para>The declared one wins, and it is not a tie-break between two ways of doing the same
+        /// thing. A regular expression can only find a link whose DISPLAY TEXT is the URL, and the
+        /// whole point of OSC 8 is the case where it is not — "click here", a filename, a commit
+        /// subject. The two are complementary, and only the program knows which cells it meant.</para>
+        /// <para>Everything downstream of here — the underline, the hand cursor, requiring press and
+        /// release on the same link — takes a <see cref="HoveredUrl"/> and never asks where it came
+        /// from, so OSC 8 gets all of it for the cost of this branch.</para>
+        /// </remarks>
+        internal HoveredUrl? FindUrlAtColumn(int bufferLine, int col)
         {
+            var declared = FindHyperlinkAtColumn(bufferLine, col);
+            if (declared is not null)
+                return declared;
+
             var logical = BuildLogicalLine(bufferLine);
             if (logical == null)
                 return null;
@@ -3850,6 +4085,66 @@ namespace Iciclecreek.Terminal
             }
 
             return null;
+        }
+
+        /// <summary>
+        /// The OSC 8 link covering a cell, if the program declared one there.
+        /// </summary>
+        /// <remarks>
+        /// Simpler than the regular-expression path, because the emulator already stores the answer:
+        /// the span is on the line, so there is no logical line to rebuild and no character indices
+        /// to map back onto cells.
+        ///
+        /// <para>A link that wrapped is several spans carrying one <c>id=</c>, which is what that
+        /// parameter is for. They are gathered so hovering either half underlines both — but only
+        /// across CONTIGUOUS lines, so two unrelated uses of the same id elsewhere in the scrollback
+        /// do not join up.</para>
+        /// </remarks>
+        private HoveredUrl? FindHyperlinkAtColumn(int bufferLine, int col)
+        {
+            var lines = _terminal.Buffer.Lines;
+            if (bufferLine < 0 || bufferLine >= lines.Length)
+                return null;
+
+            if (lines[bufferLine] is not { } line || !line.HasLinks)
+                return null;
+
+            if (!line.TryGetLinkAt(col, out var link))
+                return null;
+
+            var segments = new List<(int Line, int StartCol, int EndCol)>
+            {
+                (bufferLine, link.Column, link.EndColumn - 1)
+            };
+
+            if (link.Id is not null)
+            {
+                for (var i = bufferLine - 1; i >= 0 && TryGetSpanWithId(lines[i], link.Id, out var above); i--)
+                    segments.Insert(0, (i, above.Column, above.EndColumn - 1));
+
+                for (var i = bufferLine + 1; i < lines.Length && TryGetSpanWithId(lines[i], link.Id, out var below); i++)
+                    segments.Add((i, below.Column, below.EndColumn - 1));
+            }
+
+            return new HoveredUrl(link.Url, segments, fromSequence: true);
+        }
+
+        private static bool TryGetSpanWithId(BufferLine? line, string id, out XT.Buffer.LineHyperlink span)
+        {
+            if (line is not null && line.HasLinks)
+            {
+                foreach (var candidate in line.Links)
+                {
+                    if (string.Equals(candidate.Id, id, StringComparison.Ordinal))
+                    {
+                        span = candidate;
+                        return true;
+                    }
+                }
+            }
+
+            span = default;
+            return false;
         }
 
         private void UpdateHoveredUrl(int bufferLine, int col)
@@ -4870,6 +5165,9 @@ namespace Iciclecreek.Terminal
 
             var scale = TopLevel.GetTopLevel(this)?.RenderScaling ?? 1.0;
             _terminal.Options.CellWidthPixels = Math.Max(1, (int)Math.Round(_charWidth * scale));
+            // The scale rides beside the pixel metrics it produced: iTerm2's ReportCellSize
+            // speaks points, and the emulator divides by this to answer it.
+            _terminal.Options.DisplayScale = scale;
             _terminal.Options.CellHeightPixels = Math.Max(1, (int)Math.Round(_charHeight * scale));
         }
 
@@ -4901,6 +5199,96 @@ namespace Iciclecreek.Terminal
             InvalidateVisual();
         }
 
+        /// <summary>
+        /// Paints the marks for the rows on screen into the gutter lane.
+        /// </summary>
+        /// <remarks>
+        /// A bar per prompt, coloured by how its command ended, and nothing at all where the host has
+        /// set no brush for that case. There is no built-in palette here on purpose: a terminal
+        /// picking its own red and green would be picking them for every theme it ever runs under.
+        /// </remarks>
+        private void DrawGutter(DrawingContext context, double gutter)
+        {
+            if (gutter <= 0 || _charHeight <= 0)
+                return;
+
+            // Straight over the visible lines rather than through VisibleMarks, which builds a list
+            // -- fine for a host asking once, not for a render path asking per frame.
+            var lines = _terminal.Buffer.Lines;
+            var top = _terminal.Buffer.ViewportY;
+
+            for (var row = 0; row < _terminal.Rows; row++)
+            {
+                var bufferRow = top + row;
+                if (bufferRow < 0 || bufferRow >= lines.Length)
+                    continue;
+
+                if (lines[bufferRow] is not { } line || !line.HasMarks)
+                    continue;
+
+                // ONE bar for the row, decided by all of its marks together, rather than one fill
+                // per mark into the same rectangle. A shell's prompt string carries OSC 133;D;<code>
+                // for the command that just finished immediately before the OSC 133;A that opens the
+                // next prompt, so both land on the same line -- and filling per mark painted the exit
+                // status and then covered it with the prompt colour, which made success and failure
+                // unreachable for any host that set GutterPromptBrush.
+                //
+                // The status wins the lane, because how a command ended is the one thing here the user
+                // cannot read off the screen; where a prompt began is visible in the prompt itself.
+                int? exitCode = null;
+                bool anyMark = false;
+
+                foreach (var mark in line.Marks)
+                {
+                    if (mark.Kind != XT.Common.ShellIntegrationMark.PromptStart
+                        && mark.Kind != XT.Common.ShellIntegrationMark.CommandFinished)
+                        continue;
+
+                    anyMark = true;
+                    if (mark.Kind == XT.Common.ShellIntegrationMark.CommandFinished
+                        && mark.ExitCode is int code)
+                        exitCode ??= code;
+                }
+
+                if (!anyMark)
+                    continue;
+
+                var brush = exitCode switch
+                {
+                    0 => GutterSuccessBrush,
+                    int => GutterFailureBrush,
+                    _ => null,
+                };
+
+                // A finish with no status to report is a prompt bar, as it was before; so is a finish
+                // whose case the host left unstyled, which keeps a host that styled only the prompt
+                // showing its bar on every prompt row rather than losing the ones a command ended on.
+                brush ??= GutterPromptBrush;
+
+                if (brush is null)
+                    continue;
+
+                context.FillRectangle(brush,
+                    new Rect(0, row * _charHeight, gutter, _charHeight));
+            }
+        }
+
+        /// <summary>
+        /// The column a pointer position falls in, with the gutter taken off first.
+        /// </summary>
+        /// <remarks>
+        /// The other end of the translation the render pushes. Without this a click lands one or two
+        /// columns to the right of where it looks, and only when a gutter is switched on -- the kind
+        /// of thing that gets reported as "selection is off by a bit" long after the change that did
+        /// it.
+        /// </remarks>
+        private int PointerColumn(double x)
+            => _charWidth > 0
+                // Clamped at zero: a pointer INSIDE the gutter is over no column, and a negative
+                // one would flow into selection and mouse reporting as an index.
+                ? Math.Max(0, (int)((x - Math.Max(0, GutterWidth)) / _charWidth))
+                : 0;
+
         protected override Size MeasureOverride(Size availableSize)
         {
             UpdateTextMetrics();
@@ -4913,7 +5301,10 @@ namespace Iciclecreek.Terminal
             // Calculate how many columns fit in the allocated width
             if (_charWidth > 0)
             {
-                int newCols = Math.Max(1, (int)(finalSize.Width / _charWidth));
+                // The gutter is taken out of the width before columns are counted, so turning one on
+                // narrows the terminal rather than pushing text off the right-hand edge. Clamped the
+                // same way Render and PointerColumn clamp it -- a negative width must not mint columns.
+                int newCols = Math.Max(1, (int)((finalSize.Width - Math.Max(0, GutterWidth)) / _charWidth));
                 int newRows = Math.Max(1, (int)(finalSize.Height / _charHeight));
 
                 // Only resize if dimensions have changed
@@ -4932,8 +5323,20 @@ namespace Iciclecreek.Terminal
         }
 
 
+        /// <summary>
+        /// One OSC 66 block waiting for the deferred pass: which line, which cells, and where the
+        /// anchor row landed on screen. Deferred because a block taller than one row must paint
+        /// AFTER every row's background — rows render top to bottom, and the row below an anchor
+        /// would otherwise fill straight over the glyph's lower half.
+        /// </summary>
+        private readonly record struct SizedBlockDraw(
+            XT.Buffer.BufferLine Line, XT.Buffer.LineSizedRun Run, double StartYPos, double RowHeight);
+
+        private readonly List<SizedBlockDraw> _sizedBlockDraws = new();
+
         public override void Render(DrawingContext context)
         {
+            _sizedBlockDraws.Clear();
             // The terminal's own background, painted once for the whole surface.
             //
             // Nothing else paints it. TerminalView is a plain Control, so Avalonia has no Background of its
@@ -4964,6 +5367,20 @@ namespace Iciclecreek.Terminal
                 context.FillRectangle(surface, new Rect(Bounds.Size));
 
             var scale = TopLevel.GetTopLevel(this)?.RenderScaling ?? 1.0;
+
+            // The gutter, and the shift that keeps the grid out of it.
+            //
+            // One transform rather than an offset threaded through every column-to-pixel sum in this
+            // method. There are sixteen of those and they would each have to be found and changed;
+            // a translation catches all of them at once and cannot be half-applied. The pointer maths
+            // takes the offset off the other end -- see PointerColumn.
+            var gutter = Math.Max(0, GutterWidth);
+            DrawGutter(context, gutter);
+
+            using var gutterShift = gutter > 0
+                ? context.PushTransform(Matrix.CreateTranslation(gutter, 0))
+                : default;
+
             //Debug.WriteLine("======");
             //Debug.WriteLine(_terminal.Buffer.PrintViewport());
 
@@ -4974,6 +5391,42 @@ namespace Iciclecreek.Terminal
             int endLine = Math.Min(_terminal.Buffer.Length, startLine + viewportLines);
             try
             {
+                // A block anchored ABOVE the viewport still hangs into it. The row pass below starts
+                // at viewportY, so it never visits such a block's own line and _sizedBlockDraws would
+                // never hear about it -- and the rows it covers are deliberately blank in the buffer,
+                // SkipCellsCoveredFromAbove having steered text around them, so nothing else paints
+                // there either. Scrolling one line through any output holding an s=2 heading would
+                // blank the heading rather than clip it.
+                //
+                // At most MaxScale - 1 rows to walk, and only when the buffer has ever held a tall
+                // block. The draw's StartYPos goes NEGATIVE, which is what puts the box back where it
+                // belongs, and the PushClip in RenderSizedBlocks trims what falls above the top.
+                if (_terminal.Buffer.HasMultiRowSizedRuns)
+                {
+                    for (int above = 1; above < XT.Common.TextSizing.MaxScale; above++)
+                    {
+                        int anchorRow = viewportY - above;
+                        if (anchorRow < 0)
+                            break;
+
+                        var anchorLine = anchorRow < _terminal.Buffer.Length
+                            ? _terminal.Buffer.GetLine(anchorRow) : null;
+                        if (anchorLine is null || !anchorLine.HasSizedRuns)
+                            continue;
+
+                        var hangStart = Snap(-above * _charHeight, scale);
+                        var hangEnd = Snap((-above + 1) * _charHeight, scale);
+
+                        foreach (var run in anchorLine.SizedRuns)
+                        {
+                            // Rows > above is the test TryGetSizedRunCovering applies: a run reaches
+                            // this row only if it is taller than the distance up to its anchor.
+                            if (run.Rows > above)
+                                _sizedBlockDraws.Add(new SizedBlockDraw(
+                                    anchorLine, run, hangStart, Math.Max(0, hangEnd - hangStart)));
+                        }
+                    }
+                }
 
                 for (int y = startLine; y < endLine; y++)
                 {
@@ -5016,6 +5469,10 @@ namespace Iciclecreek.Terminal
                         RenderNormalLine(context, line, screenY, startYPos, rowHeight, scale);
                     }
                 }
+
+                // OSC 66 blocks, after every row's background and text and before the overlays:
+                // selection and the cursor still draw over scaled text, as they do over plain text.
+                RenderSizedBlocks(context, scale);
 
                 // Render URL underline when hovering
                 RenderHoveredUrl(context, viewportY, scale);
@@ -5088,10 +5545,28 @@ namespace Iciclecreek.Terminal
                 painted.Add(placements[nextPlacement]);
             }
 
+            // A line holding OSC 66 blocks is drawn in two stages: everything OUTSIDE the
+            // blocks now, the blocks themselves in the deferred pass after every row — a block
+            // taller than one row must not be painted over by the next row's background. The
+            // anchor cell's Width spans the whole block, so drawing it as a normal run would put
+            // the text at base size in a corner of the box. Sized lines are not cached: the
+            // cache stores finished draw calls, and the blocks are deliberately NOT drawn here.
+            var hasSizedRuns = line.HasSizedRuns;
+            if (hasSizedRuns)
+                line.Cache = null;
+
             for (int x = 0; x < _terminal.Cols;)
             {
                 if (x >= line.Length)
                     break;
+
+                if (hasSizedRuns && line.TryGetSizedRunAt(x, out var sizedRun) && sizedRun.Covers(x))
+                {
+                    _sizedBlockDraws.Add(new SizedBlockDraw(line, sizedRun, startYPos, rowHeight));
+                    x = sizedRun.EndColumn;
+                    continue;
+                }
+
                 var cell = line[x];
                 string text = String.Empty;
                 int cellCount = 0;
@@ -5137,8 +5612,16 @@ namespace Iciclecreek.Terminal
                         // A KITTY picture is no reason to stop: it is an overlay, the cell under it
                         // still carries whatever was printed there, and the z-index decides which of
                         // them a viewer sees. A SIXEL is not -- see CoveredBySixel.
+                        //
+                        // An OSC 66 block is a boundary too, and nothing here would otherwise notice
+                        // one. A fractional block is always s=1, so its cells are a single column wide
+                        // and carry the SGR that was in force when it was printed; without this,
+                        // preceding text with the same attributes swallows the whole run and draws it
+                        // at base size, because the outer loop only looks for a run on the column it
+                        // starts an iteration on.
                         if (currentCell.Width != 1 || currentCell.Attributes != cell.Attributes
-                            || CoveredBySixel(line, x))
+                            || CoveredBySixel(line, x)
+                            || (hasSizedRuns && line.TryGetSizedRunAt(x, out _)))
                             break;
                         textBuilder.Append(currentCell.Content);
                         cellCount += currentCell.Width;
@@ -5228,7 +5711,8 @@ namespace Iciclecreek.Terminal
 
             // Cache the text runs (but not when ReverseVideo mode is active)
             if (!_terminal.ReverseVideo)
-                line.Cache = textRuns;
+                if (!hasSizedRuns)
+                    line.Cache = textRuns;
         }
 
         /// <summary>
@@ -5789,6 +6273,106 @@ namespace Iciclecreek.Terminal
 
                 pen ??= new Pen(Foreground, 1);
                 context.DrawLine(pen, new Point(startX, y), new Point(endX, y));
+            }
+        }
+
+        /// <summary>
+        /// Draws every OSC 66 block the row pass recorded. Each cell with content inside a run is
+        /// its own block (w=0 gives every grapheme one; a single w&gt;0 block is one wide anchor
+        /// cell), drawn at <c>scale * n/d</c> times the base size inside a box of the cell's
+        /// columns by the run's rows, aligned per the sizing's v and h — the parts of the
+        /// protocol the emulator stores but only a renderer can honour.
+        /// </summary>
+        private void RenderSizedBlocks(DrawingContext context, double scale)
+        {
+            foreach (var draw in _sizedBlockDraws)
+            {
+                var line = draw.Line;
+                var run = draw.Run;
+                var sizing = run.Sizing;
+
+                var fraction = sizing.Numerator > 0 && sizing.Denominator > 0
+                    ? sizing.Numerator / (double)sizing.Denominator
+                    : 1.0;
+                var magnify = sizing.Scale * fraction;
+                if (magnify <= 0)
+                    continue;
+
+                for (int x = run.Column; x < run.EndColumn && x < line.Length;)
+                {
+                    var cell = line[x];
+                    // Only a continuation cell is skipped outright -- it has no box of its own.
+                    if (cell.Width <= 0)
+                    {
+                        x++;
+                        continue;
+                    }
+
+                    var boxX = Snap(x * _charWidth, scale);
+                    var boxRight = Snap((x + cell.Width) * _charWidth, scale);
+                    var box = new Rect(boxX, draw.StartYPos,
+                        Math.Max(0, boxRight - boxX), draw.RowHeight * run.Rows);
+
+                    var background = cell.GetBackgroundBrush(_palette, this.Background);
+                    var foreground = cell.GetForegroundBrush(_palette, this.Foreground);
+                    // The same swap ladder the normal run path applies: inverse, DECSCNM, blink.
+                    bool swapped = false;
+                    if (cell.Attributes.IsInverse())
+                        (foreground, background, swapped) = (background, foreground, !swapped);
+                    if (_terminal.ReverseVideo)
+                        (foreground, background, swapped) = (background, foreground, !swapped);
+                    if (cell.Attributes.IsBlink() && this._cursorBlinkOn)
+                        (foreground, background, swapped) = (background, foreground, !swapped);
+                    if (swapped || cell.GetBackgroundColor(_palette).HasValue)
+                        context.FillRectangle(background, box);
+
+                    // A blank cell has nothing to shape, but its background belongs to the block and is
+                    // already down. This pass is the ONLY thing that paints inside the run -- the row
+                    // pass skipped every column of it -- so skipping a space before the fill punched an
+                    // unpainted notch between the words of a coloured heading.
+                    if (string.IsNullOrEmpty(cell.Content) || cell.Content == " ")
+                    {
+                        x += cell.Width;
+                        continue;
+                    }
+
+                    var typeface = new Typeface(FontFamily, cell.GetFontStyle(), cell.GetFontWeight());
+                    var formatted = new FormattedText(
+                        cell.Content, CultureInfo.CurrentCulture, FlowDirection.LeftToRight,
+                        typeface, FontSize, foreground);
+
+                    // The glyph is drawn at base size under a scale transform, exactly as
+                    // DECDWL/DECDHL lines are — the transform is what makes it big, so hinting,
+                    // fallback and shaping all behave as they do everywhere else.
+                    var drawnWidth = formatted.Width * magnify;
+                    var drawnHeight = draw.RowHeight * magnify;
+
+                    var alignX = sizing.HorizontalAlignment switch
+                    {
+                        XT.Common.TextSizeHorizontalAlignment.Right => box.Right - drawnWidth,
+                        XT.Common.TextSizeHorizontalAlignment.Center => box.X + (box.Width - drawnWidth) / 2,
+                        _ => box.X,
+                    };
+                    var alignY = sizing.VerticalAlignment switch
+                    {
+                        XT.Common.TextSizeVerticalAlignment.Bottom => box.Bottom - drawnHeight,
+                        XT.Common.TextSizeVerticalAlignment.Center => box.Y + (box.Height - drawnHeight) / 2,
+                        _ => box.Y,
+                    };
+
+                    using (context.PushClip(box))
+                    {
+                        var toOrigin = Matrix.CreateTranslation(-alignX, -alignY);
+                        var grow = Matrix.CreateScale(magnify, magnify);
+                        var back = Matrix.CreateTranslation(alignX, alignY);
+                        using (context.PushTransform(toOrigin * grow * back))
+                        {
+                            context.DrawText(formatted, new Point(alignX, alignY));
+                        }
+                    }
+
+                    x += cell.Width;
+                }
             }
         }
 
@@ -6523,7 +7107,12 @@ namespace Iciclecreek.Terminal
                         int viewportY = buffer.ViewportY;
                         int screenY = absoluteCursorY - viewportY;
 
-                        double posX = cursorX * _view._charWidth;
+                        // The gutter, the third place the offset is needed. This rectangle is in the
+                        // control's space, which is the space the render translates the grid within --
+                        // without it the composition window sits GutterWidth px to the left of the
+                        // caret it is meant to be under, for the whole session. Clamped the way
+                        // PointerColumn and ArrangeOverride clamp it.
+                        double posX = cursorX * _view._charWidth + Math.Max(0, _view.GutterWidth);
                         double posY = screenY * _view._charHeight;
 
                         return new Rect(posX, posY, _view._charWidth, _view._charHeight);
