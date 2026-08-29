@@ -273,10 +273,40 @@ internal static class PngDecoder
 
     private static byte[] Inflate(MemoryStream compressed, long expected)
     {
+        // Bounded on the way out, not after the fact -- the same rule KittyTransmission.TryInflate
+        // already follows, and for the same reason: a small payload can inflate to something
+        // enormous, and refusing it afterwards means having already allocated it. CopyTo here let a
+        // 305 KB IDAT declaring a 1x1 image pull 812 MB of zeros into memory before the callers'
+        // length check ever ran.
+        //
+        // The ceiling is not a guess: both callers derive `expected` from the IHDR, and a PNG whose
+        // image data inflates past its own header's row arithmetic is malformed. Overshooting
+        // returns empty, which the callers already reject.
+        if (expected <= 0 || expected >= int.MaxValue)
+            return [];
+
         compressed.Position = 0;
         using var zlib = new ZLibStream(compressed, CompressionMode.Decompress);
-        using var output = new MemoryStream(expected > 0 && expected < int.MaxValue ? (int)expected : 0);
-        zlib.CopyTo(output);
+        using var output = new MemoryStream((int)expected);
+
+        // Pooled: a 16 KB array per decode is pure garbage on a stream carrying many images, and
+        // an animation is exactly that -- one decode per frame.
+        var buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(16 * 1024);
+        try
+        {
+            int read;
+            while ((read = zlib.Read(buffer, 0, buffer.Length)) > 0)
+            {
+                output.Write(buffer, 0, read);
+                if (output.Length > expected)
+                    return [];
+            }
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(buffer);
+        }
+
         return output.ToArray();
     }
 

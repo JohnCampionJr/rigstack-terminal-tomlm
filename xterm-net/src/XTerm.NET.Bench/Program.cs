@@ -52,7 +52,10 @@ switch (mode)
             baseFiles: Files(args, "--base"),
             headFiles: Files(args, "--head"),
             outputPath: ArgOr(args, "--out", "perf-report.md"),
-            timeFloor: double.Parse(ArgOr(args, "--time-floor", "0.05")));
+            // Matches the TIME_FLOOR the CI workflow passes explicitly, so a local compare and
+            // the gate agree about what counts as a regression.
+            timeFloor: double.Parse(ArgOr(args, "--time-floor", "0.04")),
+            label: ArgOr(args, "--label", ""));
 
     case "layout":
         CellLayoutProbe.Run();
@@ -73,7 +76,7 @@ switch (mode)
     default:
         Console.Error.WriteLine("Usage: <bench|soak|alloc|ci|compare|layout|unicode|flood|width|bytes>");
         Console.Error.WriteLine("  ci      --out FILE [--chars N] [--warm-chars N]");
-        Console.Error.WriteLine("  compare --base F [F...] --head F [F...] [--out FILE] [--time-floor F]");
+        Console.Error.WriteLine("  compare --base F [F...] --head F [F...] [--out FILE] [--time-floor F] [--label TEXT]");
         return 2;
 }
 

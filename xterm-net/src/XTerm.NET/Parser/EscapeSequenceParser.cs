@@ -1,6 +1,7 @@
 using System;
 using System.Buffers;
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using System.Text;
 using XTerm.Common;
 using XTerm.Events.Parser;
@@ -882,14 +883,13 @@ public class EscapeSequenceParser
 
             if (_inSubParam)
             {
-                _subParamValue = _subParamValue * 10 + digit;
+                _subParamValue = Saturate(_subParamValue, digit);
                 return;
             }
 
             // Get current value of last parameter and update it
             var currentValue = _params.GetParam(_params.Length - 1, 0);
-            var newValue = currentValue * 10 + digit;
-            _params.UpdateLastParam(newValue);
+            _params.UpdateLastParam(Saturate(currentValue, digit));
         }
     }
 
@@ -945,8 +945,61 @@ public class EscapeSequenceParser
             handler.Invoke(this, new EscEventArgs(finalChar, collected));
     }
 
+    /// <summary>
+    /// Appends a digit, stopping at <see cref="MaxParamValue"/> rather than wrapping. Unchecked
+    /// multiply turned CSI 99999999999 into a negative or small parameter -- a sequence asking for
+    /// something absurd became a sequence asking for something plausible and wrong, which is worse
+    /// than either refusing it or clamping it. Handlers already clamp what they are given; this
+    /// only guarantees the value they see has the sign and magnitude the stream actually asked for.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int Saturate(int current, int digit)
+    {
+        // No division. The obvious guard -- current > (MaxParamValue - digit) / 10 -- divides once
+        // per DIGIT, and a truecolor stream is CSI 38;2;R;G;B m over and over: five parameters and
+        // a dozen digits per sequence, all on the parser's hottest path. Comparing against a
+        // constant costs a compare instead.
+        //
+        // SafeCurrent is MaxParamValue / 10, so anything at or below it cannot overflow an int
+        // when multiplied by ten and given a digit; anything above it is already past the ceiling.
+        if (current > SafeCurrent)
+            return MaxParamValue;
+
+        var next = current * 10 + digit;
+        return next > MaxParamValue ? MaxParamValue : next;
+    }
+
+    /// <summary>The largest accumulator that can still take another digit without overflowing.</summary>
+    private const int SafeCurrent = MaxParamValue / 10;
+
+    /// <summary>
+    /// Ceiling for a single CSI parameter. Far above any real sequence; handlers clamp to the
+    /// screen anyway.
+    /// </summary>
+    private const int MaxParamValue = 0x7FFFFFF;
+
+    /// <summary>
+    /// Ceiling on one OSC payload. A sequence that never terminates otherwise grows this buffer
+    /// for as long as the program keeps writing -- the payload is pty-controlled and nothing else
+    /// bounded it. Generous next to the longest real payloads, which are OSC 8 URLs and OSC 52
+    /// clipboard writes.
+    /// </summary>
+    private const int MaxOscPayloadChars = 1 << 20;
+
+
+
     private void OscPut(int code)
     {
+        // Past the cap the payload is dropped on the floor rather than truncated and dispatched:
+        // half a URL or half a base64 clipboard write is not something a handler should act on.
+        //
+        // Refusing to APPEND is not enough on its own -- the terminator would still dispatch the
+        // prefix that did fit, which is precisely the partial action this is here to prevent: an
+        // oversized OSC 52 would arrive as a perfectly valid clipboard write of attacker-chosen
+        // length. The flag makes the whole sequence unusable, and DispatchOsc drops it.
+        if (_osc.Length >= MaxOscPayloadChars)
+            return;
+
         // Append the char, not a string built from it. ConvertFromUtf32 allocated once per character
         // of every OSC payload -- window titles, OSC 7 working directories, OSC 8 URLs, and every
         // OSC 133 prompt mark, which a shell emits several times per command.
@@ -1155,6 +1208,19 @@ public class EscapeSequenceParser
 
     private void DispatchOsc()
     {
+        // A sequence that reached the cap is not dispatched at all. Dispatching what fit would
+        // hand a handler attacker-chosen data that merely LOOKS complete -- a truncated OSC 52 is
+        // a valid clipboard write, a truncated OSC 8 a valid link to somewhere else.
+        //
+        // The length IS the flag: OscPut stops appending at the ceiling, so a payload sitting on
+        // it is one that had more to say. That costs no field, and no lifecycle -- _osc.Clear()
+        // on entering an OSC and on Reset already forgets it, where a separate bool had two more
+        // places to be cleared and so two more places to be forgotten. A legitimate payload of
+        // exactly the cap is refused too, which is the boundary of a limit no real sequence
+        // approaches.
+        if (_osc.Length >= MaxOscPayloadChars)
+            return;
+
         OnOsc(_osc.ToString());
     }
 
