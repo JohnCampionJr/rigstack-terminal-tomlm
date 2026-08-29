@@ -18,6 +18,10 @@ public class InputHandler
     private Buffer.TerminalBuffer _buffer;
     private AttributeData _curAttr;
     private readonly Dictionary<CharsetMode, Dictionary<char, string>?> _charsets;
+    private readonly Dictionary<string, KittyNotification> _kittyNotifications = new();
+    private const int MaxPendingKittyNotifications = 16;
+    private const int MaxKittyNotificationBytes = 64 * 1024;
+    private static readonly TimeSpan KittyNotificationTimeout = TimeSpan.FromMinutes(1);
     private Dictionary<string, List<byte>>? _kittyClipboardData;
     private Dictionary<string, StringBuilder>? _kittyClipboardBase64;
     private List<(string Alias, string Target)>? _kittyClipboardAliases;
@@ -2503,6 +2507,10 @@ public class InputHandler
                     HandleClipboard(arg);
                     break;
 
+                case OscCommand.KittyNotification:
+                    HandleKittyNotification(arg);
+                    break;
+
                 case OscCommand.KittyClipboard:
                     HandleKittyClipboard(arg);
                     break;
@@ -2633,6 +2641,159 @@ public class InputHandler
         if (!string.IsNullOrEmpty(data))
         {
             _terminal.RaiseNotificationReceived(data);
+        }
+    }
+
+    /// <summary>
+    /// Handles Kitty desktop notifications (OSC 99).
+    /// </summary>
+    private void HandleKittyNotification(string data)
+    {
+        if (!_terminal.Options.KittyNotificationsEnabled)
+            return;
+
+        RemoveExpiredKittyNotifications();
+        var parts = data.Split(new[] { ';' }, 2);
+        if (parts.Length != 2)
+            return;
+
+        string? identifier = null;
+        var payloadType = "title";
+        string? icon = null;
+        int? urgency = null;
+        var encoded = false;
+        var done = true;
+
+        foreach (var parameter in parts[0].Split(':'))
+        {
+            var keyValue = parameter.Split(new[] { '=' }, 2);
+            if (keyValue.Length != 2)
+                continue;
+
+            switch (keyValue[0])
+            {
+                case "i":
+                    identifier = SanitizeIdentifier(keyValue[1]);
+                    break;
+                case "p":
+                    payloadType = keyValue[1];
+                    break;
+                case "d":
+                    done = keyValue[1] != "0";
+                    break;
+                case "e":
+                    encoded = keyValue[1] == "1";
+                    break;
+                case "u":
+                    // The spec defines exactly 0 (low), 1 (normal) and 2 (critical); anything
+                    // else reads as unspecified, so a host can map the value onto its
+                    // notification API without range-checking a protocol it did not parse.
+                    if (int.TryParse(keyValue[1], out var parsedUrgency) && parsedUrgency is >= 0 and <= 2)
+                        urgency = parsedUrgency;
+                    break;
+                case "n":
+                    icon = DecodeBase64(keyValue[1]);
+                    break;
+            }
+        }
+
+        if (payloadType == "?")
+        {
+            _terminal.RaiseDataReceived($"\u001b]99;i={identifier ?? "0"}:p=?;p=title,body\u001b\\");
+            return;
+        }
+
+        if (payloadType is not ("title" or "body"))
+            return;
+
+        var key = identifier ?? string.Empty;
+        if (!_kittyNotifications.TryGetValue(key, out var notification))
+        {
+            if (!done && _kittyNotifications.Count >= MaxPendingKittyNotifications)
+                return;
+
+            notification = new KittyNotification(identifier);
+            if (!done)
+                _kittyNotifications[key] = notification;
+        }
+
+        var payload = encoded ? DecodeBase64(parts[1]) : SanitizeText(parts[1]);
+        if (payload is null || !notification.Append(payloadType, payload, urgency, icon))
+        {
+            _kittyNotifications.Remove(key);
+            return;
+        }
+
+        if (!done)
+            return;
+
+        _kittyNotifications.Remove(key);
+        if (notification.TryBuild(out var title, out var body))
+            // "If a notification has no title, the body will be used as title" — the spec's own
+            // sentence, honoured here so every host does not rediscover it, and so a host that
+            // hands Title to an OS API requiring one never gets null with content present.
+            if (title is null && body is not null)
+            {
+                title = body;
+                body = null;
+            }
+            _terminal.RaiseKittyNotificationReceived(notification.Identifier, title, body, notification.Urgency, notification.Icon);
+    }
+
+    private void RemoveExpiredKittyNotifications()
+    {
+        var cutoff = DateTime.UtcNow - KittyNotificationTimeout;
+        foreach (var key in _kittyNotifications.Where(entry => entry.Value.LastUpdated < cutoff).Select(entry => entry.Key).ToArray())
+            _kittyNotifications.Remove(key);
+    }
+
+    private static string? DecodeBase64(string value)
+    {
+        try
+        {
+            return SanitizeText(Encoding.UTF8.GetString(Convert.FromBase64String(value)));
+        }
+        catch (FormatException)
+        {
+            return null;
+        }
+    }
+
+    private static string SanitizeIdentifier(string value) =>
+        new(value.Where(character => char.IsAsciiLetterOrDigit(character) || character is '_' or '+' or '.' or '-').Take(1024).ToArray());
+
+    private static string SanitizeText(string value) =>
+        new(value.Where(character => character is not (>= '\0' and <= '\x1f') and not (>= '\x7f' and <= '\x9f')).ToArray());
+
+    private sealed class KittyNotification
+    {
+        private readonly StringBuilder _title = new();
+        private readonly StringBuilder _body = new();
+
+        public KittyNotification(string? identifier) => Identifier = identifier;
+
+        public string? Identifier { get; }
+        public int? Urgency { get; private set; }
+        public string? Icon { get; private set; }
+        public DateTime LastUpdated { get; private set; } = DateTime.UtcNow;
+
+        public bool Append(string payloadType, string payload, int? urgency, string? icon)
+        {
+            if (_title.Length + _body.Length + payload.Length > MaxKittyNotificationBytes)
+                return false;
+
+            (payloadType == "title" ? _title : _body).Append(payload);
+            Urgency ??= urgency;
+            Icon ??= icon;
+            LastUpdated = DateTime.UtcNow;
+            return true;
+        }
+
+        public bool TryBuild(out string? title, out string? body)
+        {
+            title = _title.Length == 0 ? null : _title.ToString();
+            body = _body.Length == 0 ? null : _body.ToString();
+            return title is not null || body is not null;
         }
     }
 

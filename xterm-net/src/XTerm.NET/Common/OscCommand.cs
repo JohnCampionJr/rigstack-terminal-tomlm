@@ -76,6 +76,11 @@ public enum OscCommand
     Clipboard = 52,
 
     /// <summary>
+    /// Kitty desktop notifications.
+    /// Format: OSC 99 ; metadata ; base64-payload ST
+    /// </summary>
+    KittyNotification = 99,
+    /// <summary>
     /// Kitty clipboard operations.
     /// Format: OSC 5522 ; type=read|write:mime=type ; data ST
     /// </summary>

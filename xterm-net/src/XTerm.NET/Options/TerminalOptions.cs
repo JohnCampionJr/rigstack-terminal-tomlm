@@ -152,6 +152,18 @@ public class TerminalOptions : ICloneable
     public bool KittyGraphicsEnabled { get; set; } = true;
 
     /// <summary>
+    /// Whether Kitty desktop notification requests (OSC 99) are honoured.
+    /// </summary>
+    /// <remarks>
+    /// Off by default, unlike the other Kitty gates: those draw inside the terminal surface,
+    /// whereas a notification hands pty-controlled text to an OS-level API on behalf of any
+    /// program that can write to the pty, including a remote host over ssh. A host that is
+    /// prepared to show notifications opts in. While off the terminal also refuses the p=?
+    /// capability query, so a well-behaved application stays quiet rather than notifying
+    /// into the void.
+    /// </remarks>
+    public bool KittyNotificationsEnabled { get; set; }
+    /// <summary>
     /// Whether applications may write to the host clipboard using OSC 52 or Kitty OSC 5522.
     /// </summary>
     public bool ClipboardWriteEnabled { get; set; } = true;
@@ -291,6 +303,7 @@ public class TerminalOptions : ICloneable
         RendererType = other.RendererType;
         SixelEnabled = other.SixelEnabled;
         KittyGraphicsEnabled = other.KittyGraphicsEnabled;
+        KittyNotificationsEnabled = other.KittyNotificationsEnabled;
         ClipboardWriteEnabled = other.ClipboardWriteEnabled;
         ClipboardReadEnabled = other.ClipboardReadEnabled;
         MaxClipboardBytes = other.MaxClipboardBytes;
