@@ -3321,7 +3321,12 @@ public class InputHandler
             return;
 
         _kittyNotifications.Remove(key);
+        // Braces, because their absence changed what this method does: only the inner `if` was
+        // guarded by TryBuild, so a notification that FAILED to build was raised anyway with null
+        // title and null body -- a host handing Title to an OS notification API got null with
+        // nothing to show.
         if (notification.TryBuild(out var title, out var body))
+        {
             // "If a notification has no title, the body will be used as title" — the spec's own
             // sentence, honoured here so every host does not rediscover it, and so a host that
             // hands Title to an OS API requiring one never gets null with content present.
@@ -3330,7 +3335,9 @@ public class InputHandler
                 title = body;
                 body = null;
             }
+
             _terminal.RaiseKittyNotificationReceived(notification.Identifier, title, body, notification.Urgency, notification.Icon);
+        }
     }
 
     private void RemoveExpiredKittyNotifications()
@@ -4486,6 +4493,40 @@ public class InputHandler
 
     /// <summary>The row a cursor moving DOWN stops at: the region's bottom when it starts inside.</summary>
     private int BottomLimit() => InsideScrollRegion() ? _buffer.ScrollBottom : _terminal.Rows - 1;
+
+    /// <summary>
+    /// BS. Left one column, and on reverse wraparound (DECSET 45) off the left edge onto the row
+    /// above.
+    /// </summary>
+    /// <remarks>
+    /// Here rather than beside the other C0 controls so it reads the same margins every other
+    /// cursor motion reads. Bounded at column zero and row zero instead, it walked out of a
+    /// DECSLRM pane and, at the top of a DECSTBM region, into the protected row above it.
+    /// </remarks>
+    internal void Backspace()
+    {
+        // The left margin, not column zero -- the mirror of where CursorBackward stops.
+        var home = CursorInMarginColumns() ? _buffer.ScrollLeft : 0;
+
+        if (_buffer.X > home)
+        {
+            _buffer.SetCursor(_buffer.X - 1, _buffer.Y);
+            return;
+        }
+
+        if (!_terminal.ReverseWraparound)
+            return;
+
+        // TopLimit, so a cursor that starts inside the scrolling region stays in it. Reverse wrap
+        // is what a shell uses to erase a wrapped command line, and that line belongs to the pane
+        // it was typed in.
+        if (_buffer.Y <= TopLimit())
+            return;
+
+        // The right MARGIN, not the screen edge: the row above ends where the pane ends.
+        var right = CursorInMarginColumns() ? _buffer.ScrollRight : _terminal.Cols - 1;
+        _buffer.SetCursor(right, _buffer.Y - 1);
+    }
 
     private void CursorForward(Params parameters)
     {
