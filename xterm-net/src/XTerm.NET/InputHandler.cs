@@ -1,4 +1,6 @@
 using NeoSmart.Unicode;
+using System.Globalization;
+using System.Runtime.CompilerServices;
 using System.Text;
 using Wcwidth;
 using XTerm.Buffer;
@@ -93,6 +95,13 @@ public class InputHandler
     /// </summary>
     private static bool IsCombiningCharacter(int codePoint)
     {
+        // Nothing below U+0300 combines — the marks begin at COMBINING GRAVE ACCENT — so ASCII
+        // and Latin-1, the overwhelming majority of every stream, leave in one compare instead
+        // of reaching the category lookup. Three bench runs put that lookup at ~4% on ASCII-
+        // and CJK-heavy corpora; this is the NoteLinkRun lesson wearing yet another coat.
+        if (codePoint < 0x0300)
+            return false;
+
         // Variation Selectors (U+FE00�U+FE0F)
         if (codePoint >= 0xFE00 && codePoint <= 0xFE0F)
             return true;
@@ -105,26 +114,6 @@ public class InputHandler
         if (codePoint == ZeroWidthJoiner)
             return true;
 
-        // Combining Diacritical Marks (U+0300�U+036F)
-        if (codePoint >= 0x0300 && codePoint <= 0x036F)
-            return true;
-
-        // Combining Diacritical Marks Extended (U+1AB0�U+1AFF)
-        if (codePoint >= 0x1AB0 && codePoint <= 0x1AFF)
-            return true;
-
-        // Combining Diacritical Marks Supplement (U+1DC0�U+1DFF)
-        if (codePoint >= 0x1DC0 && codePoint <= 0x1DFF)
-            return true;
-
-        // Combining Diacritical Marks for Symbols (U+20D0�U+20FF)
-        if (codePoint >= 0x20D0 && codePoint <= 0x20FF)
-            return true;
-
-        // Combining Half Marks (U+FE20�U+FE2F)
-        if (codePoint >= 0xFE20 && codePoint <= 0xFE2F)
-            return true;
-
         // Emoji Modifiers / Skin Tones (U+1F3FB..U+1F3FF)
         //
         // Combining is not decided here alone: a skin tone modifies an EMOJI, and TryAppendToPreviousCell
@@ -134,10 +123,174 @@ public class InputHandler
         if (IsSkinToneModifier(codePoint))
             return true;
 
-        // Keycap combining sequence (U+20E3)
-        if (codePoint == 0x20E3)
-            return true;
+        // Unicode marks in every script, including astral codepoints. SpacingCombiningMark sounds
+        // as though it should advance the cursor, but terminal wcwidth implementations conventionally
+        // give Indic matras in that category width zero and keep them in their base character's cell.
+        return CharUnicodeInfo.GetUnicodeCategory(codePoint) is UnicodeCategory.NonSpacingMark
+            or UnicodeCategory.SpacingCombiningMark
+            or UnicodeCategory.EnclosingMark;
+    }
 
+    /// <summary>
+    /// Hangul jamo class for UAX #29's GB6-GB8: 0 none, 1 L, 2 V, 3 T, 4 LV, 5 LVT. Decomposed
+    /// jamo are ORDINARY text on macOS, whose filesystems store names in NFD — a Korean
+    /// directory listing arrives as L V T sequences, and without these rules each jamo takes a
+    /// cell of its own.
+    /// </summary>
+    private static int HangulClassOf(int codePoint) => codePoint switch
+    {
+        >= 0x1100 and <= 0x115F or >= 0xA960 and <= 0xA97C => 1,             // L
+        >= 0x1160 and <= 0x11A7 or >= 0xD7B0 and <= 0xD7C6 => 2,             // V
+        >= 0x11A8 and <= 0x11FF or >= 0xD7CB and <= 0xD7FB => 3,             // T
+        >= 0xAC00 and <= 0xD7A3 => (codePoint - 0xAC00) % 28 == 0 ? 4 : 5,   // LV / LVT
+        _ => 0,
+    };
+
+    /// <summary>GB6, GB7 and GB8: which jamo classes continue the cluster ending in which.</summary>
+    private static bool HangulJoins(int previousClass, int currentClass) => currentClass switch
+    {
+        1 or 4 or 5 => previousClass is 1,                 // GB6: L x (L | V | LV | LVT)
+        2 => previousClass is 1 or 2 or 4,                 // GB6/GB7: (L | V | LV) x V
+        3 => previousClass is 2 or 3 or 4 or 5,            // GB7/GB8: (V | LV | T | LVT) x T
+        _ => false,
+    };
+
+    /// <summary>
+    /// The conjunct linkers: Indic Syllabic Category Virama plus Invisible Stacker — the 41
+    /// codepoints that fuse a following consonant into their cluster. This is wcwidth 0.8's
+    /// exact set, a superset of UAX #29's InCB Linker eight: the InCB property stops at the
+    /// scripts whose conjuncts UAX #29 refuses to break, but Khmer's coeng, Tai Tham's sakot,
+    /// Javanese's pangkon, Myanmar's stacker and the SMP Brahmic scripts stack consonants the
+    /// same way, and terminals are measured on all of them.
+    /// </summary>
+    private static bool IsConjunctLinker(int codePoint) => codePoint is
+        0x094D or 0x09CD or 0x0A4D or 0x0ACD or 0x0B4D or 0x0BCD or 0x0C4D or 0x0CCD
+        or 0x0D4D or 0x0DCA or 0x1039 or 0x17D2 or 0x1A60 or 0x1B44 or 0x1BAB or 0xA806
+        or 0xA8C4 or 0xA9C0 or 0xAAF6 or 0x10A3F or 0x11046 or 0x110B9 or 0x11133 or 0x111C0
+        or 0x11235 or 0x1134D or 0x113D0 or 0x11442 or 0x114C2 or 0x115BF or 0x1163F or 0x116B6
+        or 0x11839 or 0x1193E or 0x119E0 or 0x11A47 or 0x11A99 or 0x11C3F or 0x11D45 or 0x11D97
+        or 0x11F42;
+
+    /// <summary>
+    /// A letter that can be a conjunct's right-hand side: an Lo in a block whose script has a
+    /// linker. The blocks are exactly the homes of the 41 linkers above. An approximation of
+    /// per-script consonant data that over-accepts only sequences (linker then independent
+    /// vowel) which are malformed in the scripts themselves.
+    /// </summary>
+    private static bool IsConjunctConsonantCandidate(int codePoint) =>
+        IsConjunctScriptBlock(codePoint)
+        && System.Globalization.CharUnicodeInfo.GetUnicodeCategory(codePoint)
+            == System.Globalization.UnicodeCategory.OtherLetter;
+
+    /// <summary>The blocks housing the linker scripts, BMP and SMP.</summary>
+    private static bool IsConjunctScriptBlock(int codePoint) => codePoint switch
+    {
+        >= 0x0900 and <= 0x0DFF => true,     // Devanagari through Sinhala
+        >= 0x1000 and <= 0x109F => true,     // Myanmar
+        >= 0x1780 and <= 0x17FF => true,     // Khmer
+        >= 0x1A20 and <= 0x1AAF => true,     // Tai Tham
+        >= 0x1B00 and <= 0x1BBF => true,     // Balinese, Sundanese
+        >= 0xA800 and <= 0xA82F => true,     // Syloti Nagri
+        >= 0xA880 and <= 0xA8DF => true,     // Saurashtra
+        >= 0xA980 and <= 0xA9DF => true,     // Javanese
+        >= 0xAA60 and <= 0xAA7F => true,     // Myanmar Extended-A
+        >= 0xAAE0 and <= 0xABFF => true,     // Meetei Mayek
+        >= 0x10A00 and <= 0x11FFF => true,   // the SMP Brahmic scripts, Kharoshthi through Kawi
+        _ => false,
+    };
+
+    /// <summary>
+    /// Whether this codepoint might continue the previous cell's cluster under the SEQUENCE
+    /// rules. Runs at BITMAP BUILD TIME only — MayContinueCluster answers the BMP from the
+    /// table and the astral arm never calls this — so it is written for correctness, not speed.
+    /// </summary>
+    private static bool IsSequenceJoinCandidate(int codePoint) =>
+        HangulClassOf(codePoint) != 0 || IsConjunctConsonantCandidate(codePoint);
+
+    /// <summary>
+    /// One bit per BMP codepoint: might it join the previous cell's cluster — the category rules
+    /// or the sequence rules. Built ONCE from the reference predicates below, so the table cannot
+    /// drift from them; it exists because the hot path must not pay a category lookup per
+    /// character, and the corpora that hurt were exactly the ones full of characters no range
+    /// check anticipates — box drawing in TUI redraws, CJK in prose. 8KB, cold half never touched.
+    /// </summary>
+    private static readonly byte[] MayJoinBmp = BuildMayJoinBmp();
+
+    private static byte[] BuildMayJoinBmp()
+    {
+        var table = new byte[0x10000 >> 3];
+        for (var codePoint = 0x0300; codePoint < 0x10000; codePoint++)
+        {
+            if (IsCombiningCharacter(codePoint) || IsSequenceJoinCandidate(codePoint))
+                table[codePoint >> 3] |= (byte)(1 << (codePoint & 7));
+        }
+        return table;
+    }
+
+    /// <summary>
+    /// Whether this codepoint might join the previous cell at all. Print guards the call with an
+    /// inline <c>codePoint &gt;= 0x0300</c> so the ASCII majority never gets here; the BMP —
+    /// every character whose answer is not obvious from its plane — is one load and a mask, and
+    /// only astral codepoints (emoji machinery, already handled by the checks' cheap heads) run
+    /// the predicates directly.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool MayContinueCluster(int codePoint) =>
+        (uint)codePoint < 0x10000
+            ? (MayJoinBmp[codePoint >> 3] & (1 << (codePoint & 7))) != 0
+            : MayContinueClusterAstral(codePoint);
+
+    private static bool MayContinueClusterAstral(int codePoint)
+    {
+        // Astral: the sequence rules are BMP-only, and the joinable astral codepoints are the
+        // Variation Selectors Supplement, the skin tones, and plane-1 script marks (musical,
+        // SignWriting, Adlam...) — every one of which sits BELOW the emoji blocks. So emoji, the
+        // astral characters streams actually carry, resolve in these compares and never reach
+        // the category lookup they were paying ~4% of the unicode corpus for.
+        if (codePoint >= 0xE0100 && codePoint <= 0xE01EF)
+            return true;
+        if (codePoint >= 0xE0020 && codePoint <= 0xE007F)
+            return true;   // TAG characters: they spell out an emoji tag sequence (🏴 gbsct...)
+        if (codePoint >= 0x10A00 && codePoint <= 0x11FFF)
+        {
+            // SMP Brahmic scripts: their marks join like any mark, and their consonants are
+            // conjunct candidates whose context TryAppendToPreviousCell vets.
+            return IsCombiningCharacter(codePoint) || IsConjunctConsonantCandidate(codePoint);
+        }
+        if (IsSkinToneModifier(codePoint))
+            return true;
+        if (codePoint >= 0x1F000)
+            return false;
+        return IsCombiningCharacter(codePoint);
+    }
+
+    /// <summary>
+    /// Whether the sequence rules can refuse this join without touching the buffer: the current
+    /// codepoint is a sequence candidate, the previous printed codepoint is known and still where
+    /// the cursor left it, and the classes do not join. Anything uncertain answers false and
+    /// falls through to <see cref="TryAppendToPreviousCell"/>, whose own context checks remain
+    /// the authority.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private bool RefusesSequenceCheaply(int codePoint)
+    {
+        // The caller already applied the candidate-hull bracket inline, so everything here is
+        // a potential sequence character; marks, VS and ZWJ never reach this method.
+        // The REP tracker is exactly the context needed: stamped after every print and append,
+        // cancelled by the operations that move the cursor, and position-checked here besides —
+        // a stale entry simply fails the match and the full path decides.
+        if (_lastPrinted is not { } lp
+            || lp.Row != _buffer.Y + _buffer.YBase
+            || lp.CursorCol != _buffer.X)
+            return false;                     // context unknown: the full path decides
+        var currentClass = HangulClassOf(codePoint);
+        if (currentClass != 0)
+            return !HangulJoins(HangulClassOf(lp.LastCodePoint), currentClass);
+        if (IsConjunctConsonantCandidate(codePoint))
+        {
+            // A previous ZWJ may hide a linker before it; only the full path can see that far.
+            return !IsConjunctLinker(lp.LastCodePoint) && lp.LastCodePoint != ZeroWidthJoiner;
+        }
         return false;
     }
 
@@ -159,6 +312,22 @@ public class InputHandler
             last = rune.Value;
 
         return last;
+    }
+
+    /// <summary>The rune before the last, for GB9c's linker-then-ZWJ-then-consonant form.</summary>
+    private static int RuneBeforeLastOf(string? content)
+    {
+        if (string.IsNullOrEmpty(content))
+            return 0;
+
+        int beforeLast = 0, last = 0;
+        foreach (var rune in content.EnumerateRunes())
+        {
+            beforeLast = last;
+            last = rune.Value;
+        }
+
+        return beforeLast;
     }
 
     /// <summary>
@@ -225,10 +394,19 @@ public class InputHandler
             // renders as a letter in a box — so it simply stops being the first half of anything.
             _regionalPending = null;
 
-            if (continuesCluster || IsCombiningCharacter(codePoint))
+            // Guarded at the CALL, like the placeholder test above and for the same measured
+            // reason: nothing below U+0300 can combine OR continue a sequence, so ASCII — most of
+            // every frame — pays one inline compare here instead of two real calls answering no.
+            if (continuesCluster || (codePoint >= 0x0300 && MayContinueCluster(codePoint)))
             {
-                // Find the previous cell to combine with
-                if (TryAppendToPreviousCell(data, codePoint))
+                // Find the previous cell to combine with — unless the tracked neighbour already
+                // says no: Korean prose is syllable after non-joining syllable, and each one was
+                // paying the full line fetch below just to be refused.
+                if ((continuesCluster
+                     || (uint)(codePoint - 0x0900) > 0xD7FB - 0x0900   // marks: skip the call, not just the checks
+                     || codePoint == ZeroWidthJoiner                   // inside the hull but never a candidate
+                     || !RefusesSequenceCheaply(codePoint))
+                    && TryAppendToPreviousCell(data, codePoint))
                 {
                     // A ZWJ promises another component after it; remember where, so it can be recognised.
                     if (codePoint == ZeroWidthJoiner)
@@ -455,14 +633,20 @@ public class InputHandler
     /// </remarks>
     private void RememberForRepeat(int codePoint, int clusterId)
     {
-        _lastPrinted = (_buffer.Y + _buffer.YBase, _buffer.X, codePoint, clusterId);
+        _lastPrinted = (_buffer.Y + _buffer.YBase, _buffer.X, codePoint, clusterId, codePoint);
     }
 
     /// <summary>Forgets the preceding character. See <see cref="RememberForRepeat"/> for when.</summary>
     internal void CancelRepeat() => _lastPrinted = null;
 
-    /// <summary>The character last printed, and the cursor position it left behind. See <see cref="RememberForRepeat"/>.</summary>
-    private (int Row, int CursorCol, int CodePoint, int ClusterId)? _lastPrinted;
+    /// <summary>
+    /// The character last printed, and the cursor position it left behind. See
+    /// <see cref="RememberForRepeat"/>. <c>LastCodePoint</c> is the final codepoint of the cell's
+    /// cluster — the base itself until an append replaces it — because the sequence rules in
+    /// <see cref="RefusesSequenceCheaply"/> ask what the cluster ENDS with, while REP repeats the
+    /// whole cluster and reads <c>CodePoint</c>/<c>ClusterId</c>.
+    /// </summary>
+    private (int Row, int CursorCol, int CodePoint, int ClusterId, int LastCodePoint)? _lastPrinted;
 
     /// <summary>
     /// Joins a second regional indicator to the one already at <paramref name="cellX"/>, making the pair a
@@ -757,23 +941,59 @@ public class InputHandler
             return false;
         }
 
+        // The sequence rules (GB6-GB8, GB9c): the current codepoint alone cannot decide these —
+        // whether it continues the cluster depends on what the cluster ENDS with. A refusal here
+        // is not an error; Print gives the character an ordinary cell, exactly as a syllable
+        // following a complete syllable should get. The bracket is the candidate ranges' hull:
+        // ordinary combining marks — most of what ever joins — skip both class tests in one
+        // compare, which the profiler charged this method 3.6 points of the unicode corpus for.
+        var conjunctConsonantJoined = false;
+        if (((uint)(codePoint - 0x0900) <= 0xD7FB - 0x0900 || codePoint >= 0x10A00 && codePoint <= 0x11FFF)
+            && codePoint != ZeroWidthJoiner)
+        {
+            var hangulClass = HangulClassOf(codePoint);
+            if (hangulClass != 0)
+            {
+                if (!HangulJoins(HangulClassOf(LastRuneOf(prevCell.Content)), hangulClass))
+                    return false;
+            }
+            else if (IsConjunctConsonantCandidate(codePoint) && !IsCombiningCharacter(codePoint))
+            {
+                // GB9c: the consonant joins when the cluster ends with a linker — or with a ZWJ
+                // the linker precedes, the explicit-conjunct form. Anything else is a new cluster.
+                var last = LastRuneOf(prevCell.Content);
+                if (!IsConjunctLinker(last)
+                    && !(last == ZeroWidthJoiner && IsConjunctLinker(RuneBeforeLastOf(prevCell.Content))))
+                    return false;
+
+                conjunctConsonantJoined = true;
+            }
+        }
+
         // Append the combining character to the previous cell's content
         var newContent = prevCell.Content + data;
 
-        // Determine if we need to adjust the width
-        int newWidth = prevCell.Width;
-
-        // Handle variation selectors that change presentation
+        // The appended codepoint's own column contribution, computed INCREMENTALLY: re-walking
+        // the whole cluster through the width loop on every append cost the unicode corpus 66%
+        // -- an emoji family re-measured itself once per member. The cases mirror the loop's
+        // branches exactly; a matra or a joined conjunct consonant widens the cell it joins,
+        // because wcwidth arithmetic gives them their columns and every wcwidth-consuming
+        // application lays out on that sum. Clamped to the grid's two columns.
+        var contribution = 0;
         if (codePoint == VariationSelectorEmojiSymbol && prevCell.Width == 1)
-        {
-            // Emoji presentation selector: character becomes width 2
-            newWidth = 2;
-        }
+            contribution = 1;
         else if (codePoint == VariationSelectorTextSymbol && prevCell.Width == 2)
-        {
-            // Text presentation selector: character becomes width 1
-            newWidth = 1;
-        }
+            contribution = -1;
+        else if (conjunctConsonantJoined)
+            contribution = 1;
+        else if (codePoint >= 0x0903 && codePoint < 0x1F000
+                 && CharUnicodeInfo.GetUnicodeCategory(codePoint)
+                 == UnicodeCategory.SpacingCombiningMark
+                 && !IsConjunctLinker(codePoint))
+            // A linker is checked FIRST: Javanese pangkon and Grantha virama are category Mc,
+            // but they are killers, not vowels -- a dead consonant stays one column.
+            contribution = 1;
+        int newWidth = Math.Clamp(prevCell.Width + contribution, 1, 2);
 
         // Create the updated cell
         var updatedCell = new BufferCell
@@ -830,7 +1050,7 @@ public class InputHandler
         // marks would be a different character from the one on screen. Recorded AFTER the width
         // adjustments above, which can move the cursor: recorded any earlier, a variation selector
         // that widened the cell left the saved position stale and silently cancelled the next REP.
-        _lastPrinted = (_buffer.Y + _buffer.YBase, _buffer.X, updatedCell.CodePoint, updatedCell.ClusterId);
+        _lastPrinted = (_buffer.Y + _buffer.YBase, _buffer.X, updatedCell.CodePoint, updatedCell.ClusterId, codePoint);
 
         return true;
     }
@@ -5404,8 +5624,9 @@ public class InputHandler
     /// <para>This is how an application finds out whether a feature is worth using: it asks, and a
     /// terminal that says nothing is one that does not support the query. Emitting a mode without
     /// answering for it would leave well-behaved applications never using it.</para>
-    /// <para>The reply only ever carries 1 (set) or 2 (reset). DEC's other two values — 0 for "not
-    /// recognised" and 4 for "permanently reset" — are never sent, so a mode this terminal keeps no
+    /// <para>Most replies carry 1 (set) or 2 (reset), while a feature that is always active carries
+    /// 3 (permanently set). DEC's other two values — 0 for "not recognised" and 4 for "permanently
+    /// reset" — are never sent, so a mode this terminal keeps no
     /// state for is answered by silence rather than by a report. That costs an application asking
     /// about such a mode its read timeout, where xterm replies 0 straight away, and it is
     /// deliberate: see issue #55. Reporting "reset" for a mode that was accepted and ignored would
@@ -5418,20 +5639,33 @@ public class InputHandler
     {
         var mode = parameters.GetParam(0, 0);
 
-        bool set;
+        int state;
         if (isPrivate)
         {
-            if (!TryGetPrivateModeState(mode, out set))
-                return;
+            if (mode == (int)TerminalMode.GraphemeClustering)
+            {
+                // Clustering is unconditional: DECSET and DECRST cannot change it, so DECRPM's
+                // "permanently set" value is the only truthful capability report.
+                state = 3;
+            }
+            else
+            {
+                if (!TryGetPrivateModeState(mode, out var set))
+                    return;
+                state = set ? 1 : 2;
+            }
         }
-        else if (!TryGetAnsiModeState(mode, out set))
+        else if (TryGetAnsiModeState(mode, out var set))
+        {
+            state = set ? 1 : 2;
+        }
+        else
         {
             return;
         }
 
-        // DECRPM: 1 = set, 2 = reset. The marker is echoed back so the reply answers the question
-        // that was asked -- CSI ? 4 ; 1 $ y is DECSCLM, CSI 4 ; 1 $ y is IRM.
-        var state = set ? 1 : 2;
+        // The marker is echoed back so the reply answers the question that was asked --
+        // CSI ? 4 ; 1 $ y is DECSCLM, CSI 4 ; 1 $ y is IRM.
         var marker = isPrivate ? "?" : string.Empty;
         _terminal.RaiseDataReceived($"\u001b[{marker}{mode};{state}$y");
     }
@@ -6207,7 +6441,11 @@ public class InputHandler
                         // we return the first emoji as the result because terminal doesn't support chaining them
                         break;
 
-                    if (lastWidth > 0)
+                    // Only a WIDE glyph's join un-counts what came before: an emoji family is one
+                    // two-column image however many members it has. A ZWJ between one-column
+                    // letters is an Indic explicit conjunct (ta+virama+ZWJ+pa), where wcwidth
+                    // arithmetic keeps every letter's column -- subtracting made those measure 1.
+                    if (lastWidth == 2)
                         // It joins the glyph before it, which has already been counted.
                         width -= lastWidth;
                     else
@@ -6230,6 +6468,26 @@ public class InputHandler
                     // adjust for the text presentation, which is width 1
                     width--;
                     lastWidth = 1;
+                }
+                else if (rune.Value < 0x1F000     // no Mc exists in or above the emoji blocks
+                         && System.Globalization.CharUnicodeInfo.GetUnicodeCategory(rune.Value)
+                         == System.Globalization.UnicodeCategory.SpacingCombiningMark
+                         && !IsConjunctLinker(rune.Value))
+                {
+                    // SPACING combining marks -- Indic matras -- occupy a column of their own:
+                    // wcwidth has always said 1 for Mc, and every wcwidth-consuming application
+                    // lays text out on that arithmetic. The cluster stays one cell; the cell
+                    // grows. This knowingly diverges from Terminal Unicode Core's "extending a
+                    // cluster will not move the cursor" -- as does kitty, for the same reason.
+                    width += 1;
+                }
+                else if (rune.Value >= 0xE0020 && rune.Value <= 0xE007F)
+                {
+                    // TAG characters (and CANCEL TAG): format characters that spell out an emoji
+                    // tag sequence — the subdivision flags. They occupy no columns whether or not
+                    // anything precedes them; the flag they decorate has already been counted.
+                    // Counting them at their table width made 🏴gbsct eight columns wide, and the
+                    // answer must not depend on which Wcwidth version a host resolves.
                 }
                 else if (lastWidth > 0 &&
                          (rune.Value >= Emoji.SkinTones.Light && rune.Value <= Emoji.SkinTones.Dark ||
