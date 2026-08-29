@@ -64,6 +64,14 @@ namespace Iciclecreek.Terminal
         private (int Line, int Col)? _lastHoverProbe;
         private string? _pendingUrlClick;
 
+        // Pointer-shape (OSC 22) override state, kept apart from the hover pair above because the two
+        // nest: a shape can arrive during a hover and a hover can start over a shape. This is what the
+        // CONTROL's cursor was before the program's first shape took effect, so a reset can put it back
+        // — SetCurrentValue overwrites the local value, so without the snapshot an embedder who wrote
+        // <TerminalView Cursor="IBeam"/> lost it the first time a program reset the shape.
+        private Cursor? _preShapeCursor;
+        private bool _shapeOverridden;
+
         // Process management
         private IPtyConnection? _ptyConnection;
 
@@ -879,6 +887,40 @@ namespace Iciclecreek.Terminal
         public static void RemoveWindowInfoRequestedHandler(Interactive target, EventHandler<WindowInfoRequestedEventArgs> handler) =>
             target.RemoveHandler(WindowInfoRequestedEvent, handler);
 
+        /// <summary>
+        /// A desktop notification requested by the running program (OSC 9 or Kitty OSC 99). The
+        /// terminal cannot post OS notifications itself; the application decides how — or
+        /// whether — to show it. Structured fields are populated for OSC 99; OSC 9 carries only
+        /// <c>Text</c>.
+        /// </summary>
+        public static readonly RoutedEvent<TerminalNotificationEventArgs> NotificationRequestedEvent =
+            RoutedEvent.Register<TerminalView, TerminalNotificationEventArgs>(
+                nameof(NotificationRequested),
+                RoutingStrategies.Bubble);
+
+        public event EventHandler<TerminalNotificationEventArgs> NotificationRequested
+        {
+            add => AddHandler(NotificationRequestedEvent, value);
+            remove => RemoveHandler(NotificationRequestedEvent, value);
+        }
+
+        /// <summary>
+        /// The running program asked for the user's attention (iTerm2 OSC 1337 RequestAttention).
+        /// <see cref="TerminalAttentionEventArgs.Action"/> is the request verbatim: "yes" (bounce
+        /// until focused), "once", "fireworks", or "no" (cancel a pending request) — the
+        /// application owns the dock/taskbar, so the application interprets it.
+        /// </summary>
+        public static readonly RoutedEvent<TerminalAttentionEventArgs> AttentionRequestedEvent =
+            RoutedEvent.Register<TerminalView, TerminalAttentionEventArgs>(
+                nameof(AttentionRequested),
+                RoutingStrategies.Bubble);
+
+        public event EventHandler<TerminalAttentionEventArgs> AttentionRequested
+        {
+            add => AddHandler(AttentionRequestedEvent, value);
+            remove => RemoveHandler(AttentionRequestedEvent, value);
+        }
+
         #endregion
 
         /// <summary>
@@ -1044,6 +1086,11 @@ namespace Iciclecreek.Terminal
             // is how a program "restoring the defaults" ends up with white on black.
             SeedThemeFromBrushes(options.Theme);
 
+            // OSC 22 is opt-in in the emulator, and the opt-in is the host saying it has somewhere to put
+            // the shape: an emulator that answered the support query on its own would leave programs using
+            // shapes that never appear. PointerShapeChanged is wired below, so the yes is true when given.
+            options.PointerShapesEnabled = true;
+
             _terminal = new XT.Terminal(options);
 
             // Seeded here so it is never unset. Render replaces it every frame; this is only what the very
@@ -1089,6 +1136,11 @@ namespace Iciclecreek.Terminal
             _terminal.BellRang += OnTerminalBellRang;
             _terminal.WindowInfoRequested += OnTerminalWindowInfoRequested;
             _terminal.DirectoryChanged += OnTerminalDirectoryChanged;
+            _terminal.ClipboardWriteRequested += OnTerminalClipboardWriteRequested;
+            _terminal.ClipboardReadRequested += OnTerminalClipboardReadRequested;
+            _terminal.NotificationReceived += OnTerminalNotificationReceived;
+            _terminal.AttentionRequested += OnTerminalAttentionRequested;
+            _terminal.PointerShapeChanged += OnTerminalPointerShapeChanged;
             // end window events
 
             // Setup cursor blink timer
@@ -1334,6 +1386,31 @@ namespace Iciclecreek.Terminal
             if (clipboard == null)
                 return;
 
+            // Bracketed paste MIME: with mode 5522 set the paste is ANNOUNCED — the emulator
+            // emits the notification triple and the application fetches the formats it wants
+            // with the token, so nothing is typed into the stream and nothing is bracketed
+            // (the spec forbids sending both for one paste). The formats are read here, up
+            // front, because the redemption arrives later on the pty stream where nothing can
+            // await the OS clipboard.
+            if (_terminal.PasteNotificationMode)
+            {
+                var paste = await BuildPasteAsync(clipboard);
+                if (paste is null)
+                    return;
+
+                // An announced paste REPLACES a selection too, exactly as the classic path below does:
+                // the user pressed Ctrl+V over selected text and expects it gone. Taken and sent before
+                // the announce triple, so the deletion reaches the shell ahead of whatever the
+                // application inserts when it redeems the token. Taking it is also what clears
+                // _terminal.Selection - skipping it left the replaced text still highlighted.
+                var deletion = TakeKeyboardSelectionDeletion();
+                if (deletion.Length > 0)
+                    await SendToPtyAsync(deletion);
+
+                _terminal.Paste(paste);
+                return;
+            }
+
             var text = await clipboard.TryGetTextAsync();
             if (!string.IsNullOrEmpty(text))
             {
@@ -1348,6 +1425,64 @@ namespace Iciclecreek.Terminal
                 // whatever arrives next — the same reason typing does it that way.
                 await SendToPtyAsync(TakeKeyboardSelectionDeletion() + text);
             }
+        }
+
+        /// <summary>
+        /// Reads every clipboard format the paste can offer, NOW, so the later token redemption
+        /// can be served synchronously. Text is offered as text/plain; files as text/uri-list
+        /// (one file URI per line, the drag-and-drop convention); platform formats that already
+        /// look like MIME types ride along untranslated for applications that know them.
+        /// </summary>
+        private static async Task<XT.TerminalPaste?> BuildPasteAsync(IClipboard clipboard)
+        {
+            var mimes = new List<string>();
+            var data = new Dictionary<string, byte[]>();
+
+            // Platform formats whose identifier already IS a MIME type (the norm on X11 and
+            // Wayland) ride along untranslated for applications that know them.
+            try
+            {
+                foreach (var format in await clipboard.GetDataFormatsAsync())
+                {
+                    if (!format.Identifier.Contains('/'))
+                        continue;
+                    var bytesFormat = DataFormat.CreateBytesPlatformFormat(format.Identifier);
+                    if (await clipboard.TryGetValueAsync(bytesFormat) is { } bytes)
+                    {
+                        mimes.Add(format.Identifier);
+                        data[format.Identifier] = bytes;
+                    }
+                }
+            }
+            catch
+            {
+                // An uncooperative clipboard offers whatever the probes below still find.
+            }
+
+            var text = await clipboard.TryGetTextAsync();
+            if (!string.IsNullOrEmpty(text) && !data.ContainsKey("text/plain"))
+            {
+                mimes.Add("text/plain");
+                data["text/plain"] = System.Text.Encoding.UTF8.GetBytes(text);
+            }
+
+            try
+            {
+                if (await clipboard.TryGetFilesAsync() is { Length: > 0 } files && !data.ContainsKey("text/uri-list"))
+                {
+                    var uriList = string.Join('\n', files.Select(f => f.Path.AbsoluteUri));
+                    mimes.Add("text/uri-list");
+                    data["text/uri-list"] = System.Text.Encoding.UTF8.GetBytes(uriList);
+                }
+            }
+            catch
+            {
+                // No files, then.
+            }
+
+            return mimes.Count == 0
+                ? null
+                : new XT.TerminalPaste(mimes, mime => data.TryGetValue(mime, out var bytes) ? bytes : null);
         }
 
         /// <summary>
@@ -1826,6 +1961,11 @@ namespace Iciclecreek.Terminal
             _terminal.WindowFullscreened -= OnTerminalWindowFullscreened;
             _terminal.BellRang -= OnTerminalBellRang;
             _terminal.DirectoryChanged -= OnTerminalDirectoryChanged;
+            _terminal.ClipboardWriteRequested -= OnTerminalClipboardWriteRequested;
+            _terminal.ClipboardReadRequested -= OnTerminalClipboardReadRequested;
+            _terminal.NotificationReceived -= OnTerminalNotificationReceived;
+            _terminal.AttentionRequested -= OnTerminalAttentionRequested;
+            _terminal.PointerShapeChanged -= OnTerminalPointerShapeChanged;
             _terminal.WindowInfoRequested -= OnTerminalWindowInfoRequested;
 
             // A view detached mid-update must not keep the gate closed or the timer alive. The
@@ -1870,6 +2010,11 @@ namespace Iciclecreek.Terminal
             _terminal.WindowFullscreened -= OnTerminalWindowFullscreened;
             _terminal.BellRang -= OnTerminalBellRang;
             _terminal.DirectoryChanged -= OnTerminalDirectoryChanged;
+            _terminal.ClipboardWriteRequested -= OnTerminalClipboardWriteRequested;
+            _terminal.ClipboardReadRequested -= OnTerminalClipboardReadRequested;
+            _terminal.NotificationReceived -= OnTerminalNotificationReceived;
+            _terminal.AttentionRequested -= OnTerminalAttentionRequested;
+            _terminal.PointerShapeChanged -= OnTerminalPointerShapeChanged;
             _terminal.WindowInfoRequested -= OnTerminalWindowInfoRequested;
 
             _terminal.DataReceived += OnTerminalDataReceived;
@@ -1887,6 +2032,11 @@ namespace Iciclecreek.Terminal
             _terminal.WindowFullscreened += OnTerminalWindowFullscreened;
             _terminal.BellRang += OnTerminalBellRang;
             _terminal.DirectoryChanged += OnTerminalDirectoryChanged;
+            _terminal.ClipboardWriteRequested += OnTerminalClipboardWriteRequested;
+            _terminal.ClipboardReadRequested += OnTerminalClipboardReadRequested;
+            _terminal.NotificationReceived += OnTerminalNotificationReceived;
+            _terminal.AttentionRequested += OnTerminalAttentionRequested;
+            _terminal.PointerShapeChanged += OnTerminalPointerShapeChanged;
             _terminal.WindowInfoRequested += OnTerminalWindowInfoRequested;
         }
 
@@ -3752,6 +3902,196 @@ namespace Iciclecreek.Terminal
             // The underline is an overlay drawn after the text runs, so the cached runs stay valid.
             RequestPaint();
         }
+
+        // ---- Host seams for the emulator's clipboard, notification, attention and pointer ----
+        //
+        // Every handler below is raised from Terminal.Write, and the read loop calls that from the pty
+        // READER thread (see StartReading), never the UI thread. So they all marshal, exactly like
+        // OnTerminalBellRang and the window handlers above: SetCurrentValue verifies dispatcher access
+        // and throws off-thread, RaiseEvent does not verify and instead runs an application's handlers
+        // on the reader thread, and Avalonia's Win32 clipboard is thread-affine on the set path. An
+        // exception here unwinds through Terminal.Write into the read loop's catch-all, which ends the
+        // loop - the terminal shows no further output for the rest of its life.
+
+        /// <summary>
+        /// Whether an OSC 52 / Kitty 5522 selection target names the one clipboard a host has.
+        /// </summary>
+        /// <remarks>
+        /// <c>c</c> is the clipboard, and <c>s</c> ("select") is what xterm defaults an empty Pc to
+        /// (<c>s0</c>) — both mean the system clipboard here. The primary and secondary selections
+        /// (<c>p</c>, <c>q</c>) and the cut buffers (<c>0</c>-<c>7</c>) are DECLINED rather than
+        /// aliased onto it: Avalonia has no primary-selection API, and an X11-era program that writes
+        /// primary on every selection change would otherwise replace the user's real clipboard every
+        /// time they dragged over some text.
+        /// </remarks>
+        private static bool IsClipboardTarget(string target)
+            => target.Contains('c') || target.Contains('s');
+
+        /// <summary>
+        /// OSC 52 / Kitty OSC 5522 write: the program put something on the clipboard. Only text
+        /// is forwarded — the one thing every platform clipboard can hold — and empty text is
+        /// the protocol's clear idiom, honoured with an actual clear.
+        /// </summary>
+        private void OnTerminalClipboardWriteRequested(object? sender, XT.Events.TerminalEvents.ClipboardWriteEventArgs e)
+        {
+            if (!IsClipboardTarget(e.Target))
+                return;
+
+            // The WHOLE transfer is searched for the text, not just Formats[0] (which is all
+            // e.MimeType and e.Data are). A Kitty 5522 write carries its formats in transmission
+            // order, so an image/png that led used to make this return and drop the text/plain
+            // behind it. text/plain is preferred over any other text/* for the same reason e.Text
+            // is not used here: e.Text answers with the FIRST text/*, so a transfer leading with an
+            // empty text/html read as the clear idiom and wiped the clipboard the text/plain behind
+            // it was about to fill.
+            var chosen = -1;
+            for (var i = 0; i < e.Formats.Count; i++)
+            {
+                if (e.Formats[i].MimeType == "text/plain") { chosen = i; break; }
+                if (chosen < 0 && e.Formats[i].MimeType.StartsWith("text/", StringComparison.Ordinal))
+                    chosen = i;
+            }
+            if (chosen < 0)
+                return;   // nothing a platform clipboard can hold as text; the transfer is declined whole
+
+            var text = Encoding.UTF8.GetString(e.Formats[chosen].Data);
+            Dispatcher.UIThread.Post(() => _ = WriteToClipboardAsync(text));
+        }
+
+        private async Task WriteToClipboardAsync(string text)
+        {
+            var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
+            if (clipboard is null)
+                return;
+
+            try
+            {
+                if (text.Length == 0)
+                    await clipboard.ClearAsync();
+                else
+                    await clipboard.SetTextAsync(text);
+            }
+            catch
+            {
+                // Awaited rather than discarded so a failure cannot escape as an unobserved task
+                // exception. There is nobody to report it to: the pty stream cannot wait on the OS
+                // clipboard, and the program that asked has no way to be told.
+            }
+        }
+
+        /// <summary>
+        /// OSC 52 / Kitty OSC 5522 read: the program asked for the clipboard. Avalonia's
+        /// clipboard is asynchronous, which is exactly what the emulator's Defer/Respond pair
+        /// exists for — the handler returns immediately and the answer is emitted when the
+        /// await completes. Only reachable when the embedding application opted in via
+        /// <c>Options.ClipboardReadEnabled</c>.
+        /// </summary>
+        /// <remarks>
+        /// Defer() has to happen INLINE, on the reader thread: the emulator reads <c>e.Deferred</c>
+        /// the moment this handler returns, so posting the whole body would read as a decline.
+        /// Everything after it goes to the UI thread, which is both where Avalonia's clipboard is
+        /// thread-affine and the single thread <c>Respond</c> asks to be called from — Kitty 5522
+        /// closes its reply with a plain <c>--outstanding</c>, so two answers landing on two
+        /// thread-pool continuations could interleave the decrement and leave the program waiting
+        /// forever for a DONE that never comes.
+        /// </remarks>
+        private void OnTerminalClipboardReadRequested(object? sender, XT.Events.TerminalEvents.ClipboardReadEventArgs e)
+        {
+            if (!e.MimeType.StartsWith("text/", StringComparison.Ordinal) || !IsClipboardTarget(e.Target))
+                return;   // declined: OSC 52 stays silent, 5522 counts the mime unavailable
+
+            e.Defer();
+            _ = Dispatcher.UIThread.InvokeAsync(() => RespondFromClipboardAsync(e));
+        }
+
+        private async Task RespondFromClipboardAsync(XT.Events.TerminalEvents.ClipboardReadEventArgs e)
+        {
+            string? text;
+            try
+            {
+                // Read here rather than on the reader thread: the visual-tree walk is UI state too.
+                var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
+                text = clipboard is null ? null : await clipboard.TryGetTextAsync();
+            }
+            catch
+            {
+                text = null;   // a locked or unavailable clipboard declines rather than throws
+            }
+
+            // Always answered, even with null: a deferred request the host never completes leaves a
+            // 5522 read hanging, which is what the args' contract warns about.
+            e.Respond(text);
+        }
+
+        private void OnTerminalNotificationReceived(object? sender, XT.Events.TerminalEvents.NotificationEventArgs e) =>
+            Dispatcher.UIThread.Post(() => RaiseEvent(new TerminalNotificationEventArgs(NotificationRequestedEvent, e)));
+
+        private void OnTerminalAttentionRequested(object? sender, XT.Events.TerminalEvents.AttentionRequestedEventArgs e) =>
+            Dispatcher.UIThread.Post(() => RaiseEvent(new TerminalAttentionEventArgs(AttentionRequestedEvent, e.Action)));
+
+        /// <summary>
+        /// Kitty OSC 22: the program chose a pointer shape. The link-hover hand keeps the last
+        /// word while a link is under the pointer — its save/restore already treats the current
+        /// cursor as "whatever the rest of the world wanted", so the program's shape goes into
+        /// the saved slot during a hover and takes effect the moment the hover ends.
+        /// </summary>
+        private void OnTerminalPointerShapeChanged(object? sender, XT.Events.TerminalEvents.PointerShapeEventArgs e)
+        {
+            Dispatcher.UIThread.Post(() =>
+            {
+                var cursor = MapPointerShape(e.Shape);
+
+                // A reset restores what the CONTROL had, not null. MapPointerShape(null) is null, and so
+                // is any name Avalonia has no cursor for, so restoring the mapped value would have made
+                // "the program stopped asking for a shape" mean "the embedder never set a cursor" — a
+                // <c>TerminalView Cursor="IBeam"</c> lost its cursor to the first program that used OSC 22.
+                if (cursor is null)
+                {
+                    if (!_shapeOverridden)
+                        return;
+                    cursor = _preShapeCursor;
+                    _preShapeCursor = null;
+                    _shapeOverridden = false;
+                }
+                else if (!_shapeOverridden)
+                {
+                    // During a hover the control's own cursor is the one the hover saved, not Cursor,
+                    // which is currently the hand.
+                    _preShapeCursor = _cursorOverridden ? _savedCursor : Cursor;
+                    _shapeOverridden = true;
+                }
+
+                if (_cursorOverridden)
+                {
+                    _savedCursor = cursor;
+                    return;
+                }
+                SetCurrentValue(CursorProperty, cursor);
+            });
+        }
+
+        /// <summary>
+        /// Kitty's CSS pointer names onto Avalonia's cursors. Null (protocol reset) and any name
+        /// without an Avalonia counterpart both fall back to null — the control's default
+        /// pointer — because a wrong cursor misleads where a default merely underwhelms.
+        /// </summary>
+        private static Cursor? MapPointerShape(string? shape) => shape switch
+        {
+            "default" => Cursor.Default,
+            "text" or "vertical-text" => new Cursor(StandardCursorType.Ibeam),
+            "pointer" => new Cursor(StandardCursorType.Hand),
+            "help" => new Cursor(StandardCursorType.Help),
+            "wait" or "progress" => new Cursor(StandardCursorType.Wait),
+            "crosshair" or "cell" => new Cursor(StandardCursorType.Cross),
+            "not-allowed" or "no-drop" => new Cursor(StandardCursorType.No),
+            "grab" or "grabbing" or "move" or "all-scroll" => new Cursor(StandardCursorType.SizeAll),
+            "n-resize" or "s-resize" or "ns-resize" or "row-resize" => new Cursor(StandardCursorType.SizeNorthSouth),
+            "e-resize" or "w-resize" or "ew-resize" or "col-resize" => new Cursor(StandardCursorType.SizeWestEast),
+            "ne-resize" or "sw-resize" or "nesw-resize" => new Cursor(StandardCursorType.TopRightCorner),
+            "nw-resize" or "se-resize" or "nwse-resize" => new Cursor(StandardCursorType.TopLeftCorner),
+            "e" or "ne" or "n" or "nw" or "w" or "sw" or "s" or "se" => new Cursor(StandardCursorType.Arrow),
+            _ => null,
+        };
 
         private bool TryGetPrintableChar(KeyEventArgs e, out char character)
         {
