@@ -2861,9 +2861,8 @@ public class InputHandler
                 _terminal.RaiseDataReceived($"\u001b]52;{target};{Convert.ToBase64String(bytes)}\u0007");
             });
             _terminal.RaiseClipboardReadRequested(args);
-            if (args.Data is { } sync)
+            if (args.Data is { } sync && args.Disarm())
             {
-                args.Disarm();
                 _terminal.RaiseDataReceived($"\u001b]52;{target};{Convert.ToBase64String(sync)}\u0007");
             }
             return;

@@ -1252,6 +1252,9 @@ public class Terminal
         DataReceived = null;
         ClipboardWriteRequested = null;
         ClipboardReadRequested = null;
+        CursorStyleChanged = null;
+        SynchronizedOutputChanged = null;
+        BufferChanged = null;
         TitleChanged = null;
         BellRang = null;
         Resized = null;
