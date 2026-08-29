@@ -316,6 +316,77 @@ public class TerminalOptionsTests
         Assert.False(options.DrawBoldTextInBrightColors);
         Assert.True(options.KittyNotificationsEnabled);
     }
+
+    [Fact]
+    public void Clone_CopiesEverySettableProperty()
+    {
+        var options = new TerminalOptions();
+        SetDistinctValues(options);
+
+        var clone = options.Clone();
+
+        AssertPropertiesEqual(options, clone);
+        Assert.NotSame(options.WindowOptions, clone.WindowOptions);
+        Assert.NotSame(options.Theme, clone.Theme);
+        AssertPropertiesEqual(options.WindowOptions, clone.WindowOptions);
+        AssertPropertiesEqual(options.Theme, clone.Theme);
+    }
+
+    private static void SetDistinctValues(object target)
+    {
+        foreach (var property in target.GetType().GetProperties().Where(p => p.CanRead && p.CanWrite))
+        {
+            var current = property.GetValue(target);
+            object? value = property.PropertyType switch
+            {
+                var type when type == typeof(bool) => !(bool)current!,
+                var type when type == typeof(int) => (int)current! + 1,
+                var type when type == typeof(long) => (long)current! + 1,
+                var type when type == typeof(double) => (double)current! + 0.5,
+                var type when type == typeof(string) => (current as string ?? string.Empty) + "-clone",
+                var type when type.IsEnum => Enum.GetValues(type).Cast<object>()
+                    .First(value => !Equals(value, current)),
+                var type when type == typeof(Func<KeyEvent, bool>) => (Func<KeyEvent, bool>)(_ => true),
+
+                // The nested option objects are varied by the recursion below, not here: replacing
+                // the reference would defeat the NotSame checks the caller makes on them.
+                var type when type == typeof(WindowOptions) || type == typeof(ThemeOptions) => current,
+
+                // Anything else stops the test rather than passing it. A type this cannot vary gets
+                // set to the value it already had, so the clone would be compared default against
+                // default and agree whether or not the copy constructor ever touched it -- the
+                // guard reporting success at exactly the moment it stopped guarding. The property
+                // most likely to be forgotten is the one added next, which is also when a new type
+                // is most likely to appear, so the two failures would arrive together and cancel.
+                _ => throw new NotSupportedException(
+                    $"{target.GetType().Name}.{property.Name} is a {property.PropertyType.Name}; "
+                    + "teach SetDistinctValues how to vary it, or this guard silently stops "
+                    + "checking that property.")
+            };
+
+            property.SetValue(target, value);
+        }
+
+        if (target is TerminalOptions options)
+        {
+            SetDistinctValues(options.WindowOptions);
+            SetDistinctValues(options.Theme);
+        }
+    }
+
+    private static void AssertPropertiesEqual(object expected, object actual)
+    {
+        foreach (var property in expected.GetType().GetProperties().Where(p => p.CanRead && p.CanWrite))
+        {
+            if (property.PropertyType is { } type
+                && (type == typeof(WindowOptions) || type == typeof(ThemeOptions)))
+            {
+                continue;
+            }
+
+            Assert.Equal(property.GetValue(expected), property.GetValue(actual));
+        }
+    }
 }
 
 public class WindowOptionsTests
