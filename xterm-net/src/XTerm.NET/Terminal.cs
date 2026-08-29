@@ -978,7 +978,11 @@ public class Terminal
         DataReceived?.Invoke(this, new TerminalEvents.DataEventArgs(data));
 
     internal void RaiseClipboardWriteRequested(string target, string mimeType, byte[] data) =>
-        ClipboardWriteRequested?.Invoke(this, new TerminalEvents.ClipboardWriteEventArgs(target, mimeType, data));
+        RaiseClipboardWriteRequested(target, new[] { new TerminalEvents.ClipboardFormat(mimeType, data) });
+
+    internal void RaiseClipboardWriteRequested(
+        string target, IReadOnlyList<TerminalEvents.ClipboardFormat> formats) =>
+        ClipboardWriteRequested?.Invoke(this, new TerminalEvents.ClipboardWriteEventArgs(target, formats));
 
     internal void RaiseClipboardReadRequested(TerminalEvents.ClipboardReadEventArgs args) =>
         ClipboardReadRequested?.Invoke(this, args);

@@ -374,7 +374,6 @@ public class OscSequenceTests
         terminal.ClipboardReadRequested += (_, e) =>
         {
             e.Respond("cached");
-            e.Handled = true;
             e.Text = "sync";
         };
 
@@ -565,45 +564,52 @@ public class OscSequenceTests
     }
 
     [Fact]
-    public void OscKittyClipboard_Write_MultipleMimeTypesRaiseSeparateRequests()
+    public void OscKittyClipboard_Write_CommitsEveryMimeTypeInOneEvent()
     {
-        // Arrange
-        var terminal = CreateTerminal();
-        var requests = new List<TerminalEvents.ClipboardWriteEventArgs>();
-        terminal.ClipboardWriteRequested += (_, e) => requests.Add(e);
+        // Platform clipboards replace their contents on each set, so the transfer arrives as ONE
+        // event carrying every format — the host builds one data object and commits once.
+        var terminal = new Terminal(new TerminalOptions());
+        var events = new List<TerminalEvents.ClipboardWriteEventArgs>();
+        terminal.ClipboardWriteRequested += (_, e) => events.Add(e);
+        string? response = null;
+        terminal.DataReceived += (_, e) => response = e.Data;
 
-        // Act
-        terminal.Write("\x1B]5522;type=write\x1B\\");
-        terminal.Write("\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;dGV4dA==\x1B\\");
-        terminal.Write("\x1B]5522;type=wdata:mime=dGV4dC9odG1s;PGI+dGV4dDwvYj4=\x1B\\");
-        terminal.Write("\x1B]5522;type=wdata\x1B\\");
+        var plainMime = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("text/plain"));
+        var htmlMime = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("text/html"));
+        terminal.Write("\u001b]5522;type=write:id=w1\u001b\\");
+        terminal.Write($"\u001b]5522;type=wdata:mime={plainMime};{Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("hello"))}\u001b\\");
+        terminal.Write($"\u001b]5522;type=wdata:mime={htmlMime};{Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("<b>hello</b>"))}\u001b\\");
+        terminal.Write("\u001b]5522;type=wdata\u001b\\");
 
-        // Assert
-        Assert.Collection(
-            requests,
-            request => { Assert.Equal("text/plain", request.MimeType); Assert.Equal("text", request.Text); },
-            request => { Assert.Equal("text/html", request.MimeType); Assert.Equal("<b>text</b>", request.Text); });
+        var e = Assert.Single(events);
+        Assert.Equal(2, e.Formats.Count);
+        Assert.Equal("text/plain", e.Formats[0].MimeType);
+        Assert.Equal("hello", System.Text.Encoding.UTF8.GetString(e.Formats[0].Data));
+        Assert.Equal("text/html", e.Formats[1].MimeType);
+        Assert.Equal("<b>hello</b>", System.Text.Encoding.UTF8.GetString(e.Formats[1].Data));
+        Assert.Equal("hello", e.Text);                       // the text/* convenience
+        Assert.Equal("\u001b]5522;type=write:status=DONE:id=w1\u001b\\", response);
     }
 
     [Fact]
-    public void OscKittyClipboard_WriteAlias_RaisesRequestWithTargetData()
+    public void OscKittyClipboard_WriteAlias_RidesTheSameEventWithTargetData()
     {
-        // Arrange
-        var terminal = CreateTerminal();
-        var requests = new List<TerminalEvents.ClipboardWriteEventArgs>();
-        terminal.ClipboardWriteRequested += (_, e) => requests.Add(e);
+        var terminal = new Terminal(new TerminalOptions());
+        var events = new List<TerminalEvents.ClipboardWriteEventArgs>();
+        terminal.ClipboardWriteRequested += (_, e) => events.Add(e);
 
-        // Act
-        terminal.Write("\x1B]5522;type=write\x1B\\");
-        terminal.Write("\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;dGV4dA==\x1B\\");
-        terminal.Write("\x1B]5522;type=walias:mime=dGV4dC9wbGFpbg==;VVRGOF9TVFJJTkc=\x1B\\");
-        terminal.Write("\x1B]5522;type=wdata\x1B\\");
+        var plainMime = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("text/plain"));
+        var aliasList = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("UTF8_STRING"));
+        terminal.Write("\u001b]5522;type=write\u001b\\");
+        terminal.Write($"\u001b]5522;type=wdata:mime={plainMime};{Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("hi"))}\u001b\\");
+        terminal.Write($"\u001b]5522;type=walias:mime={plainMime};{aliasList}\u001b\\");
+        terminal.Write("\u001b]5522;type=wdata\u001b\\");
 
-        // Assert
-        Assert.Collection(
-            requests,
-            request => { Assert.Equal("text/plain", request.MimeType); Assert.Equal("text", request.Text); },
-            request => { Assert.Equal("UTF8_STRING", request.MimeType); Assert.Equal("text", request.Text); });
+        var e = Assert.Single(events);
+        Assert.Equal(2, e.Formats.Count);
+        Assert.Equal("text/plain", e.Formats[0].MimeType);
+        Assert.Equal("UTF8_STRING", e.Formats[1].MimeType);
+        Assert.Equal(e.Formats[0].Data, e.Formats[1].Data);  // the alias shares the target's bytes
     }
 
     [Fact]
@@ -636,7 +642,7 @@ public class OscSequenceTests
         terminal.Write("\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;dHc=\x1B\\");
 
         // Assert
-        Assert.Equal("\x1B]5522;type=write:status=EFBIG:id=w1\x1B\\", response);
+        Assert.Equal("\x1B]5522;type=write:status=EIO:id=w1\x1B\\", response);
     }
 
     [Fact]
@@ -652,7 +658,7 @@ public class OscSequenceTests
         terminal.Write("\x1B]5522;type=walias:mime=dGV4dC9wbGFpbg==;VVRGOF9TVFJJTkc=\x1B\\");
 
         // Assert
-        Assert.Equal("\x1B]5522;type=write:status=EFBIG:id=w1\x1B\\", response);
+        Assert.Equal("\x1B]5522;type=write:status=EIO:id=w1\x1B\\", response);
     }
 
     [Fact]
@@ -670,7 +676,7 @@ public class OscSequenceTests
         terminal.Write("\x1B]5522;type=wdata:mime=dGV4dC9j;\x1B\\");
 
         // Assert
-        Assert.Equal("\x1B]5522;type=write:status=EFBIG:id=w1\x1B\\", response);
+        Assert.Equal("\x1B]5522;type=write:status=EIO:id=w1\x1B\\", response);
     }
 
     [Fact]

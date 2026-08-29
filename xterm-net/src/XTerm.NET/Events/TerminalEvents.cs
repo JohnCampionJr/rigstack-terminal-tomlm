@@ -23,19 +23,52 @@ public static class TerminalEvents
     /// <summary>
     /// Clipboard data supplied by an application.
     /// </summary>
+    /// <summary>One format of a clipboard transfer: a MIME type and its bytes.</summary>
+    public readonly record struct ClipboardFormat(string MimeType, byte[] Data);
+
+    /// <summary>
+    /// Clipboard data supplied by an application — raised ONCE per transfer, carrying every
+    /// format, because platform clipboards replace their contents on each set: a host must build
+    /// one data object from the whole list and commit it once, or a multi-format transfer would
+    /// survive only as whichever format happened to be set last. OSC 52 transfers carry a single
+    /// text/plain format; a Kitty OSC 5522 transfer carries each transmitted MIME type in the
+    /// order it first appeared, followed by its aliases sharing the same bytes.
+    /// </summary>
     public class ClipboardWriteEventArgs : EventArgs
     {
-        public ClipboardWriteEventArgs(string target, string mimeType, byte[] data)
+        public ClipboardWriteEventArgs(string target, IReadOnlyList<ClipboardFormat> formats)
         {
             Target = target;
-            MimeType = mimeType;
-            Data = data;
+            Formats = formats;
         }
 
         public string Target { get; }
-        public string MimeType { get; }
-        public byte[] Data { get; }
-        public string Text => System.Text.Encoding.UTF8.GetString(Data);
+
+        /// <summary>Every format in the transfer. Never empty.</summary>
+        public IReadOnlyList<ClipboardFormat> Formats { get; }
+
+        /// <summary>The first format's MIME type — the whole transfer, for single-format writes.</summary>
+        public string MimeType => Formats[0].MimeType;
+
+        /// <summary>The first format's bytes.</summary>
+        public byte[] Data => Formats[0].Data;
+
+        /// <summary>
+        /// The transfer's text: the first <c>text/*</c> format decoded as UTF-8, or the first
+        /// format when none is text. Empty text requests clearing the selection.
+        /// </summary>
+        public string Text
+        {
+            get
+            {
+                foreach (var format in Formats)
+                {
+                    if (format.MimeType.StartsWith("text/", StringComparison.Ordinal))
+                        return System.Text.Encoding.UTF8.GetString(format.Data);
+                }
+                return System.Text.Encoding.UTF8.GetString(Formats[0].Data);
+            }
+        }
     }
 
     /// <summary>

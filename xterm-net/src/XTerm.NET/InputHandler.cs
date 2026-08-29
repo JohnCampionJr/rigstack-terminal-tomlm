@@ -2950,16 +2950,24 @@ public class InputHandler
                     return;
                 }
             }
+            // ONE event for the whole transfer. Platform clipboards replace their contents on
+            // each set, so per-format events could never be committed atomically: the host needs
+            // the complete map to build one data object and set it once.
+            var formats = new List<Events.TerminalEvents.ClipboardFormat>();
             foreach (var (completedMimeType, clipboardData) in _kittyClipboardData)
-                _terminal.RaiseClipboardWriteRequested(_kittyClipboardTarget!, completedMimeType, [.. clipboardData]);
+                formats.Add(new Events.TerminalEvents.ClipboardFormat(completedMimeType, [.. clipboardData]));
             foreach (var (alias, target) in _kittyClipboardAliases)
             {
                 if (_kittyClipboardData.TryGetValue(target, out var clipboardData))
                 {
-                    _terminal.RaiseClipboardWriteRequested(_kittyClipboardTarget!, alias, [.. clipboardData]);
+                    formats.Add(new Events.TerminalEvents.ClipboardFormat(alias, [.. clipboardData]));
                 }
             }
+            // State reset BEFORE the raise: a host handler that throws must surface (that is the
+            // contract), and it must not leave a half-committed transfer armed behind it.
+            var transferTarget = _kittyClipboardTarget!;
             ResetKittyClipboard();
+            _terminal.RaiseClipboardWriteRequested(transferTarget, formats);
             RaiseKittyClipboardResponse("write", "DONE", id);
             return;
         }
@@ -2990,7 +2998,7 @@ public class InputHandler
             {
                 var id = _kittyClipboardId;
                 ResetKittyClipboard();
-                RaiseKittyClipboardResponse("write", "EFBIG", id);
+                RaiseKittyClipboardResponse("write", "EIO", id);
                 return;
             }
             base64 = new StringBuilder();
@@ -3004,7 +3012,7 @@ public class InputHandler
             {
                 var id = _kittyClipboardId;
                 ResetKittyClipboard();
-                RaiseKittyClipboardResponse("write", "EFBIG", id);
+                RaiseKittyClipboardResponse("write", "EIO", id);
                 return;
             }
             _kittyClipboardData[mimeType].AddRange(chunk);
@@ -3014,7 +3022,7 @@ public class InputHandler
         {
             var id = _kittyClipboardId;
             ResetKittyClipboard();
-            RaiseKittyClipboardResponse("write", "EFBIG", id);
+            RaiseKittyClipboardResponse("write", "EIO", id);
             return;
         }
 
@@ -3085,6 +3093,11 @@ public class InputHandler
             RaiseKittyClipboardResponse("read", "DONE", id);
         }
 
+        // ONE completion path per mime: the armed callback. A synchronous answer is fed through
+        // it by the Respond below; a handler that already called Respond from inside the handler
+        // disarmed it, so that Respond is a no-op and the answer counts exactly once — the
+        // counter cannot go negative and the reply cannot be delivered twice or hang.
+        outstanding = requestedMimeTypes.Length;
         for (var i = 0; i < requestedMimeTypes.Length; i++)
         {
             var index = i;
@@ -3096,15 +3109,8 @@ public class InputHandler
                     Deliver();
             });
             _terminal.RaiseClipboardReadRequested(args);
-            if (args.Deferred)
-            {
-                outstanding++;
-            }
-            else
-            {
-                args.Disarm();
-                answers[index] = args.Data;
-            }
+            if (!args.Deferred)
+                args.Respond(args.Data);
         }
 
         dispatched = true;
@@ -3140,7 +3146,7 @@ public class InputHandler
         {
             var id = _kittyClipboardId;
             ResetKittyClipboard();
-            RaiseKittyClipboardResponse("write", "EFBIG", id);
+            RaiseKittyClipboardResponse("write", "EIO", id);
             return;
         }
 
