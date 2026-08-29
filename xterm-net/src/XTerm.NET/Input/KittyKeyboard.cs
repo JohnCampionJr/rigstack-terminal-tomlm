@@ -395,7 +395,12 @@ public static class KittyKeyboard
     /// True when the host treats macOS Option as Alt, so an Option-composed key name ("ƒ") is
     /// unwound to the letter under it via <see cref="KeyEvent.Code"/>.
     /// </param>
-    /// <returns>The bytes to send, or null when this event sends nothing.</returns>
+    /// <returns>
+    /// The bytes to send, or null when the event is suppressed or has a mode-dependent legacy
+    /// encoding. <see cref="Terminal.GenerateKittyKeyInput"/> performs that legacy hand-off;
+    /// a caller using this method on its own must do the same, asking
+    /// <see cref="TryGetLegacyKey"/> which of the two a null means.
+    /// </returns>
     public static string? Evaluate(
         KeyEvent ev,
         KittyKeyboardFlags flags,
@@ -478,7 +483,58 @@ public static class KittyKeyboard
             return ev.AltKey ? "\u001b" + text : text;
         }
 
+        // Some functional keys have no legacy encoding at all. Even when the active flags only
+        // request alternate keys or associated text, returning null would make these key presses
+        // disappear. Their assigned CSI-u codepoint is the only representation available.
+        // Functional keys that DO have a legacy form deliberately fall through: Terminal owns
+        // the legacy generator and can preserve mode-dependent details such as application keypad.
+        if (isFunc && !TryGetLegacyKey(ev, out _))
+            return BuildCsiUSequence(ev, keyCode.Value, modifiers, eventType, flags, isFunc, isMod);
+
         return null;
+    }
+
+    /// <summary>
+    /// Maps the functional keys whose bytes come from the legacy terminal modes.
+    /// </summary>
+    /// <remarks>
+    /// Public because it is half of <see cref="Evaluate"/>'s contract, not an implementation
+    /// detail: a null from <see cref="Evaluate"/> means either "send nothing" or "this key is
+    /// encoded by the legacy modes", and this predicate is the only way to tell the two apart.
+    /// Hosts driving a <see cref="Terminal"/> do not need it -- <see
+    /// cref="Terminal.GenerateKittyKeyInput"/> makes the hand-off for them -- but a caller using
+    /// <see cref="Evaluate"/> on its own cannot implement the protocol without it.
+    /// </remarks>
+    /// <param name="ev">The keyboard event to classify.</param>
+    /// <param name="key">The legacy key to encode, when this returns true.</param>
+    /// <returns>True when the event must be encoded by the legacy keyboard generator.</returns>
+    public static bool TryGetLegacyKey(KeyEvent ev, out Key key)
+    {
+        if (ev.Key == "Escape")
+        {
+            key = Key.Escape;
+            return true;
+        }
+
+        if (ev.Code == "NumpadEnter")
+        {
+            key = Key.KeypadEnter;
+            return true;
+        }
+
+        if (ev.Key.Length is 3 or 4
+            && ev.Key[0] == 'F'
+            && int.TryParse(ev.Key.AsSpan(1), out var number))
+        {
+            if (number is >= 13 and <= 20)
+            {
+                key = (Key)((int)Key.F13 + number - 13);
+                return true;
+            }
+        }
+
+        key = default;
+        return false;
     }
 
     /// <summary>
