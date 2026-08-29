@@ -1,5 +1,6 @@
 using XTerm;
 using XTerm.Common;
+using XTerm.Events;
 using XTerm.Options;
 
 namespace XTerm.Tests;
@@ -250,30 +251,237 @@ public class OscSequenceTests
     }
 
     [Fact]
-    public void OscClipboard_Query_RespondsWithEmptyData()
+    public void OscClipboard_Query_IsIgnoredByDefault()
     {
         // Arrange
         var terminal = CreateTerminal();
         string? response = null;
+        var readRequested = false;
         terminal.DataReceived += (sender, e) => response = e.Data;
+        terminal.ClipboardReadRequested += (_, _) => readRequested = true;
 
         // Act
         terminal.Write("\x1B]52;c;?\x07");
 
         // Assert
-        Assert.NotNull(response);
-        Assert.Contains("]52;c;", response);
+        Assert.Null(response);
+        Assert.False(readRequested);
     }
 
     [Fact]
-    public void OscClipboard_SetData_DoesNotThrow()
+    public void OscClipboard_SetData_RaisesWriteRequest()
     {
         // Arrange
         var terminal = CreateTerminal();
+        TerminalEvents.ClipboardWriteEventArgs? request = null;
+        terminal.ClipboardWriteRequested += (_, e) => request = e;
         var base64Data = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("Hello, World!"));
 
-        // Act & Assert - Should not throw
+        // Act
         terminal.Write($"\x1B]52;c;{base64Data}\x07");
+
+        // Assert
+        Assert.NotNull(request);
+        Assert.Equal("c", request.Target);
+        Assert.Equal("Hello, World!", request.Text);
+    }
+
+    [Fact]
+    public void OscClipboard_Query_WhenEnabledAndHandled_ReturnsClipboardText()
+    {
+        // Arrange
+        var terminal = CreateTerminal();
+        terminal.Options.ClipboardReadEnabled = true;
+        string? response = null;
+        terminal.ClipboardReadRequested += (_, e) =>
+        {
+            Assert.Equal("p", e.Target);
+            e.Text = "Hello, World!";
+            e.Handled = true;
+        };
+        terminal.DataReceived += (_, e) => response = e.Data;
+
+        // Act
+        terminal.Write("\x1B]52;p;?\x07");
+
+        // Assert
+        Assert.Equal("\x1B]52;p;SGVsbG8sIFdvcmxkIQ==\x07", response);
+    }
+
+    [Fact]
+    public void OscClipboard_Query_CanBeAnsweredAfterTheHandlerReturns()
+    {
+        // The async-host path: an Avalonia clipboard is awaited, so the handler returns first
+        // and answers later. The response must be byte-identical to the synchronous one.
+        var terminal = new Terminal(new TerminalOptions { ClipboardReadEnabled = true });
+        string? response = null;
+        terminal.DataReceived += (_, e) => response = e.Data;
+        TerminalEvents.ClipboardReadEventArgs? pending = null;
+        terminal.ClipboardReadRequested += (_, e) => pending = e;
+
+        terminal.Write("\u001b]52;c;?\u0007");
+        Assert.Null(response);                        // nothing answered yet...
+        pending!.Respond("deferred");
+        Assert.Equal("\u001b]52;c;ZGVmZXJyZWQ=\u0007", response);
+
+        response = null;
+        pending.Respond("again");                     // a second call is ignored
+        Assert.Null(response);
+    }
+
+    [Fact]
+    public void OscClipboard_DeferredDecline_StaysSilent()
+    {
+        var terminal = new Terminal(new TerminalOptions { ClipboardReadEnabled = true });
+        string? response = null;
+        terminal.DataReceived += (_, e) => response = e.Data;
+        TerminalEvents.ClipboardReadEventArgs? pending = null;
+        terminal.ClipboardReadRequested += (_, e) => pending = e;
+
+        terminal.Write("\u001b]52;c;?\u0007");
+        pending!.Respond(null);
+        Assert.Null(response);
+    }
+
+    [Fact]
+    public void OscClipboard_RespondInsideTheHandlerPlusHandled_EmitsOnce()
+    {
+        // Off-contract but easy to write: a handler that serves from a cache calls Respond
+        // synchronously AND sets Handled. The single-response guarantee must hold — whoever
+        // claims the response first wins, and the other path stays silent.
+        var terminal = new Terminal(new TerminalOptions { ClipboardReadEnabled = true });
+        var responses = new List<string>();
+        terminal.DataReceived += (_, e) => responses.Add(e.Data);
+        terminal.ClipboardReadRequested += (_, e) =>
+        {
+            e.Respond("cached");
+            e.Handled = true;
+            e.Text = "sync";
+        };
+
+        terminal.Write("\u001b]52;c;?\u0007");
+
+        Assert.Single(responses);
+        Assert.Equal("\u001b]52;c;Y2FjaGVk\u0007", responses[0]);
+    }
+
+    [Fact]
+    public void OscClipboard_SyncAnswerDisarmsRespond()
+    {
+        // Handled synchronously answers as the handler returns; Respond afterwards must not
+        // produce a SECOND response.
+        var terminal = new Terminal(new TerminalOptions { ClipboardReadEnabled = true });
+        var responses = new List<string>();
+        terminal.DataReceived += (_, e) => responses.Add(e.Data);
+        TerminalEvents.ClipboardReadEventArgs? pending = null;
+        terminal.ClipboardReadRequested += (_, e) => { e.Handled = true; e.Text = "sync"; pending = e; };
+
+        terminal.Write("\u001b]52;c;?\u0007");
+        pending!.Respond("late");
+        Assert.Single(responses);
+        Assert.Equal("\u001b]52;c;c3luYw==\u0007", responses[0]);
+    }
+
+    [Fact]
+    public void OscClipboard_Query_WhenEnabledAndDeclined_DoesNotRespond()
+    {
+        // Arrange
+        var terminal = CreateTerminal();
+        terminal.Options.ClipboardReadEnabled = true;
+        string? response = null;
+        var raised = false;
+        terminal.ClipboardReadRequested += (_, e) =>
+        {
+            raised = true;
+            Assert.Equal("s", e.Target);
+        };
+        terminal.DataReceived += (_, e) => response = e.Data;
+
+        // Act
+        terminal.Write("\x1B]52;s;?\x07");
+
+        // Assert
+        Assert.True(raised);
+        Assert.Null(response);
+    }
+
+    [Fact]
+    public void OscClipboard_SetInvalidData_RaisesClearRequest()
+    {
+        // Arrange
+        var terminal = CreateTerminal();
+        TerminalEvents.ClipboardWriteEventArgs? request = null;
+        terminal.ClipboardWriteRequested += (_, e) => request = e;
+
+        // Act
+        terminal.Write("\x1B]52;c;!\x07");
+
+        // Assert
+        Assert.NotNull(request);
+        Assert.Equal("c", request.Target);
+        Assert.Equal(string.Empty, request.Text);
+    }
+
+    [Fact]
+    public void OscClipboard_EmptyTarget_DefaultsToSelectionZero()
+    {
+        // Arrange
+        var terminal = CreateTerminal();
+        TerminalEvents.ClipboardWriteEventArgs? request = null;
+        terminal.ClipboardWriteRequested += (_, e) => request = e;
+        var base64Data = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("Hello, World!"));
+
+        // Act
+        terminal.Write($"\x1B]52;;{base64Data}\x07");
+
+        // Assert
+        Assert.NotNull(request);
+        Assert.Equal("s0", request.Target);
+    }
+
+    [Fact]
+    public void OscClipboard_InvalidTarget_IsIgnored()
+    {
+        // Arrange
+        var terminal = CreateTerminal();
+        var raised = false;
+        terminal.ClipboardWriteRequested += (_, _) => raised = true;
+        var base64Data = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("Hello, World!"));
+
+        // Act
+        terminal.Write($"\x1B]52;x;{base64Data}\x07");
+
+        // Assert
+        Assert.False(raised);
+    }
+
+    [Fact]
+    public void OscClipboard_SetData_PropagatesHostExceptions()
+    {
+        // Arrange
+        var terminal = CreateTerminal();
+        terminal.ClipboardWriteRequested += (_, _) => throw new InvalidOperationException();
+        var base64Data = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("Hello, World!"));
+
+        // Act & Assert
+        Assert.Throws<InvalidOperationException>(() => terminal.Write($"\x1B]52;c;{base64Data}\x07"));
+    }
+
+    [Fact]
+    public void OscClipboard_SetData_WhenDisabled_IsIgnored()
+    {
+        // Arrange
+        var terminal = CreateTerminal();
+        terminal.Options.ClipboardWriteEnabled = false;
+        var raised = false;
+        terminal.ClipboardWriteRequested += (_, _) => raised = true;
+        var base64Data = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("Hello, World!"));
+
+        // Act
+        terminal.Write($"\x1B]52;s;{base64Data}\x07");
+
+        // Assert
+        Assert.False(raised);
     }
 
     [Fact]

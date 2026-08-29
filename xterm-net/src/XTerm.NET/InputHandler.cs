@@ -2824,31 +2824,56 @@ public class InputHandler
 
         if (parts.Length >= 2)
         {
-            var target = parts[0]; // Usually 'c' for clipboard, 'p' for primary
+            var target = parts[0];
             var clipdata = parts[1];
+            if (target.Length == 0)
+            {
+                target = "s0";
+            }
+            else if (target.Any(selection => selection is not ('c' or 'p' or 'q' or 's') &&
+                                               (selection < '0' || selection > '7')))
+            {
+                return;
+            }
 
             if (clipdata == "?")
             {
-                // Query clipboard - respond with clipboard content
-                // Format: OSC 52 ; c ; base64data ST
-                // For security, many terminals don't support this
-                // We'll send an empty response
-                _terminal.RaiseDataReceived($"\u001b]52;{target};\u0007");
+                if (!_terminal.Options.ClipboardReadEnabled)
+                    return;
+
+                // Armed BEFORE the handler runs, so a host whose clipboard is asynchronous can
+                // let the handler return and answer later via Respond — the response format is
+                // the same either way, and null (or never calling) is the same silence an
+                // unhandled request produces.
+                var args = new Events.TerminalEvents.ClipboardReadEventArgs(target);
+                args.Arm(text =>
+                {
+                    if (text is null)
+                        return;
+                    var deferredEncoded = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(text));
+                    _terminal.RaiseDataReceived($"\u001b]52;{target};{deferredEncoded}\u0007");
+                });
+                _terminal.RaiseClipboardReadRequested(args);
+                if (args.Handled && args.Disarm())
+                {
+                    var encoded = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(args.Text ?? string.Empty));
+                    _terminal.RaiseDataReceived($"\u001b]52;{target};{encoded}\u0007");
+                }
             }
-            else
+            else if (_terminal.Options.ClipboardWriteEnabled)
             {
-                // Set clipboard
+                string text;
                 try
                 {
                     var decoded = Convert.FromBase64String(clipdata);
-                    var text = System.Text.Encoding.UTF8.GetString(decoded);
-                    // TODO: Integrate with system clipboard
-                    // For now, we just acknowledge receipt
+                    text = System.Text.Encoding.UTF8.GetString(decoded);
                 }
-                catch
+                catch (FormatException)
                 {
-                    // Invalid base64 or encoding
+                    text = string.Empty;
                 }
+
+                _terminal.RaiseClipboardWriteRequested(target, text);
             }
         }
     }

@@ -216,6 +216,78 @@ public static class TerminalEvents
     }
 
     /// <summary>
+    /// Clipboard write event - fired for an enabled OSC 52 clipboard write request.
+    /// </summary>
+    public class ClipboardWriteEventArgs : EventArgs
+    {
+        public ClipboardWriteEventArgs(string target, string text)
+        {
+            Target = target;
+            Text = text;
+        }
+
+        /// <summary>The requested clipboard selection.</summary>
+        public string Target { get; }
+
+        /// <summary>The decoded UTF-8 clipboard text; empty text requests clearing the selection.</summary>
+        public string Text { get; }
+    }
+
+    /// <summary>
+    /// Clipboard read request event - fired for an enabled OSC 52 clipboard read request.
+    /// </summary>
+    public class ClipboardReadEventArgs : EventArgs
+    {
+        public ClipboardReadEventArgs(string target)
+        {
+            Target = target;
+        }
+
+        /// <summary>The requested clipboard selection.</summary>
+        public string Target { get; }
+
+        /// <summary>Set to true to return <see cref="Text"/> to the application.</summary>
+        public bool Handled { get; set; }
+
+        /// <summary>The clipboard text to return when <see cref="Handled"/> is true.</summary>
+        public string? Text { get; set; }
+
+        private Action<string?>? _respond;
+
+        /// <summary>
+        /// Answers the read AFTER the handler has returned — the path for hosts whose clipboard
+        /// API is asynchronous, where blocking the handler would deadlock the UI thread. A
+        /// terminal-to-application message is legal at any time, so the response is simply
+        /// emitted when this is called. Null declines: the terminal stays silent, exactly as an
+        /// unhandled request does. Call it from the thread the terminal is driven on. Setting
+        /// <see cref="Handled"/> synchronously wins: the response goes out as the handler
+        /// returns, and a later call here is ignored, as is a second call.
+        /// </summary>
+        public void Respond(string? text)
+        {
+            var respond = _respond;
+            _respond = null;
+            respond?.Invoke(text);
+        }
+
+        /// <summary>Installs what <see cref="Respond"/> emits; disarmed once used or once the
+        /// synchronous path has answered.</summary>
+        internal void Arm(Action<string?> respond) => _respond = respond;
+
+        /// <summary>
+        /// Claims the response for the synchronous path. False when <see cref="Respond"/> already
+        /// answered — a handler that responds from inside the handler AND sets Handled must still
+        /// produce exactly one response, so the loser of this claim stays silent.
+        /// </summary>
+        internal bool Disarm()
+        {
+            var wasArmed = _respond is not null;
+            _respond = null;
+            return wasArmed;
+        }
+    }
+
+    /// <summary>
     /// Raw OSC event - fired for EVERY OSC sequence the parser completes, including ones this
     /// library does not implement.
     /// </summary>

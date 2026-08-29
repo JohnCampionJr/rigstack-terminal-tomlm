@@ -37,6 +37,8 @@ public class TerminalOptionsTests
         Assert.False(options.MacOptionIsMeta);
         Assert.True(options.RightClickSelectsWord);
         Assert.Equal(RendererType.Canvas, options.RendererType);
+        Assert.True(options.ClipboardWriteEnabled);
+        Assert.False(options.ClipboardReadEnabled);
         Assert.NotNull(options.WindowOptions);
         Assert.NotNull(options.Theme);
         Assert.Equal(1, options.MinimumContrastRatio);
@@ -172,7 +174,9 @@ public class TerminalOptionsTests
             Scrollback = 2000,
             BellSound = true,
             CursorBlink = true,
-            FontFamily = "Test Font"
+            FontFamily = "Test Font",
+            ClipboardWriteEnabled = false,
+            ClipboardReadEnabled = true
         };
 
         // Act
@@ -185,6 +189,8 @@ public class TerminalOptionsTests
         Assert.Equal(options.BellSound, clone.BellSound);
         Assert.Equal(options.CursorBlink, clone.CursorBlink);
         Assert.Equal(options.FontFamily, clone.FontFamily);
+        Assert.Equal(options.ClipboardWriteEnabled, clone.ClipboardWriteEnabled);
+        Assert.Equal(options.ClipboardReadEnabled, clone.ClipboardReadEnabled);
 
         // Verify independence
         clone.Cols = 120;
