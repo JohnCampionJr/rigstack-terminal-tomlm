@@ -180,6 +180,9 @@ public enum CsiCommand
     /// </summary>
     RequestMode,
 
+    /// <summary>DECRQCRA -- request a checksum of a rectangular area (CSI Pid;Pp;Pt;Pl;Pb;Pr * y).</summary>
+    RequestChecksumRectangularArea,
+
     /// <summary>
     /// Set Kitty keyboard protocol flags (CSI = Ps ; Pm u).
     /// </summary>

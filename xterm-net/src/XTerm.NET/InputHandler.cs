@@ -666,6 +666,10 @@ public partial class InputHandler
                 CharAttributes(parameters);
                 break;
 
+            case CsiCommand.RequestChecksumRectangularArea:
+                RequestChecksumRectangularArea(parameters);
+                break;
+
             case CsiCommand.DeviceStatusReport:
                 DeviceStatusReport(parameters, isPrivate);
                 break;

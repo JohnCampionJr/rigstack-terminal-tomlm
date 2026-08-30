@@ -1294,4 +1294,60 @@ public partial class InputHandler
 
     /// <summary>Restores the rendition state consumed by printing and background erasure.</summary>
     internal void ResetAttributes() => _curAttr = AttributeData.Default;
+    /// <summary>
+    /// DECRQCRA -- reports a 16-bit checksum of a rectangular area of the screen, as
+    /// <c>DCS Pid ! ~ XXXX ST</c>. The one sequence esctest builds every content assertion on:
+    /// it reads single cells back through this, so a terminal without it cannot be conformance-
+    /// tested at all.
+    /// </summary>
+    /// <remarks>
+    /// <para>The sum follows the DEC/xterm convention esctest's default expects: each cell
+    /// contributes its character's codepoints, a cell that holds nothing contributes a SPACE --
+    /// erased and never-written alike, which is also what lets DEC's trailing-blank trimming be
+    /// reasoned away by the client -- and the report carries the NEGATED total (0x10000 - sum),
+    /// which is what xterm sent before patch #279 and what esctest's default
+    /// <c>--xterm-checksum 0</c> undoes on its side.</para>
+    /// <para>Attributes deliberately contribute nothing. esctest compares a cell's checksum to
+    /// the bare codepoint of the character it expects, so a weight per attribute bit would fail
+    /// every assertion on styled text.</para>
+    /// <para>The page parameter is accepted and ignored: there is one screen. Coordinates are
+    /// 1-based screen positions, clamped, whole screen when omitted.</para>
+    /// </remarks>
+    private void RequestChecksumRectangularArea(Params parameters)
+    {
+        var id = parameters.GetParam(0, 0);
+        // parameters[1] is the page, ignored.
+        var top = Math.Max(1, parameters.GetParam(2, 1));
+        var left = Math.Max(1, parameters.GetParam(3, 1));
+        var bottom = Math.Min(_terminal.Rows, parameters.GetParam(4, _terminal.Rows));
+        var right = Math.Min(_terminal.Cols, parameters.GetParam(5, _terminal.Cols));
+
+        var sum = 0;
+        for (var row = top; row <= bottom; row++)
+        {
+            var line = _buffer.Lines[_buffer.YBase + row - 1];
+            if (line is null)
+                continue;
+
+            for (var col = left; col <= right && col <= line.Length; col++)
+            {
+                var cell = line[col - 1];
+                var content = cell.Content;
+                if (string.IsNullOrEmpty(content))
+                {
+                    // The trailing half of a wide character is a placeholder, not a blank: its
+                    // character was already counted in full one cell to the left.
+                    if (cell.Width == 0)
+                        continue;
+                    sum += 0x20;
+                    continue;
+                }
+
+                foreach (var ch in content)
+                    sum += ch;
+            }
+        }
+
+        _terminal.RaiseDataReceived($"\u001bP{id}!~{(0x10000 - sum) & 0xFFFF:X4}\u001b\\");
+    }
 }
