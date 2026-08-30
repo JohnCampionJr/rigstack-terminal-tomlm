@@ -1527,6 +1527,16 @@ namespace Iciclecreek.Terminal
             // shapes that never appear. PointerShapeChanged is wired below, so the yes is true when given.
             options.PointerShapesEnabled = true;
 
+            // The read-only geometry reports, on by default: a view always knows its cell and text-area
+            // sizes and answers them itself when no handler does, and a client that sizes images by
+            // CSI 16 t gets silence without them -- which shears every placeholder picture it draws.
+            // The Set* window commands stay opt-in: a view embedded in someone's layout has no business
+            // moving or resizing the window it happens to live in; TerminalWindow opts into those.
+            options.WindowOptions.GetCellSizePixels = true;
+            options.WindowOptions.GetWinSizeChars = true;
+            options.WindowOptions.GetWinSizePixels = true;
+            options.WindowOptions.GetScreenSizePixels = true;
+
             _terminal = new XT.Terminal(options);
 
             // Point the property at the emulator's OWN options from here on. XTerm.NET snapshots what it
@@ -4540,6 +4550,32 @@ namespace Iciclecreek.Terminal
         /// </remarks>
         private void OnTerminalWindowInfoRequested(object? sender, XT.Events.TerminalEvents.WindowInfoRequestedEventArgs e)
         {
+            // PIXEL GEOMETRY is answered here, inline, on whatever thread the query arrived on --
+            // which is the PTY reader's. The emulator waits synchronously for these answers, so
+            // routing them through the UI thread stalled the reader for up to WindowInfoPatience
+            // whenever the UI was busy: a program that asks CSI 14/15/16 t mid-stream froze its own
+            // output for a quarter of a second. The answers are the metrics PublishCellPixelSize
+            // already published into Options on every layout pass -- plain int reads, safe from any
+            // thread, and the SAME numbers the emulator tiles images by, which is the consistency
+            // the placeholder path depends on. A host cannot meaningfully override the view's real
+            // pixel metrics, so these no longer consult handlers; position, titles and state are
+            // genuinely the host's to answer and keep the dispatched path below.
+            switch (e.Request)
+            {
+                case XT.Common.WindowInfoRequest.CellSizePixels:
+                    e.CellWidth = _terminal.Options.CellWidthPixels;
+                    e.CellHeight = _terminal.Options.CellHeightPixels;
+                    e.Handled = e.CellWidth > 0 && e.CellHeight > 0;
+                    return;
+
+                case XT.Common.WindowInfoRequest.SizePixels:
+                case XT.Common.WindowInfoRequest.ScreenSizePixels:
+                    e.WidthPixels = _terminal.Cols * _terminal.Options.CellWidthPixels;
+                    e.HeightPixels = _terminal.Rows * _terminal.Options.CellHeightPixels;
+                    e.Handled = e.WidthPixels > 0 && e.HeightPixels > 0;
+                    return;
+            }
+
             if (!Dispatcher.UIThread.CheckAccess())
             {
                 // Whoever gets here first wins, and the loser does nothing.
@@ -7909,6 +7945,24 @@ namespace Iciclecreek.Terminal
             var offsetX = placement.OffsetX / (double)cell * charWidth;
             var offsetY = placement.OffsetY / (double)cellHigh * charHeight;
 
+            // How many source pixels one cell of THIS placement covers. For a natural placement it
+            // is the image's own cell metric -- one image pixel per screen-cell pixel, edges left
+            // unstretched. For a c/r-stretched placement it is the placement's share of its box, so
+            // a full row's strip fills exactly one row and a full run fills its columns: drawing
+            // those at natural size was the striping in every scaled picture, and the clipping in
+            // every shrunken one. Zero means an emulator from before the field existed -- natural.
+            // Zero means a NATURAL placement (or an emulator from before the field existed):
+            // the image's own cell metric, edges unstretched. Non-zero means stretched into a
+            // c/r box -- and then the destination is taken from the ROW GEOMETRY, not converted
+            // back from source pixels: the emulator slices strips to whole pixels, and a 37px
+            // strip against a 37.375px/row ratio drawn by conversion comes out a fraction of a
+            // pixel short of its row. Repeated every row, that is a hairline seam across every
+            // scaled picture. The strip is one full row of the box by construction, so fill the
+            // row and let the rounding be a sub-pixel sampling shift instead.
+            var stretched = placement.PxPerCellX > 0 || placement.PxPerCellY > 0;
+            double pxPerCellX = placement.PxPerCellX > 0 ? placement.PxPerCellX : cell;
+            double pxPerCellY = placement.PxPerCellY > 0 ? placement.PxPerCellY : cellHigh;
+
             // The destination is the picture's OWN size expressed in screen pixels, not the box of
             // cells it was assigned. Those agree for every full cell and disagree at the edges, which
             // is exactly where the stretching showed.
@@ -7921,8 +7975,8 @@ namespace Iciclecreek.Terminal
             //
             // srcWidth and srcHeight are in image pixels and cell/cellHigh say how many of those make
             // one cell, which is the same conversion the offsets above already use.
-            var drawnWidth = sourceWidth / cell * charWidth;
-            var drawnHeight = placement.SrcHeight / (double)cellHigh * charHeight;
+            var drawnWidth = stretched ? shown * charWidth : sourceWidth / pxPerCellX * charWidth;
+            var drawnHeight = stretched ? rowHeight : placement.SrcHeight / pxPerCellY * charHeight;
 
             // Clip the shifted destination to the cell box. Cropping the source by the same
             // proportions is essential: merely shortening the destination would squeeze the full
