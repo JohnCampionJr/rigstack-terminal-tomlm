@@ -2979,7 +2979,16 @@ public class InputHandler
                         // and walk the picture down the screen.
                         offsetY: tileRow == 0 ? (short)placement.OffsetY : (short)0,
                         zIndex: (short)placement.ZIndex,
-                        serial: serial),
+                        serial: serial,
+                        // The scaling context TryGetTileLayout used, or the renderer cannot know
+                        // whether this strip is the picture at its own size or its share of a
+                        // stretched box -- and a stretched strip must fill its whole row.
+                        pxPerCellX: placement.Scaling == Graphics.ImageScaling.Natural
+                            ? 0
+                            : (float)placement.SourceWidth / placement.Cols,
+                        pxPerCellY: placement.Scaling == Graphics.ImageScaling.Natural
+                            ? 0
+                            : (float)placement.SourceHeight / placement.Rows),
                     placement.Image);
             }
 
