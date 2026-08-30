@@ -255,11 +255,24 @@ namespace Iciclecreek.Terminal
         public XTerm.Terminal Terminal => _terminalView!.Terminal;
 
         /// <inheritdoc cref="TerminalView.InputSent"/>
-        public event EventHandler<string>? InputSent
-        {
-            add { if (_terminalView != null) _terminalView.InputSent += value; }
-            remove { if (_terminalView != null) _terminalView.InputSent -= value; }
-        }
+        /// <remarks>
+        /// <para>The control's OWN event, forwarded from whichever view is current -- the same shape
+        /// as ProcessExited, ShellReady, OutputReceived and UrlClicked beside it, and it should
+        /// always have been.</para>
+        /// <para>It used to add and remove straight onto <c>_terminalView</c>, which failed at both
+        /// ends of that view's life. A handler added BEFORE the template was dropped by an if with no
+        /// else -- silently, since += appears to have worked -- and subscribing early is the ordinary
+        /// case, being what a XAML attribute does. A handler added AFTER stayed on the view it was
+        /// added to, so re-applying the template left it on an orphan: leaked, and no longer firing
+        /// for the control.</para>
+        /// <para>Owning the list fixes both, and needs no buffering of pending handlers: there is
+        /// nothing to buffer when the subscription was never on the view to begin with.</para>
+        /// <para>Note the sender is the CONTROL, not the view -- again matching the four events
+        /// beside it.</para>
+        /// </remarks>
+        public event EventHandler<string>? InputSent;
+
+        private void OnTerminalViewInputSent(object? sender, string data) => InputSent?.Invoke(this, data);
 
 
         /// <summary>
@@ -710,6 +723,7 @@ namespace Iciclecreek.Terminal
                 _terminalView.ShellReady -= OnTerminalViewShellReady;
                 _terminalView.OutputReceived -= OnTerminalViewOutputReceived;
                 _terminalView.UrlClicked -= OnTerminalViewUrlClicked;
+                _terminalView.InputSent -= OnTerminalViewInputSent;
             }
 
             SetCurrentDirectory(null);
@@ -718,16 +732,25 @@ namespace Iciclecreek.Terminal
             _terminalView = e.NameScope.Find<TerminalView>("PART_TerminalView");
             _scrollBar = e.NameScope.Find<ScrollBar>("PART_ScrollBar");
 
-            // Wire up scrollbar
+            // The scrollbar, and ONLY the scrollbar. It used to gate everything below it too, so a
+            // template without a PART_ScrollBar -- a host that does not want one, which is a
+            // reasonable thing to want -- lost every event this control forwards, the Options bridge
+            // and the current directory along with it. All of that belongs to the view; none of it
+            // has anything to do with whether there is a scrollbar next to it.
             if (_scrollBar != null && _terminalView != null)
             {
                 _scrollBar.Scroll += OnScrollBarScroll;
+            }
+
+            if (_terminalView != null)
+            {
                 _terminalView.Options = Options ?? new XTerm.Options.TerminalOptions();
                 _terminalView.PropertyChanged += OnTerminalViewPropertyChanged;
                 _terminalView.ProcessExited += OnTerminalViewProcessExited;
                 _terminalView.ShellReady += OnTerminalViewShellReady;
                 _terminalView.OutputReceived += OnTerminalViewOutputReceived;
                 _terminalView.UrlClicked += OnTerminalViewUrlClicked;
+                _terminalView.InputSent += OnTerminalViewInputSent;
                 SetCurrentDirectory(_terminalView.CurrentDirectory);
 
                 // Adopt whatever the view is pointing at NOW, having subscribed above. The assignment
@@ -736,7 +759,6 @@ namespace Iciclecreek.Terminal
                 // anything listening for it. Seeding here catches the case where the view was already
                 // initialised; the bridge keeps the two in step from this point on.
                 SetCurrentValue(OptionsProperty, _terminalView.Options);
-                // (no window event hooking needed)
             }
         }
 
