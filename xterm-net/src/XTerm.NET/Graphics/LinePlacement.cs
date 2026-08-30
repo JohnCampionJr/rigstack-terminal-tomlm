@@ -71,6 +71,16 @@ public readonly struct LinePlacement
     public readonly PlacementKind Kind;
 
     /// <summary>
+    /// How many image pixels one CELL of this placement covers, per axis. The renderer's whole
+    /// scaling question in two numbers: a natural placement covers <see cref="TerminalImage.CellWidth"/>
+    /// pixels per cell (one image pixel per screen-cell pixel), a stretched one covers
+    /// SourceWidth / Cols — its share of the box. Zero means natural, for placements created
+    /// before these fields existed; readers fall back to the image's cell metric.
+    /// </summary>
+    public readonly float PxPerCellX;
+    public readonly float PxPerCellY;
+
+    /// <summary>
     /// Which placement this run is part of. Every row of one picture shares it, and no two
     /// placements ever share one.
     /// </summary>
@@ -103,8 +113,12 @@ public readonly struct LinePlacement
         short offsetX = 0,
         short offsetY = 0,
         short zIndex = 0,
-        int serial = 0)
+        int serial = 0,
+        float pxPerCellX = 0,
+        float pxPerCellY = 0)
     {
+        PxPerCellX = pxPerCellX;
+        PxPerCellY = pxPerCellY;
         ImageId = imageId;
         Column = column;
         Cols = cols;
@@ -160,6 +174,6 @@ public readonly struct LinePlacement
             ImageId, column, cols,
             srcX, SrcY,
             System.Math.Min(width, System.Math.Max(0, SrcX + SrcWidth - srcX)), SrcHeight,
-            Kind, PlacementId, OffsetX, OffsetY, ZIndex, Serial);
+            Kind, PlacementId, OffsetX, OffsetY, ZIndex, Serial, PxPerCellX, PxPerCellY);
     }
 }
