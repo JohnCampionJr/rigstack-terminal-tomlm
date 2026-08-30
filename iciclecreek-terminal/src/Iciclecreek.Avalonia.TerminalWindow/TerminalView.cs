@@ -1099,14 +1099,16 @@ namespace Iciclecreek.Terminal
 
             for (var screenY = 0; screenY < _terminal.Rows; screenY++)
             {
-                foreach (var hit in _search.HitsOnRow(viewportY + screenY))
+                var absoluteRow = viewportY + screenY;
+                var cellScale = RowCellScale(absoluteRow);
+                foreach (var hit in _search.HitsOnRow(absoluteRow))
                 {
                     var brush = hit.MatchId == _currentMatchId ? SearchCurrentBrush : SearchHighlightBrush;
                     if (brush is null)
                         continue;
 
-                    var x1 = Snap(hit.Column * _charWidth, scale);
-                    var x2 = Snap(hit.EndColumn * _charWidth, scale);
+                    var x1 = Snap(hit.Column * _charWidth * cellScale, scale);
+                    var x2 = Snap(hit.EndColumn * _charWidth * cellScale, scale);
                     var y1 = Snap(screenY * _charHeight, scale);
                     var y2 = Snap((screenY + 1) * _charHeight, scale);
                     context.FillRectangle(brush, new Rect(x1, y1, Math.Max(0, x2 - x1), Math.Max(0, y2 - y1)));
@@ -7223,8 +7225,9 @@ namespace Iciclecreek.Terminal
                 int screenRow = segment.Line - viewportY;
                 if (screenRow < 0 || screenRow >= _terminal.Rows) continue;
 
-                var startX = Snap(segment.StartCol * _charWidth, scale);
-                var endX = Snap((segment.EndCol + 1) * _charWidth, scale);
+                var cellScale = RowCellScale(segment.Line);
+                var startX = Snap(segment.StartCol * _charWidth * cellScale, scale);
+                var endX = Snap((segment.EndCol + 1) * _charWidth * cellScale, scale);
                 var y = Snap((screenRow + 1) * _charHeight - 1, scale);
 
                 pen ??= new Pen(Foreground, 1);
@@ -7505,7 +7508,8 @@ namespace Iciclecreek.Terminal
                     else if (selectionStartX.HasValue)
                     {
                         // End of a selection run - draw it
-                        DrawSelectionRect(context, selectionStartX.Value, selectionEndX!.Value + 1, screenY, scale);
+                        DrawSelectionRect(context, selectionStartX.Value, selectionEndX!.Value + 1, screenY, scale,
+                                          RowCellScale(viewportY + screenY));
                         selectionStartX = null;
                         selectionEndX = null;
                     }
@@ -7514,15 +7518,53 @@ namespace Iciclecreek.Terminal
                 // Draw remaining selection at end of row
                 if (selectionStartX.HasValue)
                 {
-                    DrawSelectionRect(context, selectionStartX.Value, selectionEndX!.Value + 1, screenY, scale);
+                    DrawSelectionRect(context, selectionStartX.Value, selectionEndX!.Value + 1, screenY, scale,
+                                      RowCellScale(viewportY + screenY));
                 }
             }
         }
 
-        private void DrawSelectionRect(DrawingContext context, int startX, int endX, int screenY, double scale)
+        /// <summary>How many columns the cell at this position occupies; 1 when there is nothing there.</summary>
+        private int CellWidthAt(int absoluteRow, int col)
         {
-            var x1 = Snap(startX * _charWidth, scale);
-            var x2 = Snap(endX * _charWidth, scale);
+            var line = _terminal.Buffer.GetLine(absoluteRow);
+            if (line == null || col < 0 || col >= line.Length)
+                return 1;
+
+            // GetWidth rather than line[col].Width: the indexer hands back a copy of the whole cell
+            // to read one field, which this file has paid for before.
+            return Math.Max(1, line.GetWidth(col));
+        }
+
+        /// <summary>
+        /// How many normal cell widths one cell on <paramref name="absoluteRow"/> actually occupies
+        /// on screen: 2 on a DECDWL or DECDHL row, 1 everywhere else.
+        /// </summary>
+        /// <remarks>
+        /// <para>The row pass draws doubled rows inside a 2x transform, so the cells themselves come
+        /// out right. Everything drawn as an OVERLAY -- the cursor, the selection, the hovered-link
+        /// underline -- is drawn afterwards, outside that transform, and so has to double its own
+        /// geometry. None of it did.</para>
+        /// <para>The result is visible rather than subtle: on a doubled row the selection covered the
+        /// left half of what was selected, the link underline stopped halfway along the link, and the
+        /// cursor sat at half the column it marked -- so at column 40 it was twenty cells to the left
+        /// of its own character.</para>
+        /// </remarks>
+        private double RowCellScale(int absoluteRow)
+        {
+            var line = _terminal.Buffer.GetLine(absoluteRow);
+            if (line == null)
+                return 1.0;
+
+            var attr = line.LineAttribute;
+            return attr == LineAttribute.DoubleWidth || attr.IsDoubleHeight() ? 2.0 : 1.0;
+        }
+
+        private void DrawSelectionRect(DrawingContext context, int startX, int endX, int screenY, double scale,
+                                       double cellScale)
+        {
+            var x1 = Snap(startX * _charWidth * cellScale, scale);
+            var x2 = Snap(endX * _charWidth * cellScale, scale);
             var y1 = Snap(screenY * _charHeight, scale);
             var y2 = Snap((screenY + 1) * _charHeight, scale);
 
@@ -7602,9 +7644,20 @@ namespace Iciclecreek.Terminal
 
             // Calculate screen position
             int screenY = absoluteCursorY - viewportY;
-            double posX = Snap(cursorX * _charWidth, scale);
+
+            // A doubled row draws each cell twice as wide, and this pass runs outside the transform
+            // that does it -- so the caret has to double its own geometry or it lands half a screen
+            // to the left of the character it marks.
+            double cellScale = RowCellScale(absoluteCursorY);
+
+            // And a WIDE character occupies two cells. A block caret one cell wide over a two-cell
+            // glyph repainted the whole glyph in the background colour and then filled only its left
+            // half, so the right half of the character was simply erased.
+            int cursorCells = Math.Max(1, CellWidthAt(absoluteCursorY, cursorX));
+
+            double posX = Snap(cursorX * _charWidth * cellScale, scale);
             double posY = Snap(screenY * _charHeight, scale);
-            double nextX = Snap((cursorX + 1) * _charWidth, scale);
+            double nextX = Snap((cursorX + cursorCells) * _charWidth * cellScale, scale);
             double nextY = Snap((screenY + 1) * _charHeight, scale);
             double cellWidth = Math.Max(0, nextX - posX);
             double cellHeight = Math.Max(0, nextY - posY);
@@ -7690,7 +7743,8 @@ namespace Iciclecreek.Terminal
                 return;
 
             int screenY = absoluteCursorY - viewportY;
-            double posX = Snap(cursorX * _charWidth, scale);
+            var cellScale = RowCellScale(absoluteCursorY);
+            double posX = Snap(cursorX * _charWidth * cellScale, scale);
             double posY = Snap(screenY * _charHeight, scale);
             double cellHeight = Snap((screenY + 1) * _charHeight, scale) - posY;
 
@@ -7706,13 +7760,27 @@ namespace Iciclecreek.Terminal
                 FontSize,
                 foreground);
 
-            double textWidth = formattedText.Width;
+            double textWidth = formattedText.Width * cellScale;
 
             // Draw background behind preedit text to cover existing content
             context.FillRectangle(background, new Rect(posX, posY, textWidth, cellHeight));
 
             // Draw the preedit text
-            context.DrawText(formattedText, new Point(posX, posY));
+            if (cellScale == 1.0)
+            {
+                context.DrawText(formattedText, new Point(posX, posY));
+            }
+            else
+            {
+                // The row's text is drawn under the same horizontal scale. This overlay is outside
+                // that row transform, so apply it around the preedit origin as well; scaling only
+                // the background geometry would leave the composing glyphs at half width.
+                var toOrigin = Matrix.CreateTranslation(-posX, -posY);
+                var widen = Matrix.CreateScale(cellScale, 1.0);
+                var back = Matrix.CreateTranslation(posX, posY);
+                using (context.PushTransform(toOrigin * widen * back))
+                    context.DrawText(formattedText, new Point(posX, posY));
+            }
 
             // Draw underline to indicate uncommitted composition text
             double underlineY = posY + cellHeight - Math.Max(1.0, scale);
