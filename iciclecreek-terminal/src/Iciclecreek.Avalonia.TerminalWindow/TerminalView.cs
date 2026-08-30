@@ -1590,12 +1590,28 @@ namespace Iciclecreek.Terminal
             SyncAnimationClock();
         }
 
+        /// <summary>
+        /// OSC 7: the shell reporting its working directory.
+        /// </summary>
+        /// <remarks>
+        /// POSTED, never Invoked. This is raised from <c>Terminal.Write</c>, which the read loop calls
+        /// from inside <c>lock (_terminalLock)</c> on the pty reader thread -- and the UI thread takes
+        /// that same lock in <see cref="ClearScreen"/>, <see cref="CurrentLineText"/> and
+        /// <c>WriteOwnLine</c>. A blocking Invoke here is therefore a DEADLOCK and not merely a stall:
+        /// the reader waits for the UI thread while the UI thread waits for the lock the reader holds.
+        /// The application freezes with no exception to look for.
+        ///
+        /// Nothing waits on the result -- it updates a property and notifies -- so posting costs a
+        /// frame's latency and removes one half of the deadlock outright.
+        /// </remarks>
         private void OnTerminalDirectoryChanged(object? sender, TerminalEvents.DirectoryChangeEventArgs e)
         {
-            Dispatcher.UIThread.Invoke(() =>
+            var directory = e.Directory;
+
+            Dispatcher.UIThread.Post(() =>
             {
                 var oldValue = _currentDirectory;
-                _currentDirectory = e.Directory;
+                _currentDirectory = directory;
                 RaisePropertyChanged(CurrentDirectoryProperty, oldValue, _currentDirectory);
             });
         }
@@ -3979,22 +3995,66 @@ namespace Iciclecreek.Terminal
             });
         }
 
+        /// <summary>How long the reader waits for the UI thread to answer a window query.</summary>
+        /// <remarks>
+        /// Generous for a handler that only reads window state, and short enough that a wedged UI
+        /// thread costs a pause rather than the session. See <see cref="OnTerminalWindowInfoRequested"/>.
+        /// </remarks>
+        private static readonly TimeSpan WindowInfoPatience = TimeSpan.FromMilliseconds(250);
+
         /// <summary>
-        /// Answers a program asking about the window — its size in cells or pixels, its position, its title.
+        /// Answers a program asking about the window — its size in cells or pixels, its position, or
+        /// its title — from the UI thread, without letting the reader wait on it for ever.
         /// </summary>
         /// <remarks>
-        /// <para>INVOKE, not Post, and the difference is the whole behaviour. The emulator raises this
-        /// synchronously and reads <c>e.Handled</c> the moment the handler returns, to decide whether it has
-        /// an answer to send. Post returns immediately, so Handled was still false and the reply was never
-        /// sent — the answer was written correctly, on the UI thread, after the only reader of it had moved
-        /// on. Every window query went unanswered and the program asking waited out its timeout.</para>
-        /// <para>Blocking the reader thread here is safe because nothing on the UI thread waits on it: output
-        /// is delivered by posting, and input is written asynchronously. Invoke also runs inline when this
-        /// is already the UI thread, so a host driving the terminal directly does not deadlock on itself.</para>
+        /// <para>The answer genuinely needs the UI thread -- only it knows the window -- and the
+        /// emulator reads <c>e.Handled</c> the moment this returns, to decide whether it has a reply
+        /// to send. So it cannot be posted: Post returns immediately, Handled is still false, and the
+        /// answer is written correctly, on the UI thread, after the only reader of it has moved on.
+        /// Every window query then goes unanswered and the program asking waits out its timeout.</para>
+        /// <para>But it cannot block for ever either. This is raised from <c>Terminal.Write</c>, which
+        /// the read loop calls inside <c>lock (_terminalLock)</c> on the pty reader thread, and the UI
+        /// thread takes that same lock in <see cref="ClearScreen"/>, <see cref="CurrentLineText"/> and
+        /// <c>WriteOwnLine</c>. An unbounded wait is a DEADLOCK, not a stall: the application freezes
+        /// with no exception to look for.</para>
+        /// <para>So it is bounded. An idle UI thread answers in microseconds and the normal path is
+        /// unchanged; a wedged one costs a pause instead of the session. Leaving <c>Handled</c> false
+        /// on timeout is not a guess -- it is the answer the emulator already documents for a terminal
+        /// that cannot say, and a wrong number would be worse than none.</para>
         /// </remarks>
         private void OnTerminalWindowInfoRequested(object? sender, XT.Events.TerminalEvents.WindowInfoRequestedEventArgs e)
         {
-            Dispatcher.UIThread.Invoke(() =>
+            if (!Dispatcher.UIThread.CheckAccess())
+            {
+                // Whoever gets here first wins, and the loser does nothing.
+                //
+                // Timing out does not cancel the queued job -- the UI thread runs it whenever it
+                // frees up, which may be long after the emulator gave up waiting and sent its
+                // "cannot say". Writing the answer into e THEN is a write to state the emulator has
+                // moved past, and on the next query it would find Handled already true from the
+                // previous one. So the timeout claims the right to answer, and the late callback
+                // finds it taken and returns.
+                var claim = 0;
+
+                var pending = Dispatcher.UIThread.InvokeAsync(() =>
+                {
+                    if (Interlocked.Exchange(ref claim, 1) == 0)
+                        AnswerWindowInfo(e);
+                });
+
+                if (!pending.GetTask().Wait(WindowInfoPatience) && Interlocked.Exchange(ref claim, 1) == 0)
+                    Debug.WriteLine("[TerminalView] window-info query timed out; answering unhandled");
+
+                return;
+            }
+
+            // Inline when this IS the UI thread, so a host driving the terminal directly neither
+            // deadlocks on itself nor pays a dispatcher round trip.
+            AnswerWindowInfo(e);
+        }
+
+        private void AnswerWindowInfo(XT.Events.TerminalEvents.WindowInfoRequestedEventArgs e)
+        {
             {
                 // Raise routed event so any parent can handle it without custom plumbing.
                 var args = new WindowInfoRequestedEventArgs(e.Request)
@@ -4020,7 +4080,7 @@ namespace Iciclecreek.Terminal
                     e.CellHeight = args.CellHeight;
                     e.Title = args.Title;
                 }
-            });
+            }
         }
 
         private async void OnTerminalDataReceived(object? sender, XT.Events.TerminalEvents.DataEventArgs e)
