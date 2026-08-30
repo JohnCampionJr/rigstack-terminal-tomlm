@@ -230,4 +230,71 @@ public class CursorAndMarginTests
         terminal.Write($"{Esc}[2e");       // VPR down 2
         Assert.Equal(2, terminal.Buffer.Y);
     }
+
+    // ------------------------------------------------------------------ pending wrap is a FACT
+
+    // SetCursorRaw used to set PendingWrap on EVERY print advance, under a contract that the flag
+    // was "harmlessly stale" inside the margins because only the boundary column read it. The
+    // moment CUB and the ICH/DCH/ECH settle step started reading it anywhere, every backward move
+    // or edit issued right after a print acted one column LEFT of the cursor. On screen that was
+    // asciiquarium leaving duplicated fragments behind left-moving sprites and eating characters
+    // from right-moving ones -- rate-dependent only because it needed a print immediately followed
+    // by a CUB or DCH in the same stream.
+
+    [Fact]
+    public void Delete_right_after_printing_deletes_at_the_cursor_not_one_left()
+    {
+        // The 16-byte repro the bug was cornered with: print AB, DCH 1. The cursor sits on the
+        // cell after B, so the deletion must not touch B.
+        var terminal = NewTerminal();
+        terminal.Write($"{Esc}[5;1HAB{Esc}[1Ptail");
+
+        Assert.Equal("ABtail", Row(terminal, 4, 6));
+    }
+
+    [Fact]
+    public void Cursor_back_right_after_printing_counts_from_the_cursor_not_one_left()
+    {
+        // Print ABCD, CUB 2 -> the cursor is on C; DCH must eat C, not B.
+        var terminal = NewTerminal();
+        terminal.Write($"{Esc}[5;1HABCD{Esc}[2D{Esc}[1P");
+
+        Assert.Equal("ABD ", Row(terminal, 4, 4));
+    }
+
+    [Fact]
+    public void A_wrap_left_pending_on_another_line_does_not_shift_edits_after_a_move()
+    {
+        // Fill a line to the last column (a REAL pending wrap), address another line, print, edit.
+        // The old flag survived the move and the settle step consumed it a screen away.
+        var terminal = NewTerminal();
+        terminal.Write($"{Esc}[1;14H{new string('X', 7)}");   // fills row 1 to column 20
+        terminal.Write($"{Esc}[5;1HAB{Esc}[1Ptail");
+
+        Assert.Equal("ABtail", Row(terminal, 4, 6));
+    }
+
+    [Fact]
+    public void Printing_the_last_column_still_wraps_the_next_character()
+    {
+        // The guard for the fix itself: the flag must still be TRUE at the phantom column, or
+        // autowrap dies. Fill the row exactly; the next character belongs at the start of row 2.
+        var terminal = NewTerminal();
+        terminal.Write($"{Esc}[1;1H{new string('X', 20)}Y");
+
+        Assert.Equal("Y", terminal.Buffer.Lines[1]![0].Content);
+    }
+
+    [Fact]
+    public void Insert_at_the_phantom_column_still_acts_on_the_last_column()
+    {
+        // What SettleForEditing exists for -- an editor that filled a line and inserted must see
+        // the last column affected, not nothing. The fix must not regress it.
+        var terminal = NewTerminal();
+        terminal.Write($"{Esc}[1;1H{new string('X', 20)}");   // pending wrap at the boundary
+        terminal.Write($"{Esc}[1@");
+
+        Assert.Equal(" ", string.IsNullOrEmpty(terminal.Buffer.Lines[0]![19].Content) ? " " : terminal.Buffer.Lines[0]![19].Content);
+        Assert.Equal("X", terminal.Buffer.Lines[0]![18].Content);
+    }
 }

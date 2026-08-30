@@ -1325,7 +1325,11 @@ public class TerminalBuffer
     {
         _x = x;
         _y = y;
-        PendingWrap = true;
+        // TRUE only at the phantom column. Setting it on every raw advance relied on "only the
+        // boundary column reads it" -- and the moment CUB and SettleForEditing started reading
+        // it away from the boundary, every backward move or edit right after a print acted one
+        // column left of the cursor. The flag now states a fact instead of trusting its readers.
+        PendingWrap = x > _scrollRight;
     }
 
     public string PrintViewport()
