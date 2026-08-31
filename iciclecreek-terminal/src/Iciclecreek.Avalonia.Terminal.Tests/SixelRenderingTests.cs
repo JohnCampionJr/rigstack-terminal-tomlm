@@ -576,6 +576,48 @@ public class SixelRenderingTests
             "the source must be cropped with the destination, not squeezed into it");
     }
 
+    /// <summary>
+    /// Consecutive rows of a natural picture must meet exactly at a FRACTIONAL display scale.
+    /// </summary>
+    /// <remarks>
+    /// The rows a frame draws are snapped to device pixels, so at 13.0 and 1.25 they alternate 16 and
+    /// 17 device pixels while charHeight stays 13.0. A strip measured in charHeight then stops one
+    /// pixel short of the row it fills, and the terminal background shows through: pure black 1px
+    /// lines every fourth row, 65 device pixels apart. Asserted across enough rows to see the beat --
+    /// one pair would have passed throughout, which is why this went unnoticed.
+    /// </remarks>
+    [AvaloniaTest]
+    public void Natural_rows_meet_exactly_at_a_fractional_scale()
+    {
+        var image = EvenImage();
+        const double charHeight = 13.0;
+        const double scale = 1.25;
+
+        static double Snap(double value, double scale) =>
+            Math.Round(value * scale, MidpointRounding.AwayFromZero) / scale;
+
+        double? previousBottom = null;
+
+        for (var row = 0; row < 24; row++)
+        {
+            var startYPos = Snap(row * charHeight, scale);
+            var rowHeight = Snap((row + 1) * charHeight, scale) - startYPos;
+
+            Assert.That(TerminalView.TryPlanImageBlit(
+                Run(image, 0, 4, 0, row * CellPixelHeight, 8, CellPixelHeight),
+                startYPos, rowHeight, 10, charHeight, scale,
+                out _, out var destination), Is.True, $"row {row} planned nothing");
+
+            if (previousBottom is { } bottom)
+            {
+                Assert.That(destination.Y * scale, Is.EqualTo(bottom * scale).Within(0.001),
+                    $"row {row} starts where row {row - 1} ended, or the background shows through");
+            }
+
+            previousBottom = destination.Bottom;
+        }
+    }
+
     [AvaloniaTest]
     public void An_empty_run_is_refused()
     {
@@ -1376,5 +1418,54 @@ public class SixelRenderingTests
         // is that it is nowhere near the full 20 a stretched strip would fill.
         Assert.That(destination.Height, Is.EqualTo(7.0).Within(0.01),
             "a partial edge strip keeps its natural height");
+    }
+
+    // ---- the unified mapping ----------------------------------------------------------------------
+
+    /// <summary>
+    /// Every row of one placement must plan the SAME whole-picture mapping, or the per-row draws
+    /// resample differently and a fractional display scale puts a hairline at the boundary. The
+    /// scale here is Windows' 1.25, and the char height is deliberately not a whole number.
+    /// </summary>
+    [AvaloniaTest]
+    public void Every_natural_strip_of_a_picture_shares_one_whole_image_mapping()
+    {
+        var image = EvenImage();
+
+        Assert.That(TerminalView.TryPlanImageBlit(Run(image, 0, 4, 0, 0, 8, 3), 0, 13.6, 10, 13.6, 1.25,
+            out _, out _, out var first), Is.True);
+        Assert.That(TerminalView.TryPlanImageBlit(Run(image, 0, 4, 0, 3, 8, 3), 13.6, 13.6, 10, 13.6, 1.25,
+            out _, out _, out var second), Is.True);
+
+        Assert.That(second, Is.EqualTo(first), "two rows planned two different transforms");
+    }
+
+    [AvaloniaTest]
+    public void Every_stretched_strip_of_a_picture_shares_one_whole_image_mapping()
+    {
+        // 8x9 stretched into 2x3 cells: 3 source px per row, exactly.
+        var image = new TerminalImage(new byte[8 * 9 * 4], 8, 9, CellPixelWidth, CellPixelHeight);
+
+        Assert.That(TerminalView.TryPlanImageBlit(
+            StretchedRun(image, 0, 2, 0, 0, 8, 3, pxPerCellX: 4f, pxPerCellY: 3f),
+            0, 13.6, 10, 13.6, 1.25, out _, out _, out var first), Is.True);
+        Assert.That(TerminalView.TryPlanImageBlit(
+            StretchedRun(image, 0, 2, 0, 3, 8, 3, pxPerCellX: 4f, pxPerCellY: 3f),
+            13.6, 13.6, 10, 13.6, 1.25, out _, out _, out var second), Is.True);
+
+        Assert.That(second, Is.EqualTo(first));
+    }
+
+    /// <summary>The clip is still the row's own snapped box: the mapping never widens coverage.</summary>
+    [AvaloniaTest]
+    public void The_clip_is_unchanged_by_the_unified_mapping()
+    {
+        var image = EvenImage();
+
+        Assert.That(TerminalView.TryPlanImageBlit(Run(image, 0, 4, 0, 3, 8, 3), 20, 20, 10, 20, 1.0,
+            out var source, out var destination, out _), Is.True);
+
+        Assert.That(source, Is.EqualTo(new Rect(0, 3, 8, 3)));
+        Assert.That(destination, Is.EqualTo(new Rect(0, 20, 40, 20)));
     }
 }

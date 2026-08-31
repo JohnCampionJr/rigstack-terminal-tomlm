@@ -7766,7 +7766,7 @@ namespace Iciclecreek.Terminal
                 return;
 
             if (!TryPlanImageBlit(run, startYPos, rowHeight, _charWidth, _charHeight, scale,
-                                  out var source, out var destination))
+                                  out _, out var destination, out var unifiedDest))
                 return;
 
             var bitmap = GetOrCreateBitmap(run.Image!);
@@ -7775,7 +7775,11 @@ namespace Iciclecreek.Terminal
 
             try
             {
-                context.DrawImage(bitmap, source, destination);
+                // The whole picture's mapping, clipped to this row -- see TryPlanImageBlit. Nine
+                // rows drawn this way sample identically to one draw, which is what keeps a
+                // fractional display scale from putting a hairline at every strip boundary.
+                using (context.PushClip(destination))
+                    context.DrawImage(bitmap, new Rect(0, 0, run.Image!.PixelWidth, run.Image.PixelHeight), unifiedDest);
             }
             catch (Exception ex) when (IndicatesNoRasterBackend(ex))
             {
@@ -7919,9 +7923,32 @@ namespace Iciclecreek.Terminal
         internal static bool TryPlanImageBlit(CachedTextRun run, double startYPos, double rowHeight,
                                               double charWidth, double charHeight, double scale,
                                               out Rect source, out Rect destination)
+            => TryPlanImageBlit(run, startYPos, rowHeight, charWidth, charHeight, scale,
+                                out source, out destination, out _);
+
+        /// <summary>
+        /// Plans one row's blit: the strip of the picture it shows (<paramref name="source"/>,
+        /// <paramref name="destination"/>) and the ONE mapping of the whole picture that every row
+        /// of the placement shares (<paramref name="unifiedDest"/>).
+        /// </summary>
+        /// <remarks>
+        /// The unified mapping is why fractional display scales stopped showing hairlines. Each row
+        /// is its own DrawImage, and a sampler resamples each call independently, clamping at the
+        /// source strip's edges instead of reading the neighbouring row's pixels -- so nine strips
+        /// are not pixel-identical to one picture except at integer scales, which is why macOS at
+        /// 2.0 looked perfect while Windows at 1.25 showed seams. Drawing every row as the WHOLE
+        /// picture's mapping clipped to the row makes the nine draws mathematically one draw.
+        /// The mapping is deliberately NOT snapped: it is a transform, not an edge, and snapping it
+        /// per row would hand each row a slightly different transform -- the disease again. The
+        /// CLIP (<paramref name="destination"/>) is what lands on device pixels.
+        /// </remarks>
+        internal static bool TryPlanImageBlit(CachedTextRun run, double startYPos, double rowHeight,
+                                              double charWidth, double charHeight, double scale,
+                                              out Rect source, out Rect destination, out Rect unifiedDest)
         {
             source = default;
             destination = default;
+            unifiedDest = default;
 
             if (run.Placement is not { } placement || run.Image is null)
                 return false;
@@ -7976,7 +8003,20 @@ namespace Iciclecreek.Terminal
             // srcWidth and srcHeight are in image pixels and cell/cellHigh say how many of those make
             // one cell, which is the same conversion the offsets above already use.
             var drawnWidth = stretched ? shown * charWidth : sourceWidth / pxPerCellX * charWidth;
-            var drawnHeight = stretched ? rowHeight : placement.SrcHeight / pxPerCellY * charHeight;
+
+            // rowHeight, NOT charHeight, and that is the whole of the hairline bug on Windows.
+            // The row's box is snapped to device pixels -- startYPos and startYPos + rowHeight are
+            // both Snap() results -- while charHeight is the unsnapped ideal. At a fractional
+            // display scale the two disagree: 13.0 at 1.25 makes rows alternate 16 and 17 device
+            // pixels, so on every stretched row a strip measured in charHeight stops one pixel short
+            // of the row it fills, the next row's clip starts at the row boundary, and the terminal
+            // background shows through the gap. Measured: pure black 1px lines every fourth row,
+            // 65 device pixels apart, on natural placements only -- the stretched branch has filled
+            // rowHeight since the c/r-box fix and never showed them.
+            //
+            // Only the CLIP moves. mapScaleY below stays on charHeight, because that is the shared
+            // transform every row of the placement draws through, and rowHeight varies row to row.
+            var drawnHeight = stretched ? rowHeight : placement.SrcHeight / pxPerCellY * rowHeight;
 
             // Clip the shifted destination to the cell box. Cropping the source by the same
             // proportions is essential: merely shortening the destination would squeeze the full
@@ -8005,6 +8045,18 @@ namespace Iciclecreek.Terminal
             var clippedSourceHeight = clippedTop == rawTop && clippedBottom == rawTop + drawnHeight
                 ? placement.SrcHeight
                 : (clippedBottom - clippedTop) / drawnHeight * placement.SrcHeight;
+
+            // The shared whole-picture mapping, in pure ratios. rawLeft/rawTop are where THIS
+            // strip's source origin lands, so walking back by the source origin itself gives where
+            // image pixel (0,0) lands -- the same expression from every row, because rawTop moves
+            // by exactly one row as SrcY moves by exactly one row's worth of source.
+            var mapScaleX = charWidth / pxPerCellX;
+            var mapScaleY = charHeight / pxPerCellY;
+            unifiedDest = new Rect(
+                rawLeft - placement.SrcX * mapScaleX,
+                rawTop - placement.SrcY * mapScaleY,
+                run.Image.PixelWidth * mapScaleX,
+                run.Image.PixelHeight * mapScaleY);
 
             var startX = Snap(clippedLeft, scale);
             var endX = Snap(clippedRight, scale);
