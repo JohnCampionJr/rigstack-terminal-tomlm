@@ -46,6 +46,34 @@ namespace Iciclecreek.Terminal
         public bool HitTest(Point point) => new Rect(Bounds.Size).Contains(point);
 
         private XT.Terminal _terminal;
+
+        private readonly Skia.SnapshotBuilder _snapshotBuilder = new();
+        private readonly Skia.SkiaFontCache _skiaFonts = new();
+
+        /// <summary>
+        /// Whether the cell grid is drawn straight onto the Skia canvas instead of through
+        /// DrawingContext. Off by default — the classic path is untouched until a host opts in.
+        /// See the notes on TerminalSkiaLayer for what the direct path gives up.
+        /// </summary>
+        public static readonly StyledProperty<bool> UseSkiaRendererProperty =
+            AvaloniaProperty.Register<TerminalView, bool>(
+                nameof(UseSkiaRenderer),
+                defaultValue: false);
+
+        /// <summary>Whether the cell grid is drawn straight onto the Skia canvas. See <see cref="UseSkiaRendererProperty"/>.</summary>
+        public bool UseSkiaRenderer
+        {
+            get => GetValue(UseSkiaRendererProperty);
+            set => SetValue(UseSkiaRendererProperty, value);
+        }
+
+        /// <summary>Latched once a layer reports the backend will not lease a Skia canvas.</summary>
+        private bool _skiaUnsupported;
+
+        /// <summary>The layer enqueued last frame, asked afterwards whether it could draw.</summary>
+        private Skia.TerminalSkiaLayer? _lastSkiaLayer;
+
+
         private FormattedText _measureText;
         private string? _currentDirectory;
         private double _charWidth;
@@ -1749,6 +1777,12 @@ namespace Iciclecreek.Terminal
                 // rather than only for the brushes that fail to convert.
                 InvalidateRunCaches();
             }
+            else if (change.Property == UseSkiaRendererProperty)
+            {
+                // Nothing cached needs purging -- the classic path's run caches stay valid for a
+                // switch back -- but the frame on screen was drawn by the other path.
+                InvalidateVisual();
+            }
             else if (change.Property == LigaturesProperty)
             {
                 // Every line's cached runs were built with the old setting, and the cache is
@@ -1868,6 +1902,17 @@ namespace Iciclecreek.Terminal
                 return;
 
             _disposed = true;
+
+            // The Skia faces and fonts go HERE and not on visual detach. Detachment is not an
+            // ownership boundary for this view -- it happens during ordinary initialisation and
+            // during supported reparenting, both of which are followed by more painting -- and a
+            // custom draw operation already queued still holds this cache on the render thread, so
+            // disposing on detach could pull native handles out from under an in-flight composite.
+            _skiaFonts.Dispose();
+
+            // And the layer this view kept only to read its Unsupported report: it holds a snapshot,
+            // its rows, and through them any images those rows referenced.
+            _lastSkiaLayer = null;
 
             UnsubscribeTerminalEvents();
 

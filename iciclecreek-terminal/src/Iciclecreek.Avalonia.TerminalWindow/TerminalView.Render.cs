@@ -329,6 +329,63 @@ namespace Iciclecreek.Terminal
             int viewportLines = _terminal.Rows;
             int startLine = viewportY;
             int endLine = Math.Min(_terminal.Buffer.Length, startLine + viewportLines);
+
+            // The direct renderer draws the cell grid onto the Skia canvas instead of recording a fill
+            // and a text draw per run. Everything after it — cursor, selection, the hovered link —
+            // still goes through DrawingContext and lands on top, because Custom() enqueues into the
+            // same list.
+            //
+            // The snapshot is taken HERE, on the UI thread. The operation runs during compositing, on
+            // another thread, while the pty read loop may be writing to the buffer; it must never
+            // touch the buffer or the palette itself.
+            // Null unless the direct path both applies and can run; the row loop below consults it
+            // to draw exactly the rows the snapshot declined.
+            Skia.TerminalSnapshot? skiaSnapshot = null;
+
+            // A custom draw operation only draws where Avalonia is on its Skia backend, and there
+            // is no way to ask before enqueuing one -- so the layer reports afterwards and this
+            // reads the report BEFORE deciding, on the frame after the one that failed. Asking
+            // inside the else of the decision (as this first did) never runs: on any frame where
+            // the direct path applies, the if branch is taken and the report is never read, so a
+            // non-Skia backend stayed silently blank forever instead of falling back once.
+            if (_lastSkiaLayer is { Unsupported: true })
+            {
+                _skiaUnsupported = true;
+                _lastSkiaLayer = null;
+            }
+
+            // INSIDE a try of its own: this reads the live buffer without the lock, exactly as the
+            // classic loop does, and the classic loop's own catch is what keeps a concurrent write
+            // from turning a race into an unhandled exception out of Render. Building outside that
+            // protection gave the two paths different failure modes for the same race.
+            try
+            {
+            if (UseSkiaRenderer && !_skiaUnsupported && _charWidth > 0 && _charHeight > 0)
+            {
+                var snapshot = _snapshotBuilder.Build(
+                    _terminal, _palette, startLine, viewportLines, _terminal.Cols,
+                    _charWidth, _charHeight, FontSize, FontFamily?.Name ?? "monospace",
+                    GetValue(ForegroundProperty), surface, RequestPaint, Ligatures,
+                    _terminal.ReverseVideo, _cursorBlinkOn, _boldIsBright, _minimumContrast);
+
+                snapshot.RenderScale = scale;
+
+                var layer = new Skia.TerminalSkiaLayer(snapshot, _skiaFonts,
+                    new Rect(0, 0, _terminal.Cols * _charWidth, viewportLines * _charHeight));
+                context.Custom(layer);
+
+                skiaSnapshot = snapshot;
+                _lastSkiaLayer = layer;
+            }
+            }
+            catch (Exception ex)
+            {
+                // A write landed mid-read. Draw this frame classically rather than losing it, and
+                // let the write that interrupted us ask for the next one.
+                Debug.WriteLine($"[TerminalView] Skia snapshot skipped: {ex.Message}");
+                skiaSnapshot = null;
+            }
+
             try
             {
                 // A block anchored ABOVE the viewport still hangs into it. The row pass below starts
@@ -370,6 +427,12 @@ namespace Iciclecreek.Terminal
 
                 for (int y = startLine; y < endLine; y++)
                 {
+                    // With the direct path running, this loop draws only what the snapshot declined:
+                    // a doubled row, or one carrying OSC 66 sized runs. Both need what the snapshot
+                    // has no field for, and drawing them wrong is worse than not drawing them fast.
+                    if (skiaSnapshot is not null && !skiaSnapshot.IsDeferred(y - startLine))
+                        continue;
+
                     // The buffer can SHRINK underneath a render. CSI 3 J — what cmd.exe's `cls` sends —
                     // discards the entire scrollback, and it arrives on the PTY thread, so the bounds
                     // captured above can point past the end by the time we reach this line.
