@@ -1609,8 +1609,11 @@ public class Terminal : IDisposable
 
             case 0x09: // HT - Tab
                 // Was hardcoded to 8 while CHT and CBT honoured Options.TabStopWidth, so the two
-                // tab motions disagreed on the same screen. Both go through the stop set now.
-                _buffer.SetCursor(NextTabStop(_buffer.X), _buffer.Y);
+                // tab motions disagreed on the same screen. Both go through the stop set now --
+                // and stop at the right MARGIN for a cursor inside one, as DEC tabs always have.
+                var tabLimit = LeftRightMarginMode && _buffer.X <= _buffer.ScrollRight
+                    ? _buffer.ScrollRight : Cols - 1;
+                _buffer.SetCursor(Math.Min(NextTabStop(_buffer.X), tabLimit), _buffer.Y);
                 break;
 
             case 0x0A: // LF - Line Feed
@@ -1640,8 +1643,17 @@ public class Terminal : IDisposable
     {
         if (_buffer.Y == _buffer.ScrollBottom)
         {
-            // Scroll up
-            _buffer.ScrollUp(1);
+            // A cursor OUTSIDE the left/right margins is outside the region: a line feed there
+            // neither scrolls the region's contents nor steps past its bottom row. It stays put,
+            // as it does on the screen's last row.
+            var insideColumns = !LeftRightMarginMode
+                                || (_buffer.X >= _buffer.ScrollLeft && _buffer.X <= _buffer.ScrollRight);
+            if (insideColumns)
+                _buffer.ScrollUp(1);
+        }
+        else if (_buffer.Y == Rows - 1)
+        {
+            // Below the region entirely: pinned at the screen's edge.
         }
         else
         {

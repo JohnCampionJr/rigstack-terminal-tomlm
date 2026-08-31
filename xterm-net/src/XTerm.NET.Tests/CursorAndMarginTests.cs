@@ -368,4 +368,69 @@ public class CursorAndMarginTests
         Assert.Equal(1, terminal.Buffer.Y);
         Assert.Equal(11, terminal.Buffer.X);
     }
+
+    // -------------------------------------------------------- the region is not the whole screen
+
+    [Fact]
+    public void A_line_feed_outside_the_side_margins_neither_scrolls_nor_leaves_the_region()
+    {
+        // The cursor is right of the region's columns, on its bottom row: the region's contents
+        // are not its to scroll, and the bottom margin is not its to cross.
+        var terminal = NewTerminal(cols: 10, rows: 8);
+        terminal.Write($"{Esc}[2;5r{Esc}[?69h{Esc}[2;5s");
+        terminal.Write($"{Esc}[5;3Hx");                    // inside: something to not-scroll
+        terminal.Write($"{Esc}[5;7H\n");
+
+        Assert.Equal(4, terminal.Buffer.Y);
+        Assert.Equal("x", terminal.Buffer.Lines[4]![2].Content);
+    }
+
+    [Fact]
+    public void An_alignment_pattern_resets_the_margins()
+    {
+        // DECALN exists for checking screen geometry, and it starts that geometry from scratch --
+        // a surviving region would clip the very pattern.
+        var terminal = NewTerminal(cols: 10, rows: 8);
+        terminal.Write($"{Esc}[?69h{Esc}[2;3s{Esc}[4;5r");
+        terminal.Write($"{Esc}#8");
+        terminal.Write($"{Esc}[4;2H{Esc}[A");              // crossing the (former) top margin
+
+        Assert.Equal(2, terminal.Buffer.Y);
+        Assert.Equal(0, terminal.Buffer.ScrollTop);
+        Assert.Equal(9, terminal.Buffer.ScrollRight);
+    }
+
+    [Fact]
+    public void A_region_whose_top_is_not_above_its_bottom_is_refused_whole()
+    {
+        var terminal = NewTerminal(rows: 10);
+        terminal.Write($"{Esc}[3;7r");
+        terminal.Write($"{Esc}[3;3r");                     // invalid: ignored, not clamped
+
+        Assert.Equal(2, terminal.Buffer.ScrollTop);
+        Assert.Equal(6, terminal.Buffer.ScrollBottom);
+    }
+
+    [Fact]
+    public void The_cursor_report_speaks_the_origin_modes_coordinates_in_both_axes()
+    {
+        var terminal = NewTerminal(cols: 20, rows: 10);
+        string? reply = null;
+        terminal.DataReceived += (_, e) => reply = e.Data;
+        terminal.Write($"{Esc}[3;8r{Esc}[?69h{Esc}[5;12s{Esc}[?6h");
+        terminal.Write($"{Esc}[2;3H");                     // region-relative addressing
+        terminal.Write($"{Esc}[6n");
+
+        Assert.Equal($"{Esc}[2;3R", reply);
+    }
+
+    [Fact]
+    public void A_tab_stops_at_the_right_margin_for_a_cursor_inside_one()
+    {
+        var terminal = NewTerminal(cols: 40, rows: 5);
+        terminal.Write($"{Esc}[?69h{Esc}[5;20s");
+        terminal.Write($"{Esc}[1;7H\t\t\t");
+
+        Assert.Equal(19, terminal.Buffer.X);               // the margin, not the next stop past it
+    }
 }

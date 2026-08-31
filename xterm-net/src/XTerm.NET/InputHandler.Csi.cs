@@ -68,6 +68,13 @@ public partial class InputHandler
 
     private void FillScreenWithE()
     {
+        // DECALN resets the margins -- top/bottom and left/right alike -- and origin mode, before
+        // homing the cursor. The alignment pattern exists for checking screen geometry, and it
+        // starts that geometry from scratch; a region surviving it would clip the very pattern.
+        _buffer.SetScrollRegion(0, _terminal.Rows - 1);
+        _buffer.SetLeftRightMargins(0, _terminal.Cols - 1);
+        _terminal.OriginMode = false;
+
         var cell = new BufferCell('E', 1, AttributeData.Default);
         for (int row = 0; row < _terminal.Rows; row++)
         {
@@ -695,8 +702,10 @@ public partial class InputHandler
         // CHT - Cursor Forward Tabulation (CSI I)
         var count = Math.Max(parameters.GetParam(0, 1), 1);
 
+        // Stops at the right margin for a cursor inside one, exactly as C0 HT does.
+        var limit = CursorInMarginColumns() ? _buffer.ScrollRight : _terminal.Cols - 1;
         for (var i = 0; i < count; i++)
-            _buffer.SetCursor(_terminal.NextTabStop(_buffer.X), _buffer.Y);
+            _buffer.SetCursor(Math.Min(_terminal.NextTabStop(_buffer.X), limit), _buffer.Y);
     }
 
     private void CursorBackwardTab(Params parameters)
@@ -712,7 +721,9 @@ public partial class InputHandler
             // The stop SET, like HT and CHT. Deriving the previous stop arithmetically ignored
             // every stop a program set with HTS and every one it cleared with TBC, so backward
             // tab disagreed with forward tab on the same screen.
-            _buffer.SetCursor(_terminal.PreviousTabStop(_buffer.X), _buffer.Y);
+            // And the mirror at the left margin.
+            var floor = CursorInMarginColumns() ? _buffer.ScrollLeft : 0;
+            _buffer.SetCursor(Math.Max(_terminal.PreviousTabStop(_buffer.X), floor), _buffer.Y);
         }
     }
 
@@ -833,10 +844,12 @@ public partial class InputHandler
                     var row = _buffer.Y + 1; // 1-based
                     var col = Math.Min(_buffer.X, _terminal.Cols - 1) + 1; // 1-based, phantom clamped
 
-                    // Adjust for origin mode
+                    // Origin mode is a coordinate SYSTEM, not a row offset: both axes are
+                    // reported relative to the region's top-left, column included.
                     if (_terminal.OriginMode)
                     {
-                        row = row - _buffer.ScrollTop;
+                        row -= _buffer.ScrollTop;
+                        col -= _buffer.ScrollLeft;
                     }
 
                     _terminal.RaiseDataReceived($"\u001b[{row};{col}R");
@@ -979,6 +992,13 @@ public partial class InputHandler
         var bottomParam = parameters.GetParam(1, _terminal.Rows);
         var top = Math.Max(topParam <= 0 ? 1 : topParam, 1) - 1;
         var bottom = Math.Max(bottomParam <= 0 ? _terminal.Rows : bottomParam, 1) - 1;
+
+        // The top margin must be ABOVE the bottom one; a request where it is not is ignored
+        // whole, keeping the previous region -- not clamped into a one-row band the program
+        // never asked for.
+        if (top >= bottom)
+            return;
+
         _buffer.SetScrollRegion(top, bottom);
         MoveCursorToHome();
     }
@@ -1242,7 +1262,17 @@ public partial class InputHandler
     {
         if (_buffer.Y == _buffer.ScrollBottom)
         {
+            // A cursor OUTSIDE the left/right margins is outside the region: it must neither
+            // scroll the region's contents nor step past its bottom row. It just stays -- and the
+            // same holds on the screen's last row, where there is nowhere to go either.
+            if (!CursorInMarginColumns())
+                return;
+
             _buffer.ScrollUp(1);
+        }
+        else if (_buffer.Y == _terminal.Rows - 1)
+        {
+            // Below the region entirely (bottom margin above this row): pinned at the screen edge.
         }
         else
         {
