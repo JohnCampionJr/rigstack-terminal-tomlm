@@ -183,6 +183,15 @@ public enum CsiCommand
     /// <summary>DECSTR -- soft terminal reset (CSI ! p).</summary>
     SoftReset,
 
+    /// <summary>DECCRA -- copy a rectangular area (CSI ... $ v).</summary>
+    CopyRectangularArea,
+
+    /// <summary>DECFRA -- fill a rectangular area with a character (CSI Pch;Pt;Pl;Pb;Pr $ x).</summary>
+    FillRectangularArea,
+
+    /// <summary>DECERA -- erase a rectangular area (CSI Pt;Pl;Pb;Pr $ z).</summary>
+    EraseRectangularArea,
+
     /// <summary>DECRQCRA -- request a checksum of a rectangular area (CSI Pid;Pp;Pt;Pl;Pb;Pr * y).</summary>
     RequestChecksumRectangularArea,
 

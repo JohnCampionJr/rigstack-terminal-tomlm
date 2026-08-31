@@ -670,6 +670,18 @@ public partial class InputHandler
                 _terminal.SoftReset();
                 break;
 
+            case CsiCommand.CopyRectangularArea:
+                CopyRectangularArea(parameters);
+                break;
+
+            case CsiCommand.FillRectangularArea:
+                FillRectangularArea(parameters);
+                break;
+
+            case CsiCommand.EraseRectangularArea:
+                EraseRectangularArea(parameters);
+                break;
+
             case CsiCommand.RequestChecksumRectangularArea:
                 RequestChecksumRectangularArea(parameters);
                 break;
