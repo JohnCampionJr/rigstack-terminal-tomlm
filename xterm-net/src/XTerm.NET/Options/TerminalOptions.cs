@@ -287,17 +287,17 @@ public class TerminalOptions : ICloneable
     public bool KittyKeyboardEnabled { get; set; } = true;
 
     /// <summary>
-    /// Whether mouse pointer shape requests (OSC 22) are honoured. Off by default.
+    /// Whether mouse pointer shape requests (OSC 22) are honoured. On by default.
     /// </summary>
     /// <remarks>
-    /// Opt-in, because the emulator cannot make this work on its own: only the host can change a
-    /// real pointer, and it does that by subscribing to
-    /// <see cref="Terminal.PointerShapeChanged"/>. Left on by default, a host that has not wired
-    /// that event would still answer the support query with a yes, and an application would go on
-    /// using shapes that never appear. Turning it on is the host saying it has wired the event, so
-    /// the yes is true when it is given.
+    /// The emulator cannot change a real pointer on its own -- only a host subscribed to
+    /// <see cref="Terminal.PointerShapeChanged"/> can -- so a host that has not wired that event
+    /// answers the support query with a yes it cannot fully honour. That is the tradeoff of the
+    /// on-by-default: capability probes (ucs-detect and friends) see the protocol answered, which
+    /// matches how the stock hosts ship, and a host that genuinely cannot change its pointer can
+    /// switch the whole protocol off and the terminal goes silent, query included.
     /// </remarks>
-    public bool PointerShapesEnabled { get; set; }
+    public bool PointerShapesEnabled { get; set; } = true;
 
     /// <summary>
     /// Budget for images held by client id but not currently on screen, in bytes.

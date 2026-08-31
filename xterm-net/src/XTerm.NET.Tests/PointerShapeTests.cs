@@ -367,13 +367,13 @@ public class PointerShapeTests
     }
 
     /// <summary>
-    /// Off unless a host asks for it. Only a host can change a real pointer, so a stock terminal
-    /// nobody has wired up must not claim it can.
+    /// On by default, so capability probes get an answer without every host having to opt in;
+    /// a host that cannot change its pointer turns the protocol off instead.
     /// </summary>
     [Fact]
-    public void Disabled_by_default()
+    public void Enabled_by_default()
     {
-        Assert.False(new TerminalOptions().PointerShapesEnabled);
+        Assert.True(new TerminalOptions().PointerShapesEnabled);
     }
 
     /// <summary>
@@ -383,7 +383,7 @@ public class PointerShapeTests
     [Fact]
     public void Disabled_ignores_the_sequence()
     {
-        var terminal = new Terminal(new TerminalOptions { Cols = 20, Rows = 5 });
+        var terminal = new Terminal(new TerminalOptions { Cols = 20, Rows = 5, PointerShapesEnabled = false });
         var changes = 0;
         terminal.PointerShapeChanged += (_, _) => changes++;
 
@@ -401,7 +401,7 @@ public class PointerShapeTests
     [Fact]
     public void Disabled_answers_no_query()
     {
-        var terminal = new Terminal(new TerminalOptions { Cols = 20, Rows = 5 });
+        var terminal = new Terminal(new TerminalOptions { Cols = 20, Rows = 5, PointerShapesEnabled = false });
         var replies = new List<string>();
         terminal.DataReceived += (_, e) => replies.Add(e.Data);
 
