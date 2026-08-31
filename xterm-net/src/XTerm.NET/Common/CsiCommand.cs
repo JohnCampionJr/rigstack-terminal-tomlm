@@ -180,6 +180,9 @@ public enum CsiCommand
     /// </summary>
     RequestMode,
 
+    /// <summary>DECSTR -- soft terminal reset (CSI ! p).</summary>
+    SoftReset,
+
     /// <summary>DECRQCRA -- request a checksum of a rectangular area (CSI Pid;Pp;Pt;Pl;Pb;Pr * y).</summary>
     RequestChecksumRectangularArea,
 

@@ -59,6 +59,9 @@ public class Terminal : IDisposable
     public bool LeftRightMarginMode { get; set; }
     public bool CursorVisible { get; set; }
     public bool ReverseWraparound { get; set; }
+
+    /// <summary>DECSET 1045 -- classic reverse wraparound; see <see cref="Common.TerminalMode.ReverseWraparoundExtended"/>.</summary>
+    public bool ReverseWraparoundExtended { get; set; }
     public bool ReverseVideo { get; set; }
     public bool SendFocusEvents { get; set; }
     public bool Win32InputMode { get; set; }
@@ -506,6 +509,7 @@ public class Terminal : IDisposable
         LeftRightMarginMode = false;
         CursorVisible = true;
         ReverseWraparound = false;
+        ReverseWraparoundExtended = false;
         SendFocusEvents = false;
         InBandResize = false;
     }
@@ -786,6 +790,43 @@ public class Terminal : IDisposable
     /// <summary>
     /// Resets the terminal to initial state.
     /// </summary>
+    /// <summary>
+    /// DECSTR -- soft terminal reset (CSI ! p). The subset of <see cref="Reset"/> the VT
+    /// standard names: modes, margins, rendition, charsets and the SAVED cursor go back to
+    /// defaults, while the screen contents, the live cursor position, the tab stops and the
+    /// window state stay exactly where they are. esctest issues one before every single test,
+    /// which is what makes an unimplemented DECSTR poison whole families: any mode a test sets
+    /// leaks into every test after it.
+    /// </summary>
+    public void SoftReset()
+    {
+        InsertMode = false;
+        ApplicationCursorKeys = false;
+        ApplicationKeypad = false;
+        OriginMode = false;
+        CursorVisible = true;
+        ReverseWraparound = false;
+        ReverseWraparoundExtended = false;
+
+        // xterm's deliberate deviation from the VT spec, which esctest tests for by name:
+        // DECSTR turns autowrap ON, because everything after 1985 assumes it.
+        Options.Wraparound = true;
+
+        // Margins to full screen, and the DECLRMM mode with them. xterm historically left the
+        // mode set -- the bug esctest names in test_DECSET_DECLRMM_ModeResetByDECSTR -- and the
+        // test asserts the FIXED behaviour.
+        LeftRightMarginMode = false;
+        Buffer.SetScrollRegion(0, Rows - 1);
+        Buffer.SetLeftRightMargins(0, Cols - 1);
+
+        // Normal rendition, default charsets, and a saved-cursor context of home-with-defaults,
+        // so DECRC after DECSTR restores the origin rather than a dead program's state.
+        _inputHandler.ResetAttributes();
+        _inputHandler.ResetCharsets();
+        _normalBuffer?.ResetSavedCursor();
+        _altBuffer?.ResetSavedCursor();
+    }
+
     public void Reset()
     {
         // RIS puts the tab stops back to their defaults along with everything else; a program's
@@ -820,6 +861,7 @@ public class Terminal : IDisposable
         LeftRightMarginMode = false;
         CursorVisible = true;
         ReverseWraparound = false;
+        ReverseWraparoundExtended = false;
         ReverseVideo = false;
         SendFocusEvents = false;
         EightBitInput = false;

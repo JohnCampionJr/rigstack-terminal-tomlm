@@ -216,24 +216,62 @@ public partial class InputHandler
         // The left margin, not column zero -- the mirror of where CursorBackward stops.
         var home = CursorInMarginColumns() ? _buffer.ScrollLeft : 0;
 
+        // A cursor PENDING a wrap sits one past the last column, a position no character
+        // occupies. With reverse wrap on, backspace is absorbed by un-pending: the cursor lands
+        // ON the last column and reports the same position it did before -- which is exactly the
+        // "backspace has no effect" xterm shows in that state. Without it, the phantom column
+        // never existed and backspace acts from the last REAL column.
+        if (_buffer.PendingWrap)
+        {
+            var lastCol = (CursorInMarginColumns() ? _buffer.ScrollRight : _terminal.Cols - 1);
+            var absorb = _terminal.Options.Wraparound
+                         && (_terminal.ReverseWraparound || _terminal.ReverseWraparoundExtended);
+            _buffer.SetCursor(absorb ? lastCol : Math.Max(lastCol - 1, home), _buffer.Y);
+            return;
+        }
+
         if (_buffer.X > home)
         {
             _buffer.SetCursor(_buffer.X - 1, _buffer.Y);
             return;
         }
 
-        if (!_terminal.ReverseWraparound)
+        // Reverse wrap needs DECAWM as well as its own mode -- both flavours of it. xterm split
+        // the feature in 2023: mode 45 is INLINE, crossing onto the row above only where the line
+        // actually wrapped (which is what erasing a wrapped command line needs and all it needs);
+        // mode 1045 is the CLASSIC behaviour, wrapping from any position and, at the top of the
+        // region, around to its bottom.
+        var classic = _terminal.ReverseWraparoundExtended;
+        var inline = _terminal.ReverseWraparound;
+        if (!_terminal.Options.Wraparound || (!inline && !classic))
             return;
 
-        // TopLimit, so a cursor that starts inside the scrolling region stays in it. Reverse wrap
-        // is what a shell uses to erase a wrapped command line, and that line belongs to the pane
-        // it was typed in.
-        if (_buffer.Y <= TopLimit())
-            return;
+        // Inline: only a wrap CONTINUATION has a previous row that is part of the same line. A
+        // cursor parked at a left margin by addressing has nothing above it to erase.
+        if (!classic)
+        {
+            var line = _buffer.Lines[_buffer.YBase + _buffer.Y];
+            if (line is null || !line.IsWrapped)
+                return;
+        }
 
-        // The right MARGIN, not the screen edge: the row above ends where the pane ends.
-        var right = CursorInMarginColumns() ? _buffer.ScrollRight : _terminal.Cols - 1;
-        _buffer.SetCursor(right, _buffer.Y - 1);
+        // The right MARGIN when margins are set, the screen edge otherwise -- and the margin even
+        // for a cursor left of the left margin: backing off the left EDGE lands on the pane's own
+        // last column, which is where xterm has put it since margins arrived in 2012.
+        var right = _terminal.LeftRightMarginMode ? _buffer.ScrollRight : _terminal.Cols - 1;
+
+        if (_buffer.Y > TopLimit())
+        {
+            _buffer.SetCursor(right, _buffer.Y - 1);
+            return;
+        }
+
+        // At the top of the region, classic reverse wrap carries on around to the region's
+        // bottom -- the treatment xterm gave top/bottom margins in 2018 for consistency with the
+        // left/right pair. Inline never gets here: the top row of a region cannot be a wrap
+        // continuation of the row outside it.
+        if (classic && _buffer.Y == TopLimit())
+            _buffer.SetCursor(right, BottomLimit());
     }
 
     private void CursorForward(Params parameters)
@@ -258,7 +296,38 @@ public partial class InputHandler
         // right of where every other terminal puts it, so a shell redrawing its line overwrote
         // the wrong character.
         var from = _buffer.PendingWrap ? _buffer.X - 1 : _buffer.X;
-        _buffer.SetCursor(Math.Max(from - count, home), _buffer.Y);
+
+        // With reverse wrap in force, CUB keeps counting across the wrap: a shell backing up
+        // over a command line that spilled onto the next row walks the cursor back onto the row
+        // above, exactly as that many backspaces would. Each row consumed takes one count for
+        // the wrap itself, and inline mode (45) only crosses where the line really wrapped.
+        var reverse = _terminal.Options.Wraparound
+                      && (_terminal.ReverseWraparound || _terminal.ReverseWraparoundExtended);
+        var x = from;
+        var y = _buffer.Y;
+        while (true)
+        {
+            var step = Math.Min(count, x - home);
+            x -= step;
+            count -= step;
+            if (count == 0 || !reverse || y <= TopLimit())
+                break;
+
+            if (!_terminal.ReverseWraparoundExtended)
+            {
+                var line = _buffer.Lines[_buffer.YBase + y];
+                if (line is null || !line.IsWrapped)
+                    break;
+            }
+
+            x = CursorInMarginColumns() ? _buffer.ScrollRight : _terminal.Cols - 1;
+            y -= 1;
+            count -= 1;
+            if (count == 0)
+                break;
+        }
+
+        _buffer.SetCursor(x, y);
     }
 
     private void CursorNextLine(Params parameters)
@@ -726,7 +795,10 @@ public partial class InputHandler
                 case 6: // DECXCPR - Extended Cursor Position Report
                     // Report cursor position: CSI ? row ; col R
                     var row = _buffer.Y + 1; // 1-based
-                    var col = _buffer.X + 1; // 1-based
+                    // A cursor pending a wrap sits one PAST the last column -- a position no
+                    // character occupies and no terminal reports. xterm answers with the last
+                    // column, which is what lets a program trust CPR arithmetic at the margin.
+                    var col = Math.Min(_buffer.X, _terminal.Cols - 1) + 1; // 1-based
                     _terminal.RaiseDataReceived($"\u001b[?{row};{col}R");
                     break;
 
@@ -759,7 +831,7 @@ public partial class InputHandler
                 case 6: // CPR - Cursor Position Report
                     // Report cursor position: CSI row ; col R
                     var row = _buffer.Y + 1; // 1-based
-                    var col = _buffer.X + 1; // 1-based
+                    var col = Math.Min(_buffer.X, _terminal.Cols - 1) + 1; // 1-based, phantom clamped
 
                     // Adjust for origin mode
                     if (_terminal.OriginMode)

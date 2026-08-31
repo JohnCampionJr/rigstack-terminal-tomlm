@@ -107,6 +107,10 @@ public partial class InputHandler
             case (int)TerminalMode.ReverseWraparound:
                 set = _terminal.ReverseWraparound;
                 return true;
+
+            case (int)TerminalMode.ReverseWraparoundExtended:
+                set = _terminal.ReverseWraparoundExtended;
+                return true;
             case (int)TerminalMode.AppKeypad:
                 set = _terminal.ApplicationKeypad;
                 return true;
@@ -345,6 +349,10 @@ public partial class InputHandler
 
                 case TerminalMode.ReverseWraparound:
                     _terminal.ReverseWraparound = false;
+                    break;
+
+                case TerminalMode.ReverseWraparoundExtended:
+                    _terminal.ReverseWraparoundExtended = false;
                     break;
 
                 case TerminalMode.AppKeypad:

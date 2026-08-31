@@ -666,6 +666,10 @@ public partial class InputHandler
                 CharAttributes(parameters);
                 break;
 
+            case CsiCommand.SoftReset:
+                _terminal.SoftReset();
+                break;
+
             case CsiCommand.RequestChecksumRectangularArea:
                 RequestChecksumRectangularArea(parameters);
                 break;
@@ -1628,6 +1632,10 @@ public partial class InputHandler
 
                 case TerminalMode.ReverseWraparound:
                     _terminal.ReverseWraparound = true;
+                    break;
+
+                case TerminalMode.ReverseWraparoundExtended:
+                    _terminal.ReverseWraparoundExtended = true;
                     break;
 
                 case TerminalMode.AppKeypad:

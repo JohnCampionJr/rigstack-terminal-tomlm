@@ -297,4 +297,75 @@ public class CursorAndMarginTests
         Assert.Equal(" ", string.IsNullOrEmpty(terminal.Buffer.Lines[0]![19].Content) ? " " : terminal.Buffer.Lines[0]![19].Content);
         Assert.Equal("X", terminal.Buffer.Lines[0]![18].Content);
     }
+
+    // ------------------------------------------------------------------ reverse wrap, both flavours
+
+    // xterm split reverse wraparound in 2023: mode 45 is INLINE -- backspace crosses onto the row
+    // above only where the line actually wrapped, which is what erasing a wrapped command line
+    // needs -- and mode 1045 is the CLASSIC behaviour, from any position, around the region's top.
+    // Both require DECAWM, as they always have.
+
+    [Fact]
+    public void Inline_reverse_wrap_crosses_a_real_wrap()
+    {
+        var terminal = NewTerminal(cols: 10);
+        terminal.Write($"{Esc}[?45h");
+        terminal.Write(new string('x', 12));   // wraps onto row 2
+        terminal.Write($"{Esc}[2;1H\b");
+
+        Assert.Equal(0, terminal.Buffer.Y);
+        Assert.Equal(9, terminal.Buffer.X);
+    }
+
+    [Fact]
+    public void Inline_reverse_wrap_does_not_cross_where_nothing_wrapped()
+    {
+        // The cursor was put at the left margin by NEL/addressing; the row above is a different
+        // line, and mode 45 has nothing to erase there.
+        var terminal = NewTerminal(cols: 10);
+        terminal.Write($"{Esc}[?45h");
+        terminal.Write($"{Esc}[3;1H\b");
+
+        Assert.Equal(2, terminal.Buffer.Y);
+        Assert.Equal(0, terminal.Buffer.X);
+    }
+
+    [Fact]
+    public void Reverse_wrap_requires_autowrap()
+    {
+        var terminal = NewTerminal(cols: 10);
+        terminal.Write($"{Esc}[?7l");          // DECAWM off
+        terminal.Write($"{Esc}[?1045h");
+        terminal.Write($"{Esc}[3;1H\b");
+
+        Assert.Equal(2, terminal.Buffer.Y);
+        Assert.Equal(0, terminal.Buffer.X);
+    }
+
+    [Fact]
+    public void Classic_reverse_wrap_carries_the_regions_top_around_to_its_bottom()
+    {
+        // The treatment xterm gave top/bottom margins in 2018, for consistency with left/right.
+        var terminal = NewTerminal(cols: 10, rows: 8);
+        terminal.Write($"{Esc}[?1045h");
+        terminal.Write($"{Esc}[2;5r");         // region rows 2..5
+        terminal.Write($"{Esc}[2;1H\b");
+
+        Assert.Equal(4, terminal.Buffer.Y);    // bottom margin, 0-based
+        Assert.Equal(9, terminal.Buffer.X);
+    }
+
+    [Fact]
+    public void Classic_reverse_wrap_from_the_left_edge_lands_on_the_right_margin()
+    {
+        // A cursor LEFT of the left margin still backs into the pane, not past it: the row above
+        // ends where the pane ends.
+        var terminal = NewTerminal(cols: 20);
+        terminal.Write($"{Esc}[?1045h{Esc}[?69h");
+        terminal.Write($"{Esc}[5;12s");
+        terminal.Write($"{Esc}[3;1H\b");
+
+        Assert.Equal(1, terminal.Buffer.Y);
+        Assert.Equal(11, terminal.Buffer.X);
+    }
 }
