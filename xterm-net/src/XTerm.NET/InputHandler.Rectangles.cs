@@ -71,6 +71,32 @@ public partial class InputHandler
         FillCells(top, left, bottom, right, ref cell);
     }
 
+    /// <summary>
+    /// DECSERA (CSI Pt;Pl;Pb;Pr $ {). Like DECERA, but DECSCA-protected characters survive.
+    /// Only DECSCA counts here: ISO SPA/EPA guards do NOT stop it -- the selective erases and
+    /// the guarded erases are separate systems, and this one belongs to DECSCA.
+    /// </summary>
+    private void SelectiveEraseRectangularArea(Params parameters)
+    {
+        if (!TryReadRectangle(parameters, 0, out var top, out var left, out var bottom, out var right))
+            return;
+
+        var blank = new BufferCell(" ", 1, GetEraseAttributes());
+        for (var row = top; row <= bottom; row++)
+        {
+            var line = _buffer.Lines[_buffer.YBase + row];
+            if (line is null)
+                continue;
+
+            for (var col = left; col <= right && col < line.Length; col++)
+            {
+                if (line[col].Attributes.IsProtected())
+                    continue;
+                line.SetCell(col, ref blank);
+            }
+        }
+    }
+
     private void FillCells(int top, int left, int bottom, int right, ref BufferCell cell)
     {
         for (var row = top; row <= bottom; row++)

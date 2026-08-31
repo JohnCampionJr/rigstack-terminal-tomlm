@@ -192,6 +192,9 @@ public enum CsiCommand
     /// <summary>DECERA -- erase a rectangular area (CSI Pt;Pl;Pb;Pr $ z).</summary>
     EraseRectangularArea,
 
+    /// <summary>DECSERA -- selectively erase a rectangular area (CSI Pt;Pl;Pb;Pr $ {), sparing DECSCA-protected cells.</summary>
+    SelectiveEraseRectangularArea,
+
     /// <summary>DECIC -- insert columns at the cursor (CSI Pn ' }).</summary>
     InsertColumns,
 

@@ -682,6 +682,10 @@ public partial class InputHandler
                 EraseRectangularArea(parameters);
                 break;
 
+            case CsiCommand.SelectiveEraseRectangularArea:
+                SelectiveEraseRectangularArea(parameters);
+                break;
+
             case CsiCommand.InsertColumns:
                 InsertColumns(parameters);
                 break;
@@ -855,6 +859,10 @@ public partial class InputHandler
                 case "7": // DECSC - Save Cursor
                     SaveCursor();
                     break;
+                case "Z": // DECID - the ancient identify; answers like the primary DA
+                    _terminal.RaiseDataReceived(PrimaryDeviceAttributes);
+                    break;
+
                 case "V": // SPA - Start of Protected Area
                     StartProtectedArea();
                     break;
@@ -1419,20 +1427,17 @@ public partial class InputHandler
 
         if (identifier.StartsWith('>'))
         {
-            // Secondary DA: CSI > Pp ; Pv ; Pc c. Pp = 1 is a VT220, matching the conformance
-            // level the primary reply claims -- the old 0 said VT100 and contradicted it. Pv
-            // carries this library's version so a program can tell builds apart, and Pc = 0 is
+            // Secondary DA: CSI > Pp ; Pv ; Pc c. Pp names the hardware family for the operating
+            // level, on xterm's scale (0=VT100, 1=VT220, 24=VT320, 41=VT420, 64=VT520). Pv is
+            // read by programs as an xterm patch level -- vim and tmux gate features on it -- so
+            // it reports the xterm this emulator answers as, not the library version. Pc = 0 is
             // "no cartridge ROM".
             _terminal.RaiseDataReceived(SecondaryDeviceAttributes);
         }
         else if (identifier.Length == 1)
         {
-            // Primary DA: CSI ? 62 ; ... c. 62 is service class 2 (VT220), the level whose core --
-            // scrolling regions, insert and delete line and character, erase character, the
-            // alternate buffer, DECSC/DECRC -- this emulator does implement. 22 is ANSI colour.
-            _terminal.RaiseDataReceived(_terminal.Options.SixelEnabled
-                ? "\u001b[?62;4;22c"
-                : "\u001b[?62;22c");
+            // Primary DA: CSI ? Pl ; ... c, from the DECSCL operating level.
+            _terminal.RaiseDataReceived(PrimaryDeviceAttributes);
         }
 
         // Any other prefix is left unanswered. "?c" is the one that used to go wrong: it is not the
@@ -1445,18 +1450,50 @@ public partial class InputHandler
     }
 
     /// <summary>
-    /// The Pv field of the secondary DA reply: this assembly's version flattened into one number,
-    /// so 2.0 reports 200.
+    /// The Pv field of the secondary DA reply. Programs parse this as an xterm patch level (vim
+    /// wants >= 95 for cursor shaping, tmux >= 270 for many extensions), so it claims the xterm
+    /// whose behaviour this emulator matches rather than the library's own version.
     /// </summary>
-    private static int FirmwareVersion =>
-        typeof(InputHandler).Assembly.GetName().Version is { } version
-            ? version.Major * 100 + version.Minor
-            : 0;
+    private const int FirmwareVersion = 383;
 
     /// <summary>
-    /// The secondary DA reply, CSI &gt; Pp ; Pv ; Pc c.
+    /// The primary DA reply for the current DECSCL operating level -- xterm's exact lists.
+    /// Attribute 4, Sixel, is appended only when the option enables it (see the remarks on
+    /// <see cref="DeviceAttributes"/>).
     /// </summary>
-    private static string SecondaryDeviceAttributes => $"\u001b[>1;{FirmwareVersion};0c";
+    private string PrimaryDeviceAttributes
+    {
+        get
+        {
+            // 1 = 132 columns, 2 = printer, 6 = selective erase, 9 = national replacement
+            // charsets, 15 = technical characters, 22 = ANSI colour, 29 = ANSI text locator;
+            // levels 4+ add 16 = locator port, 17 = terminal state interrogation, 18 = user
+            // windows, 21 = horizontal scrolling, 28 = rectangular editing.
+            var features = _terminal.ConformanceLevel >= 64
+                ? "1;2;6;9;15;16;17;18;21;22;28;29"
+                : "1;2;6;9;15;22;29";
+            if (_terminal.Options.SixelEnabled)
+                features = "4;" + features;
+            return _terminal.ConformanceLevel switch
+            {
+                61 => "\u001b[?1;2c",
+                var level => $"\u001b[?{level};{features}c",
+            };
+        }
+    }
+
+    /// <summary>
+    /// The secondary DA reply, CSI &gt; Pp ; Pv ; Pc c, with Pp on xterm's hardware-family scale
+    /// for the operating level.
+    /// </summary>
+    private string SecondaryDeviceAttributes => _terminal.ConformanceLevel switch
+    {
+        61 => $"\u001b[>0;{FirmwareVersion};0c",
+        62 => $"\u001b[>1;{FirmwareVersion};0c",
+        63 => $"\u001b[>24;{FirmwareVersion};0c",
+        64 => $"\u001b[>41;{FirmwareVersion};0c",
+        _ => $"\u001b[>64;{FirmwareVersion};0c",
+    };
 
     /// <summary>
     /// The version XTVERSION reports, read once. It cannot change while the process runs, and the

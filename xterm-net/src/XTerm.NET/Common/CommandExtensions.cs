@@ -79,6 +79,7 @@ public static class CsiCommandExtensions
         { "$v", CsiCommand.CopyRectangularArea },   // DECCRA
         { "$x", CsiCommand.FillRectangularArea },   // DECFRA
         { "$z", CsiCommand.EraseRectangularArea },  // DECERA
+        { "${", CsiCommand.SelectiveEraseRectangularArea },  // DECSERA
         { "'}", CsiCommand.InsertColumns },         // DECIC
         { "'~", CsiCommand.DeleteColumns },         // DECDC
         { "\"q", CsiCommand.SelectCharacterProtection },  // DECSCA

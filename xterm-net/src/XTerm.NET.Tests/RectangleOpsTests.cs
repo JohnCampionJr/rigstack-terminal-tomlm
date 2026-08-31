@@ -111,4 +111,30 @@ public class RectangleOpsTests
 
         Assert.Equal("abcdab", Row(terminal, 0, 6));
     }
+
+    // ---- DECSERA (CSI Pt;Pl;Pb;Pr $ {) -------------------------------------------------------
+
+    [Fact]
+    public void SelectiveErase_blanks_the_rectangle()
+    {
+        var terminal = NewTerminal(cols: 6, rows: 3);
+        terminal.Write("abcdef\r\nghijkl");
+        terminal.Write($"{Esc}[1;2;2;5${{");
+
+        Assert.Equal("a    f", Row(terminal, 0, 6));
+        Assert.Equal("g    l", Row(terminal, 1, 6));
+    }
+
+    [Fact]
+    public void SelectiveErase_spares_DecscaProtected_cells_only()
+    {
+        var terminal = NewTerminal(cols: 6, rows: 2);
+        terminal.Write("ab");
+        terminal.Write($"{Esc}[1\"q" + "CD" + $"{Esc}[0\"q");   // CD protected by DECSCA
+        terminal.Write($"{Esc}Ve{Esc}W");                        // e guarded by ISO SPA/EPA
+        terminal.Write($"{Esc}[1;1;1;6${{");
+
+        // DECSCA protection holds; the ISO guard belongs to the other erase family and does not.
+        Assert.Equal("  CD  ", Row(terminal, 0, 6));
+    }
 }

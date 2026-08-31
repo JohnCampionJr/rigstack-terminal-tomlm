@@ -801,13 +801,18 @@ public partial class InputHandler
             switch (report)
             {
                 case 6: // DECXCPR - Extended Cursor Position Report
-                    // Report cursor position: CSI ? row ; col R
+                    // CSI ? row ; col ; page R -- CPR plus the page, which is always 1 here.
                     var row = _buffer.Y + 1; // 1-based
                     // A cursor pending a wrap sits one PAST the last column -- a position no
                     // character occupies and no terminal reports. xterm answers with the last
                     // column, which is what lets a program trust CPR arithmetic at the margin.
                     var col = Math.Min(_buffer.X, _terminal.Cols - 1) + 1; // 1-based
-                    _terminal.RaiseDataReceived($"\u001b[?{row};{col}R");
+                    if (_terminal.OriginMode)
+                    {
+                        row -= _buffer.ScrollTop;
+                        col -= _buffer.ScrollLeft;
+                    }
+                    _terminal.RaiseDataReceived($"\u001b[?{row};{col};1R");
                     break;
 
                 case 15: // Printer status
@@ -822,7 +827,41 @@ public partial class InputHandler
 
                 case 26: // Keyboard status
                     // Report keyboard ready: CSI ? 2 7 ; 1 ; 0 ; 0 n
+                    // (language = North American, status = ready, type = LK201)
                     _terminal.RaiseDataReceived("\u001b[?27;1;0;0n");
+                    break;
+
+                case 53: // DSR locator status (DEC form)
+                case 55: // DSR locator status (xterm form)
+                    // 53 = locator available. There is no locator device, but xterm answers
+                    // 53 here too -- DECEFR and friends are accepted, just eventless.
+                    _terminal.RaiseDataReceived("\u001b[?53n");
+                    break;
+
+                case 56: // DSR locator type
+                    // CSI ? 57 ; 1 n -- the locator, such as it is, is a mouse.
+                    _terminal.RaiseDataReceived("\u001b[?57;1n");
+                    break;
+
+                case 62: // DECMSR - Macro Space Report
+                    // CSI Pn * { -- no macros, no space for macros. Note: NOT a ?-prefixed reply.
+                    _terminal.RaiseDataReceived("\u001b[0*{");
+                    break;
+
+                case 63: // DECCKSR - Memory Checksum Report
+                    // DCS Pid ! ~ checksum ST, echoing the request's id. No macro memory, so 0.
+                    var id = parameters.GetParam(1, 0);
+                    _terminal.RaiseDataReceived($"\u001bP{id}!~0000\u001b\\");
+                    break;
+
+                case 75: // DSR data integrity
+                    // CSI ? 7 0 n -- no communication errors.
+                    _terminal.RaiseDataReceived("\u001b[?70n");
+                    break;
+
+                case 85: // DSR multiple-session status
+                    // CSI ? 8 3 n -- not configured for multiple sessions.
+                    _terminal.RaiseDataReceived("\u001b[?83n");
                     break;
             }
         }

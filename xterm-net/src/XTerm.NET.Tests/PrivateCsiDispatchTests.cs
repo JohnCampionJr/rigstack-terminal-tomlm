@@ -247,7 +247,7 @@ public class PrivateCsiDispatchTests
 
         terminal.Write($"{Esc}[?6n");
 
-        Assert.Equal($"{Esc}[?6;11R", Assert.Single(replies));
+        Assert.Equal($"{Esc}[?6;11;1R", Assert.Single(replies));   // DECXCPR carries the page
     }
 
     [Fact]
