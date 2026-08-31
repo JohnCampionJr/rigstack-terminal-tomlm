@@ -1,4 +1,4 @@
-![Icon](icon.png)
+![Icon](https://raw.githubusercontent.com/tomlm/Iciclecreek.Avalonia.Terminal/main/icon.png)
 # Iciclecreek.Avalonia.Terminal For Avalonia 12.x
 ![Terminal Demo](https://raw.githubusercontent.com/tomlm/Iciclecreek.Avalonia.Terminal/main/terminal.gif)
 
@@ -36,7 +36,14 @@ Or via the Package Manager Console in Visual Studio:
 Install-Package Iciclecreek.Avalonia.Terminal
 ```
 
+## Compliance
+<img width="890" height="443" alt="image" src="https://github.com/user-attachments/assets/831a7de7-89fc-4f95-bf0d-0392053fb2f1" />
+
+
 ## Usage
+There are 2 Avalonia Controls:
+* **TerminalControl** - allows you to embed a terminal anywhere in xaml markup
+* **TerminalWindow** - a popup window with a terminal control in it.
 
 ### TerminalControl
 
@@ -270,6 +277,7 @@ terminalControl.Terminal.Options.KittyGraphicsEnabled = false;
 Kitty's file, temp-file and shared-memory transmission media (`t=f`, `t=t`, `t=s`) are deliberately
 refused — they would have the terminal open a path chosen by the process it is hosting. Clients are
 told so and fall back to sending the pixels directly.
+<img width="851" height="441" alt="image" src="https://github.com/user-attachments/assets/b47f8217-ec83-4d50-8fd0-2ef06b572b78" />
 
 
 ## Links
