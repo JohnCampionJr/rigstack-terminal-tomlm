@@ -433,4 +433,45 @@ public class CursorAndMarginTests
 
         Assert.Equal(19, terminal.Buffer.X);               // the margin, not the next stop past it
     }
+
+    // ---- Tabs vs margins, xterm's asymmetry --------------------------------------------------
+
+    [Fact]
+    public void ForwardTab_StartingLeftOfTheMargin_StillStopsAtTheRightMargin()
+    {
+        var terminal = NewTerminal(cols: 80, rows: 24);
+        terminal.Write($"{Esc}[?69h{Esc}[5;30s");
+        terminal.Write($"{Esc}[9;1H{Esc}[9I");     // from column 1, tab hard right
+
+        Assert.Equal(30 - 1, terminal.Buffer.X);   // pinned at the right margin, not column 73
+    }
+
+    [Fact]
+    public void BackwardTab_WalksStraightOutOfTheLeftMargin()
+    {
+        var terminal = NewTerminal(cols: 80, rows: 24);
+        terminal.Write($"{Esc}[?69h{Esc}[5;30s");
+        terminal.Write($"{Esc}[9;7H{Esc}[2Z");     // backward tabs ignore the region entirely
+
+        Assert.Equal(0, terminal.Buffer.X);
+    }
+
+    // ---- Reverse wrap hygiene ------------------------------------------------------------------
+
+    [Fact]
+    public void LineFeed_MakesTheEnteredRowAFreshLine()
+    {
+        var terminal = NewTerminal(cols: 80, rows: 24);
+        terminal.Write($"{Esc}[?7h{Esc}[?45h");
+        terminal.Write($"{Esc}[3;1H" + new string('*', 82));   // wraps: row 4 is a continuation
+        Assert.True(terminal.Buffer.Lines[3]!.IsWrapped);
+
+        terminal.Write($"{Esc}[3;80H\n");                       // explicit LF into row 4
+        Assert.False(terminal.Buffer.Lines[3]!.IsWrapped);
+
+        // ...so reverse wrap now refuses the boundary the program rewrote as separate lines.
+        terminal.Write($"{Esc}[4;1H{Esc}[5D");
+        Assert.Equal(0, terminal.Buffer.X);
+        Assert.Equal(3, terminal.Buffer.Y);
+    }
 }

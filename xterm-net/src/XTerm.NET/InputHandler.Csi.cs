@@ -699,8 +699,11 @@ public partial class InputHandler
         // CHT - Cursor Forward Tabulation (CSI I)
         var count = Math.Max(parameters.GetParam(0, 1), 1);
 
-        // Stops at the right margin for a cursor inside one, exactly as C0 HT does.
-        var limit = CursorInMarginColumns() ? _buffer.ScrollRight : _terminal.Cols - 1;
+        // Stops at the right margin, exactly as C0 HT does. The margin binds any cursor at or
+        // left of it -- starting left of the left margin tabs INTO the box and stops at its right
+        // edge, the same discipline printing follows -- while a cursor already right of the
+        // margin only stops at the screen edge.
+        var limit = _buffer.X <= _buffer.ScrollRight ? _buffer.ScrollRight : _terminal.Cols - 1;
         for (var i = 0; i < count; i++)
             _buffer.SetCursor(Math.Min(_terminal.NextTabStop(_buffer.X), limit), _buffer.Y);
     }
@@ -718,9 +721,9 @@ public partial class InputHandler
             // The stop SET, like HT and CHT. Deriving the previous stop arithmetically ignored
             // every stop a program set with HTS and every one it cleared with TBC, so backward
             // tab disagreed with forward tab on the same screen.
-            // And the mirror at the left margin.
-            var floor = CursorInMarginColumns() ? _buffer.ScrollLeft : 0;
-            _buffer.SetCursor(Math.Max(_terminal.PreviousTabStop(_buffer.X), floor), _buffer.Y);
+            // No margin floor: backward tabs ignore the region entirely -- xterm lets CBT walk
+            // straight out of the left margin to column 1.
+            _buffer.SetCursor(_terminal.PreviousTabStop(_buffer.X), _buffer.Y);
         }
     }
 
