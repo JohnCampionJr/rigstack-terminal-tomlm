@@ -387,6 +387,7 @@ public partial class InputHandler
                 for (int i = _buffer.Y + 1; i < _terminal.Rows; i++)
                 {
                     EraseLineCells(_buffer.Lines[_buffer.YBase + i], 0, _terminal.Cols, selective);
+                    BreakWrapFromAbove(i);
                     if (hasBlocks)
                         EraseBlocksHangingOver(_buffer.YBase + i, 0, _terminal.Cols);
                 }
@@ -395,15 +396,18 @@ public partial class InputHandler
                 for (int i = 0; i < _buffer.Y; i++)
                 {
                     EraseLineCells(_buffer.Lines[_buffer.YBase + i], 0, _terminal.Cols, selective);
+                    BreakWrapFromAbove(i);
                     if (hasBlocks)
                         EraseBlocksHangingOver(_buffer.YBase + i, 0, _terminal.Cols);
                 }
+                BreakWrapFromAbove(_buffer.Y);
                 EraseInLine(parameters, selective); // Current line to cursor
                 break;
             case 2: // Erase all — the visible screen only; the scrollback is kept
                 for (int i = 0; i < _terminal.Rows; i++)
                 {
                     EraseLineCells(_buffer.Lines[_buffer.YBase + i], 0, _terminal.Cols, selective);
+                    BreakWrapFromAbove(i);
                     if (hasBlocks)
                         EraseBlocksHangingOver(_buffer.YBase + i, 0, _terminal.Cols);
                 }
@@ -438,6 +442,9 @@ public partial class InputHandler
         {
             case 0: // Erase to right
                 EraseLineCells(line, _buffer.X, _terminal.Cols, selective);
+                // With its tail erased, this line no longer wraps onto the next -- xterm's
+                // ClearRight clears the wrap flag, and reverse-wrap reads it.
+                BreakWrapFromAbove(_buffer.Y + 1);
                 if (_buffer.HasMultiRowSizedRuns)
                     EraseBlocksHangingOver(_buffer.Y + _buffer.YBase, _buffer.X, _terminal.Cols - _buffer.X);
                 break;
@@ -1343,11 +1350,65 @@ public partial class InputHandler
     {
         if (_buffer.Y == _buffer.ScrollTop)
         {
+            // The mirror of IndexDown: a cursor outside the left/right margins is outside the
+            // region, so at the top margin it neither scrolls the region nor climbs past it.
+            if (!CursorInMarginColumns())
+                return;
+
             _buffer.ScrollDown(1);
+        }
+        else if (_buffer.Y == 0)
+        {
+            // Above the region entirely: pinned at the screen's top edge.
         }
         else
         {
             _buffer.SetCursor(_buffer.X, _buffer.Y - 1);
+        }
+    }
+
+    /// <summary>
+    /// Marks the viewport row <paramref name="row"/> as no longer being a soft-wrap continuation
+    /// of the line above it. The erase operations call this where xterm clears its line-wrap
+    /// flag; without it, reverse-wraparound would walk the cursor up across a join the program
+    /// has since erased.
+    /// </summary>
+    private void BreakWrapFromAbove(int row)
+    {
+        if (row >= _terminal.Rows)
+            return;
+        var line = _buffer.Lines[_buffer.YBase + row];
+        if (line is not null)
+            line.IsWrapped = false;
+    }
+
+    /// <summary>
+    /// The DECSET states XTSAVE (CSI ? Pm s) has stashed away, by mode number, waiting for the
+    /// matching XTRESTORE (CSI ? Pm r).
+    /// </summary>
+    private readonly Dictionary<int, bool> _xtermSavedModes = new();
+
+    private void XtermSaveMode(Params parameters)
+    {
+        for (var i = 0; i < parameters.Length; i++)
+        {
+            var mode = parameters.GetParam(i, 0);
+            if (TryGetPrivateModeState(mode, out var set))
+                _xtermSavedModes[mode] = set;
+        }
+    }
+
+    private void XtermRestoreMode(Params parameters)
+    {
+        for (var i = 0; i < parameters.Length; i++)
+        {
+            var mode = parameters.GetParam(i, 0);
+            if (!_xtermSavedModes.TryGetValue(mode, out var set))
+                continue;
+            if (set)
+                SetCSIMode(mode, isPrivate: true);
+            else
+                ResetCSIMode(mode, isPrivate: true);
         }
     }
 

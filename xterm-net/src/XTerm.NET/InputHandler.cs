@@ -686,6 +686,14 @@ public partial class InputHandler
                 SelectiveEraseRectangularArea(parameters);
                 break;
 
+            case CsiCommand.XtermSaveMode:
+                XtermSaveMode(parameters);
+                break;
+
+            case CsiCommand.XtermRestoreMode:
+                XtermRestoreMode(parameters);
+                break;
+
             case CsiCommand.InsertColumns:
                 InsertColumns(parameters);
                 break;

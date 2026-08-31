@@ -459,17 +459,19 @@ public class CursorAndMarginTests
     // ---- Reverse wrap hygiene ------------------------------------------------------------------
 
     [Fact]
-    public void LineFeed_MakesTheEnteredRowAFreshLine()
+    public void ErasingALine_BreaksItsSoftWrapJoin()
     {
         var terminal = NewTerminal(cols: 80, rows: 24);
         terminal.Write($"{Esc}[?7h{Esc}[?45h");
         terminal.Write($"{Esc}[3;1H" + new string('*', 82));   // wraps: row 4 is a continuation
         Assert.True(terminal.Buffer.Lines[3]!.IsWrapped);
 
-        terminal.Write($"{Esc}[3;80H\n");                       // explicit LF into row 4
+        terminal.Write($"{Esc}[3;40H{Esc}[K");                  // erase the tail of row 3
         Assert.False(terminal.Buffer.Lines[3]!.IsWrapped);
 
-        // ...so reverse wrap now refuses the boundary the program rewrote as separate lines.
+        // ...so reverse wrap now refuses the boundary the program erased -- and after ED 2
+        // no boundary on the screen survives at all, which is what lets esctest's per-test
+        // reset (DECSTR + ED 2) actually isolate consecutive reverse-wrap tests.
         terminal.Write($"{Esc}[4;1H{Esc}[5D");
         Assert.Equal(0, terminal.Buffer.X);
         Assert.Equal(3, terminal.Buffer.Y);

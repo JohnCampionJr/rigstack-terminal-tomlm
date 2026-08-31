@@ -54,8 +54,6 @@ public class CsiCommandExtensionsTests
     /// command the old strip-then-match lookup ran instead.
     /// </summary>
     [Theory]
-    [InlineData("?s")]  // XTSAVE -> saved the cursor
-    [InlineData("?r")]  // XTRESTORE -> reset the scroll region and homed the cursor
     [InlineData(">m")]  // XTMODKEYS -> applied its arguments as SGR
     [InlineData(">n")]  // XTMODKEYS disable -> answered a device status report
     [InlineData(">t")]  // XTSMTITLE -> performed a window operation

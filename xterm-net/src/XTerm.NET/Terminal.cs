@@ -863,6 +863,7 @@ public class Terminal : IDisposable
         // so DECRC after DECSTR restores the origin rather than a dead program's state.
         _inputHandler.ResetAttributes();
         _inputHandler.ResetStoredModes();
+        _inputHandler.ResetProtectionMode();
         LineFeedMode = false;
 
         _inputHandler.ResetCharsets();
@@ -889,6 +890,7 @@ public class Terminal : IDisposable
         // Reset parser
         _parser.Reset();
         _inputHandler.ResetAttributes();
+        _inputHandler.ResetProtectionMode();
 
         // Reset modes
         InsertMode = false;
@@ -1726,14 +1728,6 @@ public class Terminal : IDisposable
         {
             // Move cursor down
             _buffer.SetCursor(_buffer.X, _buffer.Y + 1);
-
-            // An explicit line feed into a row makes it a fresh line, not the continuation of
-            // the one above: clear its soft-wrap flag. Without this, a stale flag left by an
-            // earlier wrapped write lets reverse-wrap (DECSET 45) walk up across a boundary the
-            // program has since rewritten as separate lines.
-            var entered = _buffer.Lines[_buffer.YBase + _buffer.Y];
-            if (entered is not null)
-                entered.IsWrapped = false;
         }
 
         // If ConvertEol is enabled -- or a program set LNM, which means the same thing from

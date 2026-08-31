@@ -11,6 +11,26 @@ namespace XTerm;
 /// </summary>
 public partial class InputHandler
 {
+    /// <summary>No protection in force -- erases honour nothing.</summary>
+    private const int ProtectionOff = 0;
+
+    /// <summary>ISO protection (SPA was used last): the PLAIN erases honour guard bits.</summary>
+    private const int ProtectionIso = 1;
+
+    /// <summary>DEC protection (DECSCA was used last): only the SELECTIVE erases honour bits.</summary>
+    private const int ProtectionDec = 2;
+
+    /// <summary>
+    /// Which protection discipline is currently in force. xterm keeps this as a single global
+    /// gate next to the per-cell bits: SPA raises ISO, DECSCA raises DEC (whatever its parameter),
+    /// and DECSTR or RIS drops it to off -- at which point every erase ignores the bits still
+    /// sitting in cells. esctest leans on that: its per-test reset is DECSTR then ED 2, and the
+    /// ED must sweep away the guarded characters earlier tests left behind.
+    /// </summary>
+    private int _protectionMode;
+
+    internal void ResetProtectionMode() => _protectionMode = ProtectionOff;
+
     /// <summary>
     /// Whether any guard or protection has ever been set this session. The erase paths are hot
     /// -- a full-screen clear fills every line -- and this flag is what lets them keep the plain
@@ -30,6 +50,9 @@ public partial class InputHandler
     {
         var on = parameters.GetParam(0, 0) == 1;
         _curAttr.SetProtected(on);
+        // Any DECSCA -- protecting or not -- selects the DEC discipline, exactly as xterm's
+        // CASE_DECSCA sets protected_mode unconditionally.
+        _protectionMode = ProtectionDec;
         if (on)
             _protectionUsed = true;
     }
@@ -38,6 +61,7 @@ public partial class InputHandler
     internal void StartProtectedArea()
     {
         _curAttr.SetGuarded(true);
+        _protectionMode = ProtectionIso;
         _protectionUsed = true;
     }
 
@@ -57,7 +81,7 @@ public partial class InputHandler
         var blank = BufferCell.Space;
         blank.Attributes = GetEraseAttributes();
 
-        if (!_protectionUsed && !selective)
+        if (!_protectionUsed || _protectionMode == ProtectionOff)
         {
             line.Fill(blank, start, end);
             return;
@@ -66,7 +90,11 @@ public partial class InputHandler
         for (var col = start; col < end && col < line.Length; col++)
         {
             var cell = line[col];
-            if (cell.Attributes.IsGuarded() || (selective && cell.Attributes.IsProtected()))
+            // Under ISO, guard bits stop every erase, the selective ones included -- xterm's
+            // documented deviation, which esctest's DECSED knownBug encodes. Under DEC, only
+            // the selective erases honour DECSCA bits; a plain ED ploughs straight through.
+            if ((_protectionMode == ProtectionIso && cell.Attributes.IsGuarded())
+                || (selective && cell.Attributes.IsProtected()))
                 continue;
             line.SetCell(col, ref blank);
         }

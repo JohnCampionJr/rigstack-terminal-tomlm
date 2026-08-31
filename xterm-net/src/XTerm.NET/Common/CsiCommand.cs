@@ -195,6 +195,12 @@ public enum CsiCommand
     /// <summary>DECSERA -- selectively erase a rectangular area (CSI Pt;Pl;Pb;Pr $ {), sparing DECSCA-protected cells.</summary>
     SelectiveEraseRectangularArea,
 
+    /// <summary>XTSAVE -- save DEC private mode values (CSI ? Pm s).</summary>
+    XtermSaveMode,
+
+    /// <summary>XTRESTORE -- restore DEC private mode values (CSI ? Pm r).</summary>
+    XtermRestoreMode,
+
     /// <summary>DECIC -- insert columns at the cursor (CSI Pn ' }).</summary>
     InsertColumns,
 
