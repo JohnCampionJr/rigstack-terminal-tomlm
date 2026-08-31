@@ -2445,7 +2445,15 @@ public class InputHandlerTests
         var reply = Capture(terminal, "\x1bP$qm\x1b\\");
         Assert.StartsWith("\x1bP1$r", reply);
         Assert.EndsWith("m\x1b\\", reply);
-        return reply["\x1bP1$r".Length..^"m\x1b\\".Length];
+        var body = reply["\x1bP1$r".Length..^"m\x1b\\".Length];
+
+        // Every reply leads with the reset, as xterm's does, so the reply REPLAYS to these
+        // attributes instead of composing onto whatever is in force. Asserted here once and
+        // stripped, so each test states only the attributes it is about.
+        if (body == "0")
+            return "0";
+        Assert.StartsWith("0;", body);
+        return body["0;".Length..];
     }
 
     [Fact]
@@ -2614,7 +2622,7 @@ public class InputHandlerTests
     {
         var terminal = CreateTerminal();
         var reply = Capture(terminal, "\x1bP$q\"p\x1b\\");
-        Assert.Equal("\x1bP1$r62;1\"p\x1b\\", reply);
+        Assert.Equal("\x1bP1$r65;1\"p\x1b\\", reply);
     }
 
     [Fact]

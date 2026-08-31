@@ -82,6 +82,11 @@ public static class CsiCommandExtensions
         { "'}", CsiCommand.InsertColumns },         // DECIC
         { "'~", CsiCommand.DeleteColumns },         // DECDC
         { "\"q", CsiCommand.SelectCharacterProtection },  // DECSCA
+        { "\"p", CsiCommand.SelectConformanceLevel },     // DECSCL
+        { "*x", CsiCommand.SelectAttributeChangeExtent },  // DECSACE
+        { "$}", CsiCommand.SelectActiveStatusDisplay },    // DECSASD
+        { "$~", CsiCommand.SelectStatusDisplayType },      // DECSSDT
+        { "*|", CsiCommand.SetLinesPerScreen },            // DECSNLS
         // The bare final character is DECLL (Load LEDs, "CSI Ps q"), which we do not implement, so
         // it is deliberately absent: mapping it to DECSCUSR meant "CSI 0 q" to clear the LEDs gave
         // the user a blinking cursor. DECSCUSR carries the SP intermediate and is " q" above.

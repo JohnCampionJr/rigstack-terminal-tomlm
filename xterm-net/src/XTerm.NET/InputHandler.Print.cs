@@ -427,7 +427,7 @@ public partial class InputHandler
             //
             // The value computed above, not a second call: reaching here means wrapping is off, so
             // the early-wrap block did not run and nothing has moved the cursor since.
-            _buffer.SetCursorRaw(wrapLimit, _buffer.Y);
+            _buffer.SetCursor(wrapLimit, _buffer.Y);
         }
 
         // DECAWM off and a two-column character at the last column: it does not fit, and there is
@@ -471,8 +471,9 @@ public partial class InputHandler
             if (line is not null && line.HasSizedRuns)
                 line.EraseSizedRunsFrom(_buffer.X);
 
-            // Shift cells right
-            line?.CopyCellsFrom(line, _buffer.X, _buffer.X + width, _terminal.Cols - _buffer.X - width, false);
+            // Shift cells right -- to the RIGHT MARGIN for a cursor inside one, and what gets
+            // pushed past it is gone. Shifting to the screen edge let inserted text spill a pane.
+            line?.CopyCellsFrom(line, _buffer.X, _buffer.X + width, wrapLimit + 1 - _buffer.X - width, false);
         }
 
         // Printing over a picture needs no special case here any more. SetCell splits a SIXEL run
@@ -545,7 +546,12 @@ public partial class InputHandler
             line.NoteSizedRun(_buffer.X, width, TextSizing.Default);
 
         // Use MoveCursor to allow X to be one past the last column (pending wrap)
-        _buffer.SetCursorRaw(_buffer.X + width, _buffer.Y);
+        // With wrapping off there is no phantom column to pend in: the cursor PARKS at the
+        // limit, which is also what keeps its reported position on the screen.
+        if (!_terminal.Options.Wraparound && _buffer.X + width > wrapLimit)
+            _buffer.SetCursor(wrapLimit, _buffer.Y);
+        else
+            _buffer.SetCursorRaw(_buffer.X + width, _buffer.Y);
 
         RememberForRepeat(cell.CodePoint, cell.ClusterId);
     }
@@ -780,10 +786,13 @@ public partial class InputHandler
     /// <summary>The column a wrapped line begins on: the left margin, for the same reason.</summary>
     private int WrapHome()
     {
-        if (_buffer.MarginsAreFullWidth || !CursorInMarginColumns())
+        if (_buffer.MarginsAreFullWidth)
             return 0;
 
-        return _buffer.ScrollLeft;
+        // The mirror of WrapLimit's rule: a wrap that happened at the box's right edge lands on
+        // the box's left margin, wherever the print started.
+        var x = _buffer.PendingWrap ? _buffer.X - 1 : _buffer.X;
+        return x <= _buffer.ScrollRight ? _buffer.ScrollLeft : 0;
     }
 
 }

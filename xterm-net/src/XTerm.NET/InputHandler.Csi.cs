@@ -106,6 +106,10 @@ public partial class InputHandler
         // semicolon-separated run ("38;2;255;128;0").
         var parts = new List<string>(8);
 
+        // Led by the reset, as xterm leads it: the reply is meant to be REPLAYED, and without
+        // the 0 it composes onto whatever attributes are in force instead of reproducing these.
+        parts.Add("0");
+
         if (attr.IsBold()) parts.Add("1");
         if (attr.IsDim()) parts.Add("2");
         if (attr.IsItalic()) parts.Add("3");
@@ -963,6 +967,11 @@ public partial class InputHandler
     /// </remarks>
     private void SetLeftRightMargins(Params parameters)
     {
+        // DECSLRM is VT400: below level 64 the sequence is SCOSC on some terminals and noise on
+        // the rest, and honouring it would give a level-62 program margins it cannot have asked for.
+        if (_terminal.ConformanceLevel < 64)
+            return;
+
         var left = Math.Max(parameters.GetParam(0, 1), 1) - 1;
         var right = Math.Max(parameters.GetParam(1, _terminal.Cols), 1) - 1;
 
@@ -1040,6 +1049,14 @@ public partial class InputHandler
         // CSI Ps ; Ps ; Ps t - Window manipulation (XTWINOPS)
         // Check WindowOptions permissions before firing events
         var operation = parameters.GetParam(0, 0);
+
+        // Values of 24 and up are not window operations at all: they are DECSLPP, set the page
+        // length to that many lines, kept inside the same final byte since the VT340.
+        if (operation >= 24)
+        {
+            _terminal.Resize(_terminal.Cols, operation);
+            return;
+        }
 
         switch (operation)
         {
@@ -1411,11 +1428,15 @@ public partial class InputHandler
     private void RequestChecksumRectangularArea(Params parameters)
     {
         var id = parameters.GetParam(0, 0);
-        // parameters[1] is the page, ignored.
-        var top = Math.Max(1, parameters.GetParam(2, 1));
-        var left = Math.Max(1, parameters.GetParam(3, 1));
-        var bottom = Math.Min(_terminal.Rows, parameters.GetParam(4, _terminal.Rows));
-        var right = Math.Min(_terminal.Cols, parameters.GetParam(5, _terminal.Cols));
+        // parameters[1] is the page, ignored. Coordinates are read in the ORIGIN MODE system,
+        // like a cursor address and like every rectangle operation: a program that addresses its
+        // region relatively asks about it relatively.
+        var originX = _terminal.OriginMode ? _buffer.ScrollLeft : 0;
+        var originY = _terminal.OriginMode ? _buffer.ScrollTop : 0;
+        var top = Math.Max(1, parameters.GetParam(2, 1) + originY);
+        var left = Math.Max(1, parameters.GetParam(3, 1) + originX);
+        var bottom = Math.Min(_terminal.Rows, parameters.GetParam(4, _terminal.Rows - originY) + originY);
+        var right = Math.Min(_terminal.Cols, parameters.GetParam(5, _terminal.Cols - originX) + originX);
 
         var sum = 0;
         for (var row = top; row <= bottom; row++)

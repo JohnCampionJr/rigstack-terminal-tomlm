@@ -35,10 +35,23 @@ public partial class InputHandler
     /// </remarks>
     private void HandleRequestMode(Params parameters, bool isPrivate)
     {
+        // DECRQM arrived with VT300: below level 63 the terminal has never heard the question,
+        // and silence -- not a report -- is the level-honest answer.
+        if (_terminal.ConformanceLevel < 63)
+            return;
+
         var mode = parameters.GetParam(0, 0);
 
         int state;
-        if (isPrivate)
+        if (!isPrivate && PermanentlyResetAnsiModes.Contains(mode))
+        {
+            state = 4;
+        }
+        else if (isPrivate && PermanentlyResetDecModes.Contains(mode))
+        {
+            state = 4;
+        }
+        else if (isPrivate)
         {
             if (mode == (int)TerminalMode.GraphemeClustering)
             {
@@ -178,9 +191,12 @@ public partial class InputHandler
             case (int)TerminalMode.Win32InputMode:
                 set = _terminal.Win32InputMode;
                 return true;
+            case (int)TerminalMode.ColumnMode:
+                set = _terminal.ColumnMode132;
+                return true;
+
             default:
-                set = false;
-                return false;
+                return _storedDecModes.TryGetValue(mode, out set);
         }
     }
 
@@ -203,8 +219,7 @@ public partial class InputHandler
                 set = _terminal.InsertMode;
                 return true;
             default:
-                set = false;
-                return false;
+                return _storedAnsiModes.TryGetValue(mode, out set);
         }
     }
 
@@ -294,7 +309,8 @@ public partial class InputHandler
             // DEC Private Modes (DECRST)
             if (!Enum.IsDefined(typeof(TerminalMode), mode))
             {
-                System.Diagnostics.Debug.WriteLine($"Unknown private reset terminal mode: {mode}");
+                if (!TrySetStoredMode(mode, isPrivate: true, value: false))
+                    System.Diagnostics.Debug.WriteLine($"Unknown private reset terminal mode: {mode}");
                 return;
             }
 
@@ -307,8 +323,13 @@ public partial class InputHandler
                     break;
 
                 case TerminalMode.InsertMode:
-                    // Mode 4: In DEC private mode context, this is SmoothScroll (DECSCLM)
-                    // Smooth scroll is acknowledged but has no effect in modern terminals
+                    // Mode 4 in the PRIVATE space is DECSCLM; stored for DECRQM's sake.
+                    TrySetStoredMode(mode, isPrivate: true, value: false);
+                    break;
+
+                case TerminalMode.ColumnMode:
+                    if (_storedDecModes.TryGetValue(40, out var allowed) && allowed)
+                        _terminal.SetColumnMode(wide: false);
                     break;
 
                 case TerminalMode.ReverseVideo:
@@ -334,8 +355,7 @@ public partial class InputHandler
                     break;
 
                 case TerminalMode.AutoRepeat:
-                    // Auto repeat is typically always enabled in modern terminals
-                    // This mode is acknowledged but has no effect
+                    TrySetStoredMode(mode, isPrivate: true, value: false);
                     break;
 
                 case TerminalMode.ShowCursor:
@@ -343,8 +363,7 @@ public partial class InputHandler
                     break;
 
                 case TerminalMode.NationalCharset:
-                    // National replacement character set mode
-                    // Acknowledged but typically no specific action needed for modern use
+                    TrySetStoredMode(mode, isPrivate: true, value: false);
                     break;
 
                 case TerminalMode.ReverseWraparound:
@@ -382,9 +401,16 @@ public partial class InputHandler
                     _terminal.SwitchToNormalBuffer();
                     break;
 
-                case TerminalMode.AltBufferCursor:
-                    _terminal.SwitchToNormalBuffer();
+                case TerminalMode.SaveCursorMode:
                     RestoreCursor();
+                    break;
+
+                case TerminalMode.AltBufferCursor:
+                    // 1047 clears the ALT screen on the way out -- the "cup" half of tite
+                    // handling -- and restores no cursor: it never saved one.
+                    if (_terminal.IsAlternateBufferActive)
+                        EraseWholeScreen();
+                    _terminal.SwitchToNormalBuffer();
                     break;
 
                 case TerminalMode.AltBufferFull:
@@ -446,7 +472,8 @@ public partial class InputHandler
                     break;
 
                 default:
-                    System.Diagnostics.Debug.WriteLine($"Unhandled terminal mode: {terminalMode}");
+                    if (!TrySetStoredMode(mode, isPrivate: true, value: false))
+                        System.Diagnostics.Debug.WriteLine($"Unhandled terminal mode: {terminalMode}");
                     break;
             }
         }
@@ -455,7 +482,8 @@ public partial class InputHandler
             // ANSI Modes (RM)
             if (!Enum.IsDefined(typeof(TerminalMode), mode))
             {
-                System.Diagnostics.Debug.WriteLine($"Unknown CSI reset terminal mode: {mode}");
+                if (!TrySetStoredMode(mode, isPrivate: false, value: false))
+                    System.Diagnostics.Debug.WriteLine($"Unknown CSI reset terminal mode: {mode}");
                 return;
             }
 
@@ -472,7 +500,8 @@ public partial class InputHandler
                     break;
 
                 default:
-                    System.Diagnostics.Debug.WriteLine($"Unhandled CSI reset terminal mode: {terminalMode}");
+                    if (!TrySetStoredMode(mode, isPrivate: false, value: false))
+                        System.Diagnostics.Debug.WriteLine($"Unhandled CSI reset terminal mode: {terminalMode}");
                     break;
             }
         }

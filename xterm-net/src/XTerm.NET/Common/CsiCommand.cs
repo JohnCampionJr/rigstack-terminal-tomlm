@@ -201,6 +201,15 @@ public enum CsiCommand
     /// <summary>DECSCA -- select character protection attribute (CSI Ps " q).</summary>
     SelectCharacterProtection,
 
+    /// <summary>DECSCL -- select conformance level (CSI Ps ; Ps " p).</summary>
+    SelectConformanceLevel,
+
+    /// <summary>DECSACE (CSI Ps * x), DECSASD (CSI Ps $ }), DECSSDT (CSI Ps $ ~), DECSNLS (CSI Ps * |).</summary>
+    SelectAttributeChangeExtent,
+    SelectActiveStatusDisplay,
+    SelectStatusDisplayType,
+    SetLinesPerScreen,
+
     /// <summary>DECRQCRA -- request a checksum of a rectangular area (CSI Pid;Pp;Pt;Pl;Pb;Pr * y).</summary>
     RequestChecksumRectangularArea,
 

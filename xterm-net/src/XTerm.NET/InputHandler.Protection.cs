@@ -18,6 +18,13 @@ public partial class InputHandler
     /// </summary>
     private bool _protectionUsed;
 
+    /// <summary>Blanks the whole visible screen with the erase attributes -- DECCOLM's clear.</summary>
+    internal void EraseWholeScreen()
+    {
+        for (var row = 0; row < _terminal.Rows; row++)
+            EraseLineCells(_buffer.Lines[_buffer.YBase + row], 0, _terminal.Cols, selective: false);
+    }
+
     /// <summary>DECSCA. 1 protects what is written next; 0 and 2 stop protecting.</summary>
     private void SelectCharacterProtection(Params parameters)
     {

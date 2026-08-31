@@ -694,6 +694,30 @@ public partial class InputHandler
                 SelectCharacterProtection(parameters);
                 break;
 
+            case CsiCommand.SelectAttributeChangeExtent:
+                _attributeChangeExtent = parameters.GetParam(0, 0);
+                break;
+
+            case CsiCommand.SelectActiveStatusDisplay:
+                _activeStatusDisplay = parameters.GetParam(0, 0);
+                break;
+
+            case CsiCommand.SelectStatusDisplayType:
+                _statusDisplayType = parameters.GetParam(0, 0);
+                break;
+
+            case CsiCommand.SetLinesPerScreen:
+                var screenLines = parameters.GetParam(0, 0);
+                if (screenLines >= 1)
+                    _terminal.Resize(_terminal.Cols, screenLines);
+                break;
+
+            case CsiCommand.SelectConformanceLevel:
+                var level = parameters.GetParam(0, 65);
+                if (level >= 61 && level <= 65)
+                    _terminal.ConformanceLevel = level;
+                break;
+
             case CsiCommand.RequestChecksumRectangularArea:
                 RequestChecksumRectangularArea(parameters);
                 break;
@@ -1320,10 +1344,15 @@ public partial class InputHandler
     /// </remarks>
     private int WrapLimit()
     {
-        if (_buffer.MarginsAreFullWidth || !CursorInMarginColumns())
+        if (_buffer.MarginsAreFullWidth)
             return _terminal.Cols - 1;
 
-        return _buffer.ScrollRight;
+        // The right margin binds any cursor at or LEFT of it -- including one left of the left
+        // margin: a print that starts outside the box still wraps when it reaches the box's right
+        // edge, which is how xterm treats it and what lets text flow INTO a pane. Only a cursor
+        // already beyond the right margin prints to the screen edge.
+        var x = _buffer.PendingWrap ? _buffer.X - 1 : _buffer.X;
+        return x <= _buffer.ScrollRight ? _buffer.ScrollRight : _terminal.Cols - 1;
     }
 
     /// <summary>A blank carrying only the current background, which is what BCE fills with.</summary>
@@ -1619,7 +1648,8 @@ public partial class InputHandler
             // Convert int to TerminalMode enum
             if (!Enum.IsDefined(typeof(TerminalMode), mode))
             {
-                System.Diagnostics.Debug.WriteLine($"Unknown CSI private terminal mode: {mode}");
+                if (!TrySetStoredMode(mode, isPrivate: true, value: true))
+                    System.Diagnostics.Debug.WriteLine($"Unknown CSI private terminal mode: {mode}");
                 return;
             }
 
@@ -1632,9 +1662,16 @@ public partial class InputHandler
                     break;
 
                 case TerminalMode.InsertMode:
-                    // Mode 4: In DEC private mode context, this is SmoothScroll (DECSCLM)
-                    // InsertMode and SmoothScroll share value 4 in the enum
-                    // Smooth scroll is acknowledged but has no effect in modern terminals
+                    // Mode 4 in the PRIVATE space is DECSCLM (smooth scroll); it shares the enum
+                    // value with IRM. Stored so DECRQM answers truthfully; nothing acts on it.
+                    TrySetStoredMode(mode, isPrivate: true, value: true);
+                    break;
+
+                case TerminalMode.ColumnMode:
+                    // Gated on Allow80To132 (mode 40), exactly as xterm gates it: a program that
+                    // never asked for resizes does not get one from a stray CSI ? 3 h.
+                    if (_storedDecModes.TryGetValue(40, out var allowed) && allowed)
+                        _terminal.SetColumnMode(wide: true);
                     break;
 
                 case TerminalMode.ReverseVideo:
@@ -1657,8 +1694,8 @@ public partial class InputHandler
                     break;
 
                 case TerminalMode.AutoRepeat:
-                    // Auto repeat is typically always enabled in modern terminals
-                    // This mode is acknowledged but has no effect
+                    // Stored so DECRQM can answer truthfully; nothing acts on it.
+                    TrySetStoredMode(mode, isPrivate: true, value: true);
                     break;
 
                 case TerminalMode.ShowCursor:
@@ -1666,8 +1703,8 @@ public partial class InputHandler
                     break;
 
                 case TerminalMode.NationalCharset:
-                    // National replacement character set mode
-                    // Acknowledged but typically no specific action needed for modern use
+                    // Stored so DECRQM can answer truthfully; nothing acts on it.
+                    TrySetStoredMode(mode, isPrivate: true, value: true);
                     break;
 
                 case TerminalMode.ReverseWraparound:
@@ -1706,8 +1743,15 @@ public partial class InputHandler
                     _terminal.SwitchToAltBuffer();
                     break;
 
-                case TerminalMode.AltBufferCursor:
+                case TerminalMode.SaveCursorMode:
+                    // 1048 is DECSC wearing a mode's clothes; 1049 exists because two programs
+                    // in a row wanted this and the alt-buffer switch as one sequence.
                     SaveCursor();
+                    break;
+
+                case TerminalMode.AltBufferCursor:
+                    // 1047 switches WITHOUT saving the cursor -- the cursor is shared. Saving is
+                    // what 1048 is for, and doing both at once is what 1049 is for.
                     _terminal.SwitchToAltBuffer();
                     break;
 
@@ -1797,7 +1841,8 @@ public partial class InputHandler
                     break;
 
                 default:
-                    System.Diagnostics.Debug.WriteLine($"Unhandled CSI private terminal mode: {terminalMode}");
+                    if (!TrySetStoredMode(mode, isPrivate: true, value: true))
+                        System.Diagnostics.Debug.WriteLine($"Unhandled CSI private terminal mode: {terminalMode}");
                     break;
             }
         }
@@ -1806,7 +1851,8 @@ public partial class InputHandler
             // ANSI Modes (SM)
             if (!Enum.IsDefined(typeof(TerminalMode), mode))
             {
-                System.Diagnostics.Debug.WriteLine($"Unknown CSI terminal mode: {mode}");
+                if (!TrySetStoredMode(mode, isPrivate: false, value: true))
+                    System.Diagnostics.Debug.WriteLine($"Unknown CSI terminal mode: {mode}");
                 return;
             }
 
@@ -1823,7 +1869,8 @@ public partial class InputHandler
                     break;
 
                 default:
-                    System.Diagnostics.Debug.WriteLine($"Unhandled CSI terminal mode: {terminalMode}");
+                    if (!TrySetStoredMode(mode, isPrivate: false, value: true))
+                        System.Diagnostics.Debug.WriteLine($"Unhandled CSI terminal mode: {terminalMode}");
                     break;
             }
         }

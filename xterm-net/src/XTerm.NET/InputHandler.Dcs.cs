@@ -150,8 +150,14 @@ public partial class InputHandler
             "m" => $"\x1bP1$r{SerializeSgr()}m\x1b\\",
             "r" => $"\x1bP1$r{_buffer.ScrollTop + 1};{_buffer.ScrollBottom + 1}r\x1b\\",
             " q" => $"\x1bP1$r{SerializeDecscusr()} q\x1b\\",
-            "\"p" => "\x1bP1$r62;1\"p\x1b\\",
+            "\"p" => $"\x1bP1$r{_terminal.ConformanceLevel};1\"p\x1b\\",
             "\"q" => $"\x1bP1$r{(_curAttr.IsProtected() ? 1 : 0)}\"q\x1b\\",
+            "s" => $"\x1bP1$r{_buffer.ScrollLeft + 1};{_buffer.ScrollRight + 1}s\x1b\\",
+            "t" => $"\x1bP1$r{_terminal.Rows}t\x1b\\",
+            "*x" => $"\x1bP1$r{_attributeChangeExtent}*x\x1b\\",
+            "$}" => $"\x1bP1$r{_activeStatusDisplay}$}}\x1b\\",
+            "$~" => $"\x1bP1$r{_statusDisplayType}$~\x1b\\",
+            "*|" => $"\x1bP1$r{_terminal.Rows}*|\x1b\\",
             _ => Deny,
         };
 

@@ -141,6 +141,9 @@ public enum TerminalMode
     /// Use Alternate Screen Buffer with cursor save/restore.
     /// </summary>
     AltBufferCursor = 1047,
+
+    /// <summary>DECSET/DECRST 1048 -- save and restore the cursor, exactly as DECSC/DECRC do.</summary>
+    SaveCursorMode = 1048,
     
     /// <summary>
     /// Save cursor and use Alternate Screen Buffer.
