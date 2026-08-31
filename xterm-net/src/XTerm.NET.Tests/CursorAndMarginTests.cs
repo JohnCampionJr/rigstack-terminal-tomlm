@@ -297,4 +297,183 @@ public class CursorAndMarginTests
         Assert.Equal(" ", string.IsNullOrEmpty(terminal.Buffer.Lines[0]![19].Content) ? " " : terminal.Buffer.Lines[0]![19].Content);
         Assert.Equal("X", terminal.Buffer.Lines[0]![18].Content);
     }
+
+    // ------------------------------------------------------------------ reverse wrap, both flavours
+
+    // xterm split reverse wraparound in 2023: mode 45 is INLINE -- backspace crosses onto the row
+    // above only where the line actually wrapped, which is what erasing a wrapped command line
+    // needs -- and mode 1045 is the CLASSIC behaviour, from any position, around the region's top.
+    // Both require DECAWM, as they always have.
+
+    [Fact]
+    public void Inline_reverse_wrap_crosses_a_real_wrap()
+    {
+        var terminal = NewTerminal(cols: 10);
+        terminal.Write($"{Esc}[?45h");
+        terminal.Write(new string('x', 12));   // wraps onto row 2
+        terminal.Write($"{Esc}[2;1H\b");
+
+        Assert.Equal(0, terminal.Buffer.Y);
+        Assert.Equal(9, terminal.Buffer.X);
+    }
+
+    [Fact]
+    public void Inline_reverse_wrap_does_not_cross_where_nothing_wrapped()
+    {
+        // The cursor was put at the left margin by NEL/addressing; the row above is a different
+        // line, and mode 45 has nothing to erase there.
+        var terminal = NewTerminal(cols: 10);
+        terminal.Write($"{Esc}[?45h");
+        terminal.Write($"{Esc}[3;1H\b");
+
+        Assert.Equal(2, terminal.Buffer.Y);
+        Assert.Equal(0, terminal.Buffer.X);
+    }
+
+    [Fact]
+    public void Reverse_wrap_requires_autowrap()
+    {
+        var terminal = NewTerminal(cols: 10);
+        terminal.Write($"{Esc}[?7l");          // DECAWM off
+        terminal.Write($"{Esc}[?1045h");
+        terminal.Write($"{Esc}[3;1H\b");
+
+        Assert.Equal(2, terminal.Buffer.Y);
+        Assert.Equal(0, terminal.Buffer.X);
+    }
+
+    [Fact]
+    public void Classic_reverse_wrap_carries_the_regions_top_around_to_its_bottom()
+    {
+        // The treatment xterm gave top/bottom margins in 2018, for consistency with left/right.
+        var terminal = NewTerminal(cols: 10, rows: 8);
+        terminal.Write($"{Esc}[?1045h");
+        terminal.Write($"{Esc}[2;5r");         // region rows 2..5
+        terminal.Write($"{Esc}[2;1H\b");
+
+        Assert.Equal(4, terminal.Buffer.Y);    // bottom margin, 0-based
+        Assert.Equal(9, terminal.Buffer.X);
+    }
+
+    [Fact]
+    public void Classic_reverse_wrap_from_the_left_edge_lands_on_the_right_margin()
+    {
+        // A cursor LEFT of the left margin still backs into the pane, not past it: the row above
+        // ends where the pane ends.
+        var terminal = NewTerminal(cols: 20);
+        terminal.Write($"{Esc}[?1045h{Esc}[?69h");
+        terminal.Write($"{Esc}[5;12s");
+        terminal.Write($"{Esc}[3;1H\b");
+
+        Assert.Equal(1, terminal.Buffer.Y);
+        Assert.Equal(11, terminal.Buffer.X);
+    }
+
+    // -------------------------------------------------------- the region is not the whole screen
+
+    [Fact]
+    public void A_line_feed_outside_the_side_margins_neither_scrolls_nor_leaves_the_region()
+    {
+        // The cursor is right of the region's columns, on its bottom row: the region's contents
+        // are not its to scroll, and the bottom margin is not its to cross.
+        var terminal = NewTerminal(cols: 10, rows: 8);
+        terminal.Write($"{Esc}[2;5r{Esc}[?69h{Esc}[2;5s");
+        terminal.Write($"{Esc}[5;3Hx");                    // inside: something to not-scroll
+        terminal.Write($"{Esc}[5;7H\n");
+
+        Assert.Equal(4, terminal.Buffer.Y);
+        Assert.Equal("x", terminal.Buffer.Lines[4]![2].Content);
+    }
+
+    [Fact]
+    public void An_alignment_pattern_resets_the_margins()
+    {
+        // DECALN exists for checking screen geometry, and it starts that geometry from scratch --
+        // a surviving region would clip the very pattern.
+        var terminal = NewTerminal(cols: 10, rows: 8);
+        terminal.Write($"{Esc}[?69h{Esc}[2;3s{Esc}[4;5r");
+        terminal.Write($"{Esc}#8");
+        terminal.Write($"{Esc}[4;2H{Esc}[A");              // crossing the (former) top margin
+
+        Assert.Equal(2, terminal.Buffer.Y);
+        Assert.Equal(0, terminal.Buffer.ScrollTop);
+        Assert.Equal(9, terminal.Buffer.ScrollRight);
+    }
+
+    [Fact]
+    public void A_region_whose_top_is_not_above_its_bottom_is_refused_whole()
+    {
+        var terminal = NewTerminal(rows: 10);
+        terminal.Write($"{Esc}[3;7r");
+        terminal.Write($"{Esc}[3;3r");                     // invalid: ignored, not clamped
+
+        Assert.Equal(2, terminal.Buffer.ScrollTop);
+        Assert.Equal(6, terminal.Buffer.ScrollBottom);
+    }
+
+    [Fact]
+    public void The_cursor_report_speaks_the_origin_modes_coordinates_in_both_axes()
+    {
+        var terminal = NewTerminal(cols: 20, rows: 10);
+        string? reply = null;
+        terminal.DataReceived += (_, e) => reply = e.Data;
+        terminal.Write($"{Esc}[3;8r{Esc}[?69h{Esc}[5;12s{Esc}[?6h");
+        terminal.Write($"{Esc}[2;3H");                     // region-relative addressing
+        terminal.Write($"{Esc}[6n");
+
+        Assert.Equal($"{Esc}[2;3R", reply);
+    }
+
+    [Fact]
+    public void A_tab_stops_at_the_right_margin_for_a_cursor_inside_one()
+    {
+        var terminal = NewTerminal(cols: 40, rows: 5);
+        terminal.Write($"{Esc}[?69h{Esc}[5;20s");
+        terminal.Write($"{Esc}[1;7H\t\t\t");
+
+        Assert.Equal(19, terminal.Buffer.X);               // the margin, not the next stop past it
+    }
+
+    // ---- Tabs vs margins, xterm's asymmetry --------------------------------------------------
+
+    [Fact]
+    public void ForwardTab_StartingLeftOfTheMargin_StillStopsAtTheRightMargin()
+    {
+        var terminal = NewTerminal(cols: 80, rows: 24);
+        terminal.Write($"{Esc}[?69h{Esc}[5;30s");
+        terminal.Write($"{Esc}[9;1H{Esc}[9I");     // from column 1, tab hard right
+
+        Assert.Equal(30 - 1, terminal.Buffer.X);   // pinned at the right margin, not column 73
+    }
+
+    [Fact]
+    public void BackwardTab_WalksStraightOutOfTheLeftMargin()
+    {
+        var terminal = NewTerminal(cols: 80, rows: 24);
+        terminal.Write($"{Esc}[?69h{Esc}[5;30s");
+        terminal.Write($"{Esc}[9;7H{Esc}[2Z");     // backward tabs ignore the region entirely
+
+        Assert.Equal(0, terminal.Buffer.X);
+    }
+
+    // ---- Reverse wrap hygiene ------------------------------------------------------------------
+
+    [Fact]
+    public void ErasingALine_BreaksItsSoftWrapJoin()
+    {
+        var terminal = NewTerminal(cols: 80, rows: 24);
+        terminal.Write($"{Esc}[?7h{Esc}[?45h");
+        terminal.Write($"{Esc}[3;1H" + new string('*', 82));   // wraps: row 4 is a continuation
+        Assert.True(terminal.Buffer.Lines[3]!.IsWrapped);
+
+        terminal.Write($"{Esc}[3;40H{Esc}[K");                  // erase the tail of row 3
+        Assert.False(terminal.Buffer.Lines[3]!.IsWrapped);
+
+        // ...so reverse wrap now refuses the boundary the program erased -- and after ED 2
+        // no boundary on the screen survives at all, which is what lets esctest's per-test
+        // reset (DECSTR + ED 2) actually isolate consecutive reverse-wrap tests.
+        terminal.Write($"{Esc}[4;1H{Esc}[5D");
+        Assert.Equal(0, terminal.Buffer.X);
+        Assert.Equal(3, terminal.Buffer.Y);
+    }
 }

@@ -420,8 +420,10 @@ public class LeftRightMarginTests
     [InlineData("P", 12)]    // DCH, right
     public void Insert_and_delete_chars_do_nothing_from_outside_the_margins(string op, int column)
     {
+        // The content goes down BEFORE the margins exist: with margins in force a print from
+        // column one now wraps INTO the box at its right margin, as esctest requires of it.
         var terminal = WithMargins(left: 4, right: 9);
-        terminal.Write($"{Esc}[1;1Habcdefghijklmnopqrst");
+        terminal.Write($"{Esc}[?69l{Esc}[1;1Habcdefghijklmnopqrst{Esc}[?69h{Esc}[4;9s");
 
         terminal.Write($"{Esc}[1;{column}H{Esc}[3{op}");
 

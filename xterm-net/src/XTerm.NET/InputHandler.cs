@@ -609,11 +609,11 @@ public partial class InputHandler
                 break;
 
             case CsiCommand.EraseInDisplay:
-                EraseInDisplay(parameters);
+                EraseInDisplay(parameters, isPrivate);
                 break;
 
             case CsiCommand.EraseInLine:
-                EraseInLine(parameters);
+                EraseInLine(parameters, isPrivate);
                 break;
 
             case CsiCommand.InsertLines:
@@ -664,6 +664,82 @@ public partial class InputHandler
 
             case CsiCommand.SelectGraphicRendition:
                 CharAttributes(parameters);
+                break;
+
+            case CsiCommand.SoftReset:
+                _terminal.SoftReset();
+                break;
+
+            case CsiCommand.CopyRectangularArea:
+                CopyRectangularArea(parameters);
+                break;
+
+            case CsiCommand.FillRectangularArea:
+                FillRectangularArea(parameters);
+                break;
+
+            case CsiCommand.EraseRectangularArea:
+                EraseRectangularArea(parameters);
+                break;
+
+            case CsiCommand.SelectiveEraseRectangularArea:
+                SelectiveEraseRectangularArea(parameters);
+                break;
+
+            case CsiCommand.XtermSaveMode:
+                XtermSaveMode(parameters);
+                break;
+
+            case CsiCommand.XtermRestoreMode:
+                XtermRestoreMode(parameters);
+                break;
+
+            case CsiCommand.SetTitleModes:
+                SetTitleModes(parameters, enable: true);
+                break;
+
+            case CsiCommand.ResetTitleModes:
+                SetTitleModes(parameters, enable: false);
+                break;
+
+            case CsiCommand.InsertColumns:
+                InsertColumns(parameters);
+                break;
+
+            case CsiCommand.DeleteColumns:
+                DeleteColumns(parameters);
+                break;
+
+            case CsiCommand.SelectCharacterProtection:
+                SelectCharacterProtection(parameters);
+                break;
+
+            case CsiCommand.SelectAttributeChangeExtent:
+                _attributeChangeExtent = parameters.GetParam(0, 0);
+                break;
+
+            case CsiCommand.SelectActiveStatusDisplay:
+                _activeStatusDisplay = parameters.GetParam(0, 0);
+                break;
+
+            case CsiCommand.SelectStatusDisplayType:
+                _statusDisplayType = parameters.GetParam(0, 0);
+                break;
+
+            case CsiCommand.SetLinesPerScreen:
+                var screenLines = parameters.GetParam(0, 0);
+                if (screenLines >= 1)
+                    _terminal.Resize(_terminal.Cols, screenLines);
+                break;
+
+            case CsiCommand.SelectConformanceLevel:
+                var level = parameters.GetParam(0, 65);
+                if (level >= 61 && level <= 65)
+                    _terminal.ConformanceLevel = level;
+                break;
+
+            case CsiCommand.RequestChecksumRectangularArea:
+                RequestChecksumRectangularArea(parameters);
                 break;
 
             case CsiCommand.DeviceStatusReport:
@@ -799,6 +875,26 @@ public partial class InputHandler
                 case "7": // DECSC - Save Cursor
                     SaveCursor();
                     break;
+                case "Z": // DECID - the ancient identify; answers like the primary DA
+                    _terminal.RaiseDataReceived(PrimaryDeviceAttributes);
+                    break;
+
+                case "V": // SPA - Start of Protected Area
+                    StartProtectedArea();
+                    break;
+
+                case "W": // EPA - End of Protected Area
+                    EndProtectedArea();
+                    break;
+
+                case "6": // DECBI - Back Index
+                    BackIndex();
+                    break;
+
+                case "9": // DECFI - Forward Index
+                    ForwardIndex();
+                    break;
+
                 case "8": // DECRC - Restore Cursor
                     RestoreCursor();
                     break;
@@ -978,17 +1074,31 @@ public partial class InputHandler
             {
                 case OscCommand.SetIconAndTitle:
                 case OscCommand.SetWindowTitle:
-                    _terminal.Title = arg;
-                    _terminal.RaiseTitleChanged(arg);
-                    break;
-
                 case OscCommand.SetIconName:
-                    // Icon name - not typically supported in modern terminals
-                    recognized = false;
+                {
+                    var text = DecodeTitleArgument(arg);
+                    if (text is null)
+                        break;
+                    if (command != OscCommand.SetIconName)
+                    {
+                        _terminal.Title = text;
+                        _terminal.RaiseTitleChanged(text);
+                    }
+                    if (command != OscCommand.SetWindowTitle)
+                        _terminal.IconTitle = text;
                     break;
+                }
 
                 case OscCommand.ChangeColor:
                     HandleColorPaletteChange(arg);
+                    break;
+
+                case OscCommand.ChangeSpecialColor:
+                    HandleSpecialColorChange(arg);
+                    break;
+
+                case OscCommand.ResetSpecialColor:
+                    HandleSpecialColorReset(arg);
                     break;
 
                 case OscCommand.CurrentDirectory:
@@ -1272,10 +1382,15 @@ public partial class InputHandler
     /// </remarks>
     private int WrapLimit()
     {
-        if (_buffer.MarginsAreFullWidth || !CursorInMarginColumns())
+        if (_buffer.MarginsAreFullWidth)
             return _terminal.Cols - 1;
 
-        return _buffer.ScrollRight;
+        // The right margin binds any cursor at or LEFT of it -- including one left of the left
+        // margin: a print that starts outside the box still wraps when it reaches the box's right
+        // edge, which is how xterm treats it and what lets text flow INTO a pane. Only a cursor
+        // already beyond the right margin prints to the screen edge.
+        var x = _buffer.PendingWrap ? _buffer.X - 1 : _buffer.X;
+        return x <= _buffer.ScrollRight ? _buffer.ScrollRight : _terminal.Cols - 1;
     }
 
     /// <summary>A blank carrying only the current background, which is what BCE fills with.</summary>
@@ -1334,20 +1449,17 @@ public partial class InputHandler
 
         if (identifier.StartsWith('>'))
         {
-            // Secondary DA: CSI > Pp ; Pv ; Pc c. Pp = 1 is a VT220, matching the conformance
-            // level the primary reply claims -- the old 0 said VT100 and contradicted it. Pv
-            // carries this library's version so a program can tell builds apart, and Pc = 0 is
+            // Secondary DA: CSI > Pp ; Pv ; Pc c. Pp names the hardware family for the operating
+            // level, on xterm's scale (0=VT100, 1=VT220, 24=VT320, 41=VT420, 64=VT520). Pv is
+            // read by programs as an xterm patch level -- vim and tmux gate features on it -- so
+            // it reports the xterm this emulator answers as, not the library version. Pc = 0 is
             // "no cartridge ROM".
             _terminal.RaiseDataReceived(SecondaryDeviceAttributes);
         }
         else if (identifier.Length == 1)
         {
-            // Primary DA: CSI ? 62 ; ... c. 62 is service class 2 (VT220), the level whose core --
-            // scrolling regions, insert and delete line and character, erase character, the
-            // alternate buffer, DECSC/DECRC -- this emulator does implement. 22 is ANSI colour.
-            _terminal.RaiseDataReceived(_terminal.Options.SixelEnabled
-                ? "\u001b[?62;4;22c"
-                : "\u001b[?62;22c");
+            // Primary DA: CSI ? Pl ; ... c, from the DECSCL operating level.
+            _terminal.RaiseDataReceived(PrimaryDeviceAttributes);
         }
 
         // Any other prefix is left unanswered. "?c" is the one that used to go wrong: it is not the
@@ -1360,18 +1472,50 @@ public partial class InputHandler
     }
 
     /// <summary>
-    /// The Pv field of the secondary DA reply: this assembly's version flattened into one number,
-    /// so 2.0 reports 200.
+    /// The Pv field of the secondary DA reply. Programs parse this as an xterm patch level (vim
+    /// wants >= 95 for cursor shaping, tmux >= 270 for many extensions), so it claims the xterm
+    /// whose behaviour this emulator matches rather than the library's own version.
     /// </summary>
-    private static int FirmwareVersion =>
-        typeof(InputHandler).Assembly.GetName().Version is { } version
-            ? version.Major * 100 + version.Minor
-            : 0;
+    private const int FirmwareVersion = 383;
 
     /// <summary>
-    /// The secondary DA reply, CSI &gt; Pp ; Pv ; Pc c.
+    /// The primary DA reply for the current DECSCL operating level -- xterm's exact lists.
+    /// Attribute 4, Sixel, is appended only when the option enables it (see the remarks on
+    /// <see cref="DeviceAttributes"/>).
     /// </summary>
-    private static string SecondaryDeviceAttributes => $"\u001b[>1;{FirmwareVersion};0c";
+    private string PrimaryDeviceAttributes
+    {
+        get
+        {
+            // 1 = 132 columns, 2 = printer, 6 = selective erase, 9 = national replacement
+            // charsets, 15 = technical characters, 22 = ANSI colour, 29 = ANSI text locator;
+            // levels 4+ add 16 = locator port, 17 = terminal state interrogation, 18 = user
+            // windows, 21 = horizontal scrolling, 28 = rectangular editing.
+            var features = _terminal.ConformanceLevel >= 64
+                ? "1;2;6;9;15;16;17;18;21;22;28;29"
+                : "1;2;6;9;15;22;29";
+            if (_terminal.Options.SixelEnabled)
+                features = "4;" + features;
+            return _terminal.ConformanceLevel switch
+            {
+                61 => "\u001b[?1;2c",
+                var level => $"\u001b[?{level};{features}c",
+            };
+        }
+    }
+
+    /// <summary>
+    /// The secondary DA reply, CSI &gt; Pp ; Pv ; Pc c, with Pp on xterm's hardware-family scale
+    /// for the operating level.
+    /// </summary>
+    private string SecondaryDeviceAttributes => _terminal.ConformanceLevel switch
+    {
+        61 => $"\u001b[>0;{FirmwareVersion};0c",
+        62 => $"\u001b[>1;{FirmwareVersion};0c",
+        63 => $"\u001b[>24;{FirmwareVersion};0c",
+        64 => $"\u001b[>41;{FirmwareVersion};0c",
+        _ => $"\u001b[>64;{FirmwareVersion};0c",
+    };
 
     /// <summary>
     /// The version XTVERSION reports, read once. It cannot change while the process runs, and the
@@ -1571,7 +1715,8 @@ public partial class InputHandler
             // Convert int to TerminalMode enum
             if (!Enum.IsDefined(typeof(TerminalMode), mode))
             {
-                System.Diagnostics.Debug.WriteLine($"Unknown CSI private terminal mode: {mode}");
+                if (!TrySetStoredMode(mode, isPrivate: true, value: true))
+                    System.Diagnostics.Debug.WriteLine($"Unknown CSI private terminal mode: {mode}");
                 return;
             }
 
@@ -1584,9 +1729,16 @@ public partial class InputHandler
                     break;
 
                 case TerminalMode.InsertMode:
-                    // Mode 4: In DEC private mode context, this is SmoothScroll (DECSCLM)
-                    // InsertMode and SmoothScroll share value 4 in the enum
-                    // Smooth scroll is acknowledged but has no effect in modern terminals
+                    // Mode 4 in the PRIVATE space is DECSCLM (smooth scroll); it shares the enum
+                    // value with IRM. Stored so DECRQM answers truthfully; nothing acts on it.
+                    TrySetStoredMode(mode, isPrivate: true, value: true);
+                    break;
+
+                case TerminalMode.ColumnMode:
+                    // Gated on Allow80To132 (mode 40), exactly as xterm gates it: a program that
+                    // never asked for resizes does not get one from a stray CSI ? 3 h.
+                    if (_storedDecModes.TryGetValue(40, out var allowed) && allowed)
+                        _terminal.SetColumnMode(wide: true);
                     break;
 
                 case TerminalMode.ReverseVideo:
@@ -1609,8 +1761,8 @@ public partial class InputHandler
                     break;
 
                 case TerminalMode.AutoRepeat:
-                    // Auto repeat is typically always enabled in modern terminals
-                    // This mode is acknowledged but has no effect
+                    // Stored so DECRQM can answer truthfully; nothing acts on it.
+                    TrySetStoredMode(mode, isPrivate: true, value: true);
                     break;
 
                 case TerminalMode.ShowCursor:
@@ -1618,12 +1770,16 @@ public partial class InputHandler
                     break;
 
                 case TerminalMode.NationalCharset:
-                    // National replacement character set mode
-                    // Acknowledged but typically no specific action needed for modern use
+                    // Stored so DECRQM can answer truthfully; nothing acts on it.
+                    TrySetStoredMode(mode, isPrivate: true, value: true);
                     break;
 
                 case TerminalMode.ReverseWraparound:
                     _terminal.ReverseWraparound = true;
+                    break;
+
+                case TerminalMode.ReverseWraparoundExtended:
+                    _terminal.ReverseWraparoundExtended = true;
                     break;
 
                 case TerminalMode.AppKeypad:
@@ -1654,8 +1810,15 @@ public partial class InputHandler
                     _terminal.SwitchToAltBuffer();
                     break;
 
-                case TerminalMode.AltBufferCursor:
+                case TerminalMode.SaveCursorMode:
+                    // 1048 is DECSC wearing a mode's clothes; 1049 exists because two programs
+                    // in a row wanted this and the alt-buffer switch as one sequence.
                     SaveCursor();
+                    break;
+
+                case TerminalMode.AltBufferCursor:
+                    // 1047 switches WITHOUT saving the cursor -- the cursor is shared. Saving is
+                    // what 1048 is for, and doing both at once is what 1049 is for.
                     _terminal.SwitchToAltBuffer();
                     break;
 
@@ -1745,7 +1908,8 @@ public partial class InputHandler
                     break;
 
                 default:
-                    System.Diagnostics.Debug.WriteLine($"Unhandled CSI private terminal mode: {terminalMode}");
+                    if (!TrySetStoredMode(mode, isPrivate: true, value: true))
+                        System.Diagnostics.Debug.WriteLine($"Unhandled CSI private terminal mode: {terminalMode}");
                     break;
             }
         }
@@ -1754,7 +1918,8 @@ public partial class InputHandler
             // ANSI Modes (SM)
             if (!Enum.IsDefined(typeof(TerminalMode), mode))
             {
-                System.Diagnostics.Debug.WriteLine($"Unknown CSI terminal mode: {mode}");
+                if (!TrySetStoredMode(mode, isPrivate: false, value: true))
+                    System.Diagnostics.Debug.WriteLine($"Unknown CSI terminal mode: {mode}");
                 return;
             }
 
@@ -1771,7 +1936,8 @@ public partial class InputHandler
                     break;
 
                 default:
-                    System.Diagnostics.Debug.WriteLine($"Unhandled CSI terminal mode: {terminalMode}");
+                    if (!TrySetStoredMode(mode, isPrivate: false, value: true))
+                        System.Diagnostics.Debug.WriteLine($"Unhandled CSI terminal mode: {terminalMode}");
                     break;
             }
         }

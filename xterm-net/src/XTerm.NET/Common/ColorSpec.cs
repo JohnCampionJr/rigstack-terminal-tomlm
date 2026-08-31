@@ -42,6 +42,13 @@ public static class ColorSpec
             return TryParseHashForm(spec.Substring(1), out rgb);
         }
 
+        // The device-independent Xcms spaces -- rgbi:, CIEXYZ:, CIELab: and the rest -- go
+        // through X11's own conversion pipeline. See XcmsColor for why byte-exactness matters.
+        if (spec.Contains(':') && XcmsColor.TryParse(spec, out rgb))
+        {
+            return true;
+        }
+
         return NamedColors.TryGetValue(spec, out rgb);
     }
 
@@ -122,7 +129,20 @@ public static class ColorSpec
         var channels = new int[3];
         for (var i = 0; i < 3; i++)
         {
-            if (!TryParseChannel(body.Substring(i * width, width), out channels[i]))
+            // X11's rule for the hash form, which differs from rgb:'s. rgb: SCALES -- "f" means
+            // full intensity. # LEFT-JUSTIFIES -- the digits are the most significant bits, so
+            // "#fff" is f000-per-channel territory: each channel is its first two digits (a lone
+            // digit padded with zero), and deeper digits are truncated. xterm answers a query for
+            // #fff with f0f0/f0f0/f0f0, and programs match against exactly that.
+            var part = body.Substring(i * width, width);
+            var top = width switch
+            {
+                1 => part + "0",
+                2 => part,
+                _ => part[..2],
+            };
+            if (!int.TryParse(top, System.Globalization.NumberStyles.HexNumber,
+                              System.Globalization.CultureInfo.InvariantCulture, out channels[i]))
             {
                 return false;
             }

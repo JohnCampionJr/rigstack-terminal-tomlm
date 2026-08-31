@@ -32,6 +32,9 @@ public enum OscCommand
     /// Format: OSC 4 ; index ; colorspec ST
     /// </summary>
     ChangeColor = 4,
+
+    /// <summary>OSC 5 -- change or query the special colours (bold, underline, blink, reverse, italic).</summary>
+    ChangeSpecialColor = 5,
     
     /// <summary>
     /// Set current working directory (OSC 7).
@@ -119,6 +122,9 @@ public enum OscCommand
     /// Reset color palette (OSC 104).
     /// </summary>
     ResetColor = 104,
+
+    /// <summary>OSC 105 -- reset special colours.</summary>
+    ResetSpecialColor = 105,
     
     /// <summary>
     /// Reset foreground color (OSC 110).

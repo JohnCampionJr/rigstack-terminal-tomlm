@@ -180,6 +180,54 @@ public enum CsiCommand
     /// </summary>
     RequestMode,
 
+    /// <summary>DECSTR -- soft terminal reset (CSI ! p).</summary>
+    SoftReset,
+
+    /// <summary>DECCRA -- copy a rectangular area (CSI ... $ v).</summary>
+    CopyRectangularArea,
+
+    /// <summary>DECFRA -- fill a rectangular area with a character (CSI Pch;Pt;Pl;Pb;Pr $ x).</summary>
+    FillRectangularArea,
+
+    /// <summary>DECERA -- erase a rectangular area (CSI Pt;Pl;Pb;Pr $ z).</summary>
+    EraseRectangularArea,
+
+    /// <summary>DECSERA -- selectively erase a rectangular area (CSI Pt;Pl;Pb;Pr $ {), sparing DECSCA-protected cells.</summary>
+    SelectiveEraseRectangularArea,
+
+    /// <summary>XTSAVE -- save DEC private mode values (CSI ? Pm s).</summary>
+    XtermSaveMode,
+
+    /// <summary>XTRESTORE -- restore DEC private mode values (CSI ? Pm r).</summary>
+    XtermRestoreMode,
+
+    /// <summary>Set title modes (CSI &gt; Pm t) -- hex or UTF-8 title setting and reporting.</summary>
+    SetTitleModes,
+
+    /// <summary>Reset title modes (CSI &gt; Pm T).</summary>
+    ResetTitleModes,
+
+    /// <summary>DECIC -- insert columns at the cursor (CSI Pn ' }).</summary>
+    InsertColumns,
+
+    /// <summary>DECDC -- delete columns at the cursor (CSI Pn ' ~).</summary>
+    DeleteColumns,
+
+    /// <summary>DECSCA -- select character protection attribute (CSI Ps " q).</summary>
+    SelectCharacterProtection,
+
+    /// <summary>DECSCL -- select conformance level (CSI Ps ; Ps " p).</summary>
+    SelectConformanceLevel,
+
+    /// <summary>DECSACE (CSI Ps * x), DECSASD (CSI Ps $ }), DECSSDT (CSI Ps $ ~), DECSNLS (CSI Ps * |).</summary>
+    SelectAttributeChangeExtent,
+    SelectActiveStatusDisplay,
+    SelectStatusDisplayType,
+    SetLinesPerScreen,
+
+    /// <summary>DECRQCRA -- request a checksum of a rectangular area (CSI Pid;Pp;Pt;Pl;Pb;Pr * y).</summary>
+    RequestChecksumRectangularArea,
+
     /// <summary>
     /// Set Kitty keyboard protocol flags (CSI = Ps ; Pm u).
     /// </summary>

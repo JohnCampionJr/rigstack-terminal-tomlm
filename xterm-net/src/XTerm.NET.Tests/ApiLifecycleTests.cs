@@ -69,10 +69,11 @@ public class ApiLifecycleTests
     [Fact]
     public void Reverse_wraparound_moves_the_cursor_back_over_the_wrap()
     {
-        // DECSET 45 was stored and reported and nothing read it, so a shell erasing a wrapped
-        // command line stopped at the wrap.
+        // 1045, the CLASSIC reverse wrap: from any position, not only across a real wrap. Mode 45
+        // became inline-only when xterm split the feature in 2023, and this cursor was ADDRESSED
+        // to the left margin rather than wrapped there.
         var terminal = NewTerminal(cols: 10);
-        terminal.Write($"{Esc}[?45h");
+        terminal.Write($"{Esc}[?1045h");
         terminal.Write($"{Esc}[2;1H");     // row 2, column 1
         terminal.Write("\b");
 
@@ -152,7 +153,7 @@ public class ApiLifecycleTests
         // The row above ends where the pane ends. Landing at Cols - 1 put the cursor outside the
         // DECSLRM region, and the next character with it.
         var terminal = NewTerminal(cols: 20);
-        terminal.Write($"{Esc}[?45h");
+        terminal.Write($"{Esc}[?1045h");   // classic reverse wrap; the cursor was addressed, not wrapped
         terminal.Write($"{Esc}[?69h");     // DECLRMM, so DECSLRM is honoured
         terminal.Write($"{Esc}[5;12s");    // left margin col 5, right margin col 12
         terminal.Write($"{Esc}[3;5H");     // row 3, at the left margin

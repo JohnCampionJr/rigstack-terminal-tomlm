@@ -248,34 +248,38 @@ public class ModeHandlingTests
         var terminal = CreateTerminal();
         terminal.Buffer.SetCursor(20, 10);
 
-        // Act - DEC private mode (saves cursor and switches)
+        // Act - DEC private mode 1047: switches screens; the cursor is shared, not saved
         terminal.Write($"\x1B[?{(int)TerminalMode.AltBufferCursor}h");
 
-        // Assert
-        // Should be in alt buffer
+        // Assert: in the alt buffer, writing lands where the SHARED cursor sits -- row 10.
         terminal.Write("Test");
-        var content = terminal.GetLine(0);
+        var content = terminal.GetLine(10);
         Assert.Contains("Test", content);
     }
 
     [Fact]
-    public void ResetMode_AltBufferWithCursor_RestoresCursor()
+    public void ResetMode_AltBufferWithCursor_SharesTheCursorAndClearsTheAltScreen()
     {
-        // Arrange
+        // 1047 never saves a cursor -- that is 1048's job, and doing both at once is 1049's. The
+        // cursor is SHARED across the switch, and the alt screen is cleared on the way out, which
+        // is the "cup" half of tite handling.
         var terminal = CreateTerminal();
         terminal.Buffer.SetCursor(20, 10);
-        var savedX = terminal.Buffer.X;
-        var savedY = terminal.Buffer.Y;
 
-        terminal.Write($"\x1B[?{(int)TerminalMode.AltBufferCursor}h"); // Save and switch
-        terminal.Buffer.SetCursor(5, 5); // Move cursor in alt buffer
+        terminal.Write($"\x1B[?{(int)TerminalMode.AltBufferCursor}h");
+        Assert.Equal(20, terminal.Buffer.X);   // shared on the way in
+        terminal.Write("X");
+        terminal.Buffer.SetCursor(5, 5);
 
-        // Act - DEC private mode (switches back and restores cursor)
         terminal.Write($"\x1B[?{(int)TerminalMode.AltBufferCursor}l");
 
-        // Assert
-        Assert.Equal(savedX, terminal.Buffer.X);
-        Assert.Equal(savedY, terminal.Buffer.Y);
+        Assert.Equal(5, terminal.Buffer.X);    // shared on the way out
+        Assert.Equal(5, terminal.Buffer.Y);
+
+        // And the alt screen came back blank: switch in again and look.
+        terminal.Write($"\x1B[?{(int)TerminalMode.AltBufferCursor}h");
+        Assert.True(string.IsNullOrEmpty(terminal.Buffer.Lines[10]![20].Content)
+                    || terminal.Buffer.Lines[10]![20].Content == " ");
     }
 
     [Fact]

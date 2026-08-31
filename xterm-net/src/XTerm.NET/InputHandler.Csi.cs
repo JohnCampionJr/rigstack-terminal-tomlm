@@ -68,6 +68,13 @@ public partial class InputHandler
 
     private void FillScreenWithE()
     {
+        // DECALN resets the margins -- top/bottom and left/right alike -- and origin mode, before
+        // homing the cursor. The alignment pattern exists for checking screen geometry, and it
+        // starts that geometry from scratch; a region surviving it would clip the very pattern.
+        _buffer.SetScrollRegion(0, _terminal.Rows - 1);
+        _buffer.SetLeftRightMargins(0, _terminal.Cols - 1);
+        _terminal.OriginMode = false;
+
         var cell = new BufferCell('E', 1, AttributeData.Default);
         for (int row = 0; row < _terminal.Rows; row++)
         {
@@ -98,6 +105,10 @@ public partial class InputHandler
         // Build a list of SGR code fragments. Each may be a single number ("1") or a
         // semicolon-separated run ("38;2;255;128;0").
         var parts = new List<string>(8);
+
+        // Led by the reset, as xterm leads it: the reply is meant to be REPLAYED, and without
+        // the 0 it composes onto whatever attributes are in force instead of reproducing these.
+        parts.Add("0");
 
         if (attr.IsBold()) parts.Add("1");
         if (attr.IsDim()) parts.Add("2");
@@ -216,24 +227,62 @@ public partial class InputHandler
         // The left margin, not column zero -- the mirror of where CursorBackward stops.
         var home = CursorInMarginColumns() ? _buffer.ScrollLeft : 0;
 
+        // A cursor PENDING a wrap sits one past the last column, a position no character
+        // occupies. With reverse wrap on, backspace is absorbed by un-pending: the cursor lands
+        // ON the last column and reports the same position it did before -- which is exactly the
+        // "backspace has no effect" xterm shows in that state. Without it, the phantom column
+        // never existed and backspace acts from the last REAL column.
+        if (_buffer.PendingWrap)
+        {
+            var lastCol = (CursorInMarginColumns() ? _buffer.ScrollRight : _terminal.Cols - 1);
+            var absorb = _terminal.Options.Wraparound
+                         && (_terminal.ReverseWraparound || _terminal.ReverseWraparoundExtended);
+            _buffer.SetCursor(absorb ? lastCol : Math.Max(lastCol - 1, home), _buffer.Y);
+            return;
+        }
+
         if (_buffer.X > home)
         {
             _buffer.SetCursor(_buffer.X - 1, _buffer.Y);
             return;
         }
 
-        if (!_terminal.ReverseWraparound)
+        // Reverse wrap needs DECAWM as well as its own mode -- both flavours of it. xterm split
+        // the feature in 2023: mode 45 is INLINE, crossing onto the row above only where the line
+        // actually wrapped (which is what erasing a wrapped command line needs and all it needs);
+        // mode 1045 is the CLASSIC behaviour, wrapping from any position and, at the top of the
+        // region, around to its bottom.
+        var classic = _terminal.ReverseWraparoundExtended;
+        var inline = _terminal.ReverseWraparound;
+        if (!_terminal.Options.Wraparound || (!inline && !classic))
             return;
 
-        // TopLimit, so a cursor that starts inside the scrolling region stays in it. Reverse wrap
-        // is what a shell uses to erase a wrapped command line, and that line belongs to the pane
-        // it was typed in.
-        if (_buffer.Y <= TopLimit())
-            return;
+        // Inline: only a wrap CONTINUATION has a previous row that is part of the same line. A
+        // cursor parked at a left margin by addressing has nothing above it to erase.
+        if (!classic)
+        {
+            var line = _buffer.Lines[_buffer.YBase + _buffer.Y];
+            if (line is null || !line.IsWrapped)
+                return;
+        }
 
-        // The right MARGIN, not the screen edge: the row above ends where the pane ends.
-        var right = CursorInMarginColumns() ? _buffer.ScrollRight : _terminal.Cols - 1;
-        _buffer.SetCursor(right, _buffer.Y - 1);
+        // The right MARGIN when margins are set, the screen edge otherwise -- and the margin even
+        // for a cursor left of the left margin: backing off the left EDGE lands on the pane's own
+        // last column, which is where xterm has put it since margins arrived in 2012.
+        var right = _terminal.LeftRightMarginMode ? _buffer.ScrollRight : _terminal.Cols - 1;
+
+        if (_buffer.Y > TopLimit())
+        {
+            _buffer.SetCursor(right, _buffer.Y - 1);
+            return;
+        }
+
+        // At the top of the region, classic reverse wrap carries on around to the region's
+        // bottom -- the treatment xterm gave top/bottom margins in 2018 for consistency with the
+        // left/right pair. Inline never gets here: the top row of a region cannot be a wrap
+        // continuation of the row outside it.
+        if (classic && _buffer.Y == TopLimit())
+            _buffer.SetCursor(right, BottomLimit());
     }
 
     private void CursorForward(Params parameters)
@@ -258,7 +307,38 @@ public partial class InputHandler
         // right of where every other terminal puts it, so a shell redrawing its line overwrote
         // the wrong character.
         var from = _buffer.PendingWrap ? _buffer.X - 1 : _buffer.X;
-        _buffer.SetCursor(Math.Max(from - count, home), _buffer.Y);
+
+        // With reverse wrap in force, CUB keeps counting across the wrap: a shell backing up
+        // over a command line that spilled onto the next row walks the cursor back onto the row
+        // above, exactly as that many backspaces would. Each row consumed takes one count for
+        // the wrap itself, and inline mode (45) only crosses where the line really wrapped.
+        var reverse = _terminal.Options.Wraparound
+                      && (_terminal.ReverseWraparound || _terminal.ReverseWraparoundExtended);
+        var x = from;
+        var y = _buffer.Y;
+        while (true)
+        {
+            var step = Math.Min(count, x - home);
+            x -= step;
+            count -= step;
+            if (count == 0 || !reverse || y <= TopLimit())
+                break;
+
+            if (!_terminal.ReverseWraparoundExtended)
+            {
+                var line = _buffer.Lines[_buffer.YBase + y];
+                if (line is null || !line.IsWrapped)
+                    break;
+            }
+
+            x = CursorInMarginColumns() ? _buffer.ScrollRight : _terminal.Cols - 1;
+            y -= 1;
+            count -= 1;
+            if (count == 0)
+                break;
+        }
+
+        _buffer.SetCursor(x, y);
     }
 
     private void CursorNextLine(Params parameters)
@@ -294,21 +374,20 @@ public partial class InputHandler
         _buffer.SetCursor(col, row);
     }
 
-    private void EraseInDisplay(Params parameters)
+    private void EraseInDisplay(Params parameters, bool selective = false)
     {
         var mode = parameters.GetParam(0, 0);
-        var emptyCell = BufferCell.Space;
-        emptyCell.Attributes = GetEraseAttributes();
 
         var hasBlocks = _buffer.HasMultiRowSizedRuns;
 
         switch (mode)
         {
             case 0: // Erase below
-                EraseInLine(parameters); // Current line from cursor
+                EraseInLine(parameters, selective); // Current line from cursor
                 for (int i = _buffer.Y + 1; i < _terminal.Rows; i++)
                 {
-                    _buffer.Lines[_buffer.YBase + i]?.Fill(emptyCell);
+                    EraseLineCells(_buffer.Lines[_buffer.YBase + i], 0, _terminal.Cols, selective);
+                    BreakWrapFromAbove(i);
                     if (hasBlocks)
                         EraseBlocksHangingOver(_buffer.YBase + i, 0, _terminal.Cols);
                 }
@@ -316,16 +395,19 @@ public partial class InputHandler
             case 1: // Erase above
                 for (int i = 0; i < _buffer.Y; i++)
                 {
-                    _buffer.Lines[_buffer.YBase + i]?.Fill(emptyCell);
+                    EraseLineCells(_buffer.Lines[_buffer.YBase + i], 0, _terminal.Cols, selective);
+                    BreakWrapFromAbove(i);
                     if (hasBlocks)
                         EraseBlocksHangingOver(_buffer.YBase + i, 0, _terminal.Cols);
                 }
-                EraseInLine(parameters); // Current line to cursor
+                BreakWrapFromAbove(_buffer.Y);
+                EraseInLine(parameters, selective); // Current line to cursor
                 break;
             case 2: // Erase all — the visible screen only; the scrollback is kept
                 for (int i = 0; i < _terminal.Rows; i++)
                 {
-                    _buffer.Lines[_buffer.YBase + i]?.Fill(emptyCell);
+                    EraseLineCells(_buffer.Lines[_buffer.YBase + i], 0, _terminal.Cols, selective);
+                    BreakWrapFromAbove(i);
                     if (hasBlocks)
                         EraseBlocksHangingOver(_buffer.YBase + i, 0, _terminal.Cols);
                 }
@@ -349,30 +431,30 @@ public partial class InputHandler
             _buffer.RefreshMultiRowSizedRuns();
     }
 
-    private void EraseInLine(Params parameters)
+    private void EraseInLine(Params parameters, bool selective = false)
     {
         var mode = parameters.GetParam(0, 0);
         var line = _buffer.Lines[_buffer.Y + _buffer.YBase];
         if (line == null)
             return;
 
-        var emptyCell = BufferCell.Space;
-        emptyCell.Attributes = GetEraseAttributes();
-
         switch (mode)
         {
             case 0: // Erase to right
-                line.Fill(emptyCell, _buffer.X, _terminal.Cols);
+                EraseLineCells(line, _buffer.X, _terminal.Cols, selective);
+                // With its tail erased, this line no longer wraps onto the next -- xterm's
+                // ClearRight clears the wrap flag, and reverse-wrap reads it.
+                BreakWrapFromAbove(_buffer.Y + 1);
                 if (_buffer.HasMultiRowSizedRuns)
                     EraseBlocksHangingOver(_buffer.Y + _buffer.YBase, _buffer.X, _terminal.Cols - _buffer.X);
                 break;
             case 1: // Erase to left
-                line.Fill(emptyCell, 0, _buffer.X + 1);
+                EraseLineCells(line, 0, _buffer.X + 1, selective);
                 if (_buffer.HasMultiRowSizedRuns)
                     EraseBlocksHangingOver(_buffer.Y + _buffer.YBase, 0, _buffer.X + 1);
                 break;
             case 2: // Erase entire line
-                line.Fill(emptyCell);
+                EraseLineCells(line, 0, _terminal.Cols, selective);
                 if (_buffer.HasMultiRowSizedRuns)
                     EraseBlocksHangingOver(_buffer.Y + _buffer.YBase, 0, _terminal.Cols);
                 break;
@@ -574,10 +656,8 @@ public partial class InputHandler
         var count = Math.Max(parameters.GetParam(0, 1), 1);
         var line = _buffer.Lines[_buffer.Y + _buffer.YBase];
 
-        var emptyCell = BufferCell.Space;
-        emptyCell.Attributes = GetEraseAttributes();
-
-        line?.Fill(emptyCell, _buffer.X, Math.Min(_buffer.X + count, _terminal.Cols));
+        // ECH honours the ISO guard (SPA/EPA) but not DECSCA -- it is an ordinary erase.
+        EraseLineCells(line, _buffer.X, Math.Min(_buffer.X + count, _terminal.Cols), selective: false);
         if (_buffer.HasMultiRowSizedRuns)
             EraseBlocksHangingOver(_buffer.Y + _buffer.YBase, _buffer.X,
             Math.Min(_buffer.X + count, _terminal.Cols) - _buffer.X);
@@ -626,8 +706,13 @@ public partial class InputHandler
         // CHT - Cursor Forward Tabulation (CSI I)
         var count = Math.Max(parameters.GetParam(0, 1), 1);
 
+        // Stops at the right margin, exactly as C0 HT does. The margin binds any cursor at or
+        // left of it -- starting left of the left margin tabs INTO the box and stops at its right
+        // edge, the same discipline printing follows -- while a cursor already right of the
+        // margin only stops at the screen edge.
+        var limit = _buffer.X <= _buffer.ScrollRight ? _buffer.ScrollRight : _terminal.Cols - 1;
         for (var i = 0; i < count; i++)
-            _buffer.SetCursor(_terminal.NextTabStop(_buffer.X), _buffer.Y);
+            _buffer.SetCursor(Math.Min(_terminal.NextTabStop(_buffer.X), limit), _buffer.Y);
     }
 
     private void CursorBackwardTab(Params parameters)
@@ -643,6 +728,8 @@ public partial class InputHandler
             // The stop SET, like HT and CHT. Deriving the previous stop arithmetically ignored
             // every stop a program set with HTS and every one it cleared with TBC, so backward
             // tab disagreed with forward tab on the same screen.
+            // No margin floor: backward tabs ignore the region entirely -- xterm lets CBT walk
+            // straight out of the left margin to column 1.
             _buffer.SetCursor(_terminal.PreviousTabStop(_buffer.X), _buffer.Y);
         }
     }
@@ -724,10 +811,18 @@ public partial class InputHandler
             switch (report)
             {
                 case 6: // DECXCPR - Extended Cursor Position Report
-                    // Report cursor position: CSI ? row ; col R
+                    // CSI ? row ; col ; page R -- CPR plus the page, which is always 1 here.
                     var row = _buffer.Y + 1; // 1-based
-                    var col = _buffer.X + 1; // 1-based
-                    _terminal.RaiseDataReceived($"\u001b[?{row};{col}R");
+                    // A cursor pending a wrap sits one PAST the last column -- a position no
+                    // character occupies and no terminal reports. xterm answers with the last
+                    // column, which is what lets a program trust CPR arithmetic at the margin.
+                    var col = Math.Min(_buffer.X, _terminal.Cols - 1) + 1; // 1-based
+                    if (_terminal.OriginMode)
+                    {
+                        row -= _buffer.ScrollTop;
+                        col -= _buffer.ScrollLeft;
+                    }
+                    _terminal.RaiseDataReceived($"\u001b[?{row};{col};1R");
                     break;
 
                 case 15: // Printer status
@@ -742,7 +837,41 @@ public partial class InputHandler
 
                 case 26: // Keyboard status
                     // Report keyboard ready: CSI ? 2 7 ; 1 ; 0 ; 0 n
+                    // (language = North American, status = ready, type = LK201)
                     _terminal.RaiseDataReceived("\u001b[?27;1;0;0n");
+                    break;
+
+                case 53: // DSR locator status (DEC form)
+                case 55: // DSR locator status (xterm form)
+                    // 53 = locator available. There is no locator device, but xterm answers
+                    // 53 here too -- DECEFR and friends are accepted, just eventless.
+                    _terminal.RaiseDataReceived("\u001b[?53n");
+                    break;
+
+                case 56: // DSR locator type
+                    // CSI ? 57 ; 1 n -- the locator, such as it is, is a mouse.
+                    _terminal.RaiseDataReceived("\u001b[?57;1n");
+                    break;
+
+                case 62: // DECMSR - Macro Space Report
+                    // CSI Pn * { -- no macros, no space for macros. Note: NOT a ?-prefixed reply.
+                    _terminal.RaiseDataReceived("\u001b[0*{");
+                    break;
+
+                case 63: // DECCKSR - Memory Checksum Report
+                    // DCS Pid ! ~ checksum ST, echoing the request's id. No macro memory, so 0.
+                    var id = parameters.GetParam(1, 0);
+                    _terminal.RaiseDataReceived($"\u001bP{id}!~0000\u001b\\");
+                    break;
+
+                case 75: // DSR data integrity
+                    // CSI ? 7 0 n -- no communication errors.
+                    _terminal.RaiseDataReceived("\u001b[?70n");
+                    break;
+
+                case 85: // DSR multiple-session status
+                    // CSI ? 8 3 n -- not configured for multiple sessions.
+                    _terminal.RaiseDataReceived("\u001b[?83n");
                     break;
             }
         }
@@ -759,12 +888,14 @@ public partial class InputHandler
                 case 6: // CPR - Cursor Position Report
                     // Report cursor position: CSI row ; col R
                     var row = _buffer.Y + 1; // 1-based
-                    var col = _buffer.X + 1; // 1-based
+                    var col = Math.Min(_buffer.X, _terminal.Cols - 1) + 1; // 1-based, phantom clamped
 
-                    // Adjust for origin mode
+                    // Origin mode is a coordinate SYSTEM, not a row offset: both axes are
+                    // reported relative to the region's top-left, column included.
                     if (_terminal.OriginMode)
                     {
-                        row = row - _buffer.ScrollTop;
+                        row -= _buffer.ScrollTop;
+                        col -= _buffer.ScrollLeft;
                     }
 
                     _terminal.RaiseDataReceived($"\u001b[{row};{col}R");
@@ -885,6 +1016,11 @@ public partial class InputHandler
     /// </remarks>
     private void SetLeftRightMargins(Params parameters)
     {
+        // DECSLRM is VT400: below level 64 the sequence is SCOSC on some terminals and noise on
+        // the rest, and honouring it would give a level-62 program margins it cannot have asked for.
+        if (_terminal.ConformanceLevel < 64)
+            return;
+
         var left = Math.Max(parameters.GetParam(0, 1), 1) - 1;
         var right = Math.Max(parameters.GetParam(1, _terminal.Cols), 1) - 1;
 
@@ -907,6 +1043,13 @@ public partial class InputHandler
         var bottomParam = parameters.GetParam(1, _terminal.Rows);
         var top = Math.Max(topParam <= 0 ? 1 : topParam, 1) - 1;
         var bottom = Math.Max(bottomParam <= 0 ? _terminal.Rows : bottomParam, 1) - 1;
+
+        // The top margin must be ABOVE the bottom one; a request where it is not is ignored
+        // whole, keeping the previous region -- not clamped into a one-row band the program
+        // never asked for.
+        if (top >= bottom)
+            return;
+
         _buffer.SetScrollRegion(top, bottom);
         MoveCursorToHome();
     }
@@ -956,11 +1099,20 @@ public partial class InputHandler
         // Check WindowOptions permissions before firing events
         var operation = parameters.GetParam(0, 0);
 
+        // Values of 24 and up are not window operations at all: they are DECSLPP, set the page
+        // length to that many lines, kept inside the same final byte since the VT340.
+        if (operation >= 24)
+        {
+            _terminal.Resize(_terminal.Cols, operation);
+            return;
+        }
+
         switch (operation)
         {
             case 1: // De-iconify window (restore from minimized)
                 if (_terminal.Options.WindowOptions.RestoreWin)
                 {
+                    _terminal.WindowIconified = false;
                     _terminal.RaiseWindowRestored();
                 }
                 break;
@@ -968,6 +1120,7 @@ public partial class InputHandler
             case 2: // Iconify window (minimize)
                 if (_terminal.Options.WindowOptions.MinimizeWin)
                 {
+                    _terminal.WindowIconified = true;
                     _terminal.RaiseWindowMinimized();
                 }
                 break;
@@ -977,6 +1130,8 @@ public partial class InputHandler
                 {
                     var x = parameters.GetParam(1, 0);
                     var y = parameters.GetParam(2, 0);
+                    _terminal.WindowX = x;
+                    _terminal.WindowY = y;
                     _terminal.RaiseWindowMoved(x, y);
                 }
                 break;
@@ -1059,25 +1214,23 @@ public partial class InputHandler
             case 11: // Report window state (iconified or not)
                 if (_terminal.Options.WindowOptions.GetWinState)
                 {
+                    // Response: CSI 1 t (not iconified) or CSI 2 t (iconified). When no host
+                    // answers the event, the virtual state winops 1 and 2 maintain does.
                     var args = _terminal.RaiseWindowInfoRequested(WindowInfoRequest.State);
-                    if (args.Handled)
-                    {
-                        // Response: CSI 1 t (not iconified) or CSI 2 t (iconified)
-                        var stateCode = args.IsIconified ? 2 : 1;
-                        _terminal.RaiseDataReceived($"\u001b[{stateCode}t");
-                    }
+                    var iconified = args.Handled ? args.IsIconified : _terminal.WindowIconified;
+                    _terminal.RaiseDataReceived($"\u001b[{(iconified ? 2 : 1)}t");
                 }
                 break;
 
             case 13: // Report window position
                 if (_terminal.Options.WindowOptions.GetWinPosition)
                 {
+                    // Response: CSI 3 ; x ; y t, from the host if it answers, else from the
+                    // position winop 3 last set.
                     var args = _terminal.RaiseWindowInfoRequested(WindowInfoRequest.Position);
-                    if (args.Handled)
-                    {
-                        // Response: CSI 3 ; x ; y t
-                        _terminal.RaiseDataReceived($"\u001b[3;{args.X};{args.Y}t");
-                    }
+                    var x = args.Handled ? args.X : _terminal.WindowX;
+                    var y = args.Handled ? args.Y : _terminal.WindowY;
+                    _terminal.RaiseDataReceived($"\u001b[3;{x};{y}t");
                 }
                 break;
 
@@ -1136,31 +1289,50 @@ public partial class InputHandler
             case 20: // Report icon label
                 if (_terminal.Options.WindowOptions.GetIconTitle)
                 {
+                    // Response: OSC L label ST. ST, not BEL: this reply answers a CSI query, and
+                    // xterm (and esctest's reader) terminate it with ST unconditionally.
                     var args = _terminal.RaiseWindowInfoRequested(WindowInfoRequest.IconTitle);
-                    if (args.Handled && args.Title != null)
-                    {
-                        // Response: OSC L label ST
-                        _terminal.RaiseDataReceived($"\u001b]L{args.Title}\u0007");
-                    }
+                    var label = args.Handled && args.Title != null ? args.Title : _terminal.IconTitle;
+                    _terminal.RaiseDataReceived($"\u001b]L{EncodeTitleReport(label)}\u001b\\");
                 }
                 break;
 
             case 21: // Report window title
                 if (_terminal.Options.WindowOptions.GetWinTitle)
                 {
-                    // Response: OSC l title ST - use the terminal's current title
+                    // Response: OSC l title ST
                     var title = _terminal.Title ?? string.Empty;
-                    _terminal.RaiseDataReceived($"\u001b]l{title}\u0007");
+                    _terminal.RaiseDataReceived($"\u001b]l{EncodeTitleReport(title)}\u001b\\");
                 }
                 break;
 
-            case 22: // Save window title
-                // Push title onto stack (not typically implemented)
+            case 22: // Push titles onto the stack
+                // One stack, each entry holding BOTH titles regardless of the sub-parameter --
+                // xterm's model, and the tests pin it down: pushing icon-and-window then popping
+                // just the icon consumes the whole entry, so a following window pop finds the
+                // stack empty; pushing icon then window then popping both restores each from the
+                // top entry, which snapshotted both titles.
+                _titleStack.Add((_terminal.IconTitle, _terminal.Title ?? string.Empty));
                 break;
 
-            case 23: // Restore window title
-                // Pop title from stack (not typically implemented)
+            case 23: // Pop titles from the stack
+            {
+                if (_titleStack.Count == 0)
+                    break;
+                // Sub-parameter picks what the popped entry restores: 0 = both, 1 = icon,
+                // 2 = window. The entry is consumed either way.
+                var which = parameters.GetParam(1, 0);
+                var (icon, window) = _titleStack[^1];
+                _titleStack.RemoveAt(_titleStack.Count - 1);
+                if (which is 0 or 1)
+                    _terminal.IconTitle = icon;
+                if (which is 0 or 2)
+                {
+                    _terminal.Title = window;
+                    _terminal.RaiseTitleChanged(window);
+                }
                 break;
+            }
         }
     }
 
@@ -1170,7 +1342,17 @@ public partial class InputHandler
     {
         if (_buffer.Y == _buffer.ScrollBottom)
         {
+            // A cursor OUTSIDE the left/right margins is outside the region: it must neither
+            // scroll the region's contents nor step past its bottom row. It just stays -- and the
+            // same holds on the screen's last row, where there is nowhere to go either.
+            if (!CursorInMarginColumns())
+                return;
+
             _buffer.ScrollUp(1);
+        }
+        else if (_buffer.Y == _terminal.Rows - 1)
+        {
+            // Below the region entirely (bottom margin above this row): pinned at the screen edge.
         }
         else
         {
@@ -1189,11 +1371,115 @@ public partial class InputHandler
     {
         if (_buffer.Y == _buffer.ScrollTop)
         {
+            // The mirror of IndexDown: a cursor outside the left/right margins is outside the
+            // region, so at the top margin it neither scrolls the region nor climbs past it.
+            if (!CursorInMarginColumns())
+                return;
+
             _buffer.ScrollDown(1);
+        }
+        else if (_buffer.Y == 0)
+        {
+            // Above the region entirely: pinned at the screen's top edge.
         }
         else
         {
             _buffer.SetCursor(_buffer.X, _buffer.Y - 1);
+        }
+    }
+
+    /// <summary>
+    /// Marks the viewport row <paramref name="row"/> as no longer being a soft-wrap continuation
+    /// of the line above it. The erase operations call this where xterm clears its line-wrap
+    /// flag; without it, reverse-wraparound would walk the cursor up across a join the program
+    /// has since erased.
+    /// </summary>
+    private void BreakWrapFromAbove(int row)
+    {
+        if (row >= _terminal.Rows)
+            return;
+        var line = _buffer.Lines[_buffer.YBase + row];
+        if (line is not null)
+            line.IsWrapped = false;
+    }
+
+    /// <summary>
+    /// The DECSET states XTSAVE (CSI ? Pm s) has stashed away, by mode number, waiting for the
+    /// matching XTRESTORE (CSI ? Pm r).
+    /// </summary>
+    private readonly Dictionary<int, bool> _xtermSavedModes = new();
+
+    /// <summary>The XTWINOPS 22/23 title stack; each entry snapshots both titles. See winop 22.</summary>
+    private readonly List<(string Icon, string Window)> _titleStack = new();
+
+    /// <summary>
+    /// Title modes, CSI &gt; Pm t to set and CSI &gt; Pm T to reset: 0 = titles are SET in hex,
+    /// 1 = title REPORTS are hex, 2/3 = the same in UTF-8, which this terminal already is.
+    /// </summary>
+    private void SetTitleModes(Params parameters, bool enable)
+    {
+        for (var i = 0; i < parameters.Length; i++)
+        {
+            switch (parameters.GetParam(i, 0))
+            {
+                case 0:
+                    _terminal.TitleSetHex = enable;
+                    break;
+                case 1:
+                    _terminal.TitleQueryHex = enable;
+                    break;
+                // 2 and 3 select UTF-8 titles; everything here is UTF-8 already, so they hold.
+            }
+        }
+    }
+
+    /// <summary>
+    /// Applies the hex-set title mode: returns the argument decoded when the mode is on,
+    /// unchanged when off, and null for a hex string too mangled to decode, which xterm drops.
+    /// </summary>
+    private string? DecodeTitleArgument(string arg)
+    {
+        if (!_terminal.TitleSetHex)
+            return arg;
+        if (arg.Length % 2 != 0)
+            return null;
+        try
+        {
+            return System.Text.Encoding.UTF8.GetString(Convert.FromHexString(arg));
+        }
+        catch (FormatException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Applies the hex-query title mode to an outgoing label report.</summary>
+    private string EncodeTitleReport(string text)
+        => _terminal.TitleQueryHex
+            ? Convert.ToHexString(System.Text.Encoding.UTF8.GetBytes(text))
+            : text;
+
+    private void XtermSaveMode(Params parameters)
+    {
+        for (var i = 0; i < parameters.Length; i++)
+        {
+            var mode = parameters.GetParam(i, 0);
+            if (TryGetPrivateModeState(mode, out var set))
+                _xtermSavedModes[mode] = set;
+        }
+    }
+
+    private void XtermRestoreMode(Params parameters)
+    {
+        for (var i = 0; i < parameters.Length; i++)
+        {
+            var mode = parameters.GetParam(i, 0);
+            if (!_xtermSavedModes.TryGetValue(mode, out var set))
+                continue;
+            if (set)
+                SetCSIMode(mode, isPrivate: true);
+            else
+                ResetCSIMode(mode, isPrivate: true);
         }
     }
 
@@ -1294,4 +1580,64 @@ public partial class InputHandler
 
     /// <summary>Restores the rendition state consumed by printing and background erasure.</summary>
     internal void ResetAttributes() => _curAttr = AttributeData.Default;
+    /// <summary>
+    /// DECRQCRA -- reports a 16-bit checksum of a rectangular area of the screen, as
+    /// <c>DCS Pid ! ~ XXXX ST</c>. The one sequence esctest builds every content assertion on:
+    /// it reads single cells back through this, so a terminal without it cannot be conformance-
+    /// tested at all.
+    /// </summary>
+    /// <remarks>
+    /// <para>The sum follows the DEC/xterm convention esctest's default expects: each cell
+    /// contributes its character's codepoints, a cell that holds nothing contributes a SPACE --
+    /// erased and never-written alike, which is also what lets DEC's trailing-blank trimming be
+    /// reasoned away by the client -- and the report carries the NEGATED total (0x10000 - sum),
+    /// which is what xterm sent before patch #279 and what esctest's default
+    /// <c>--xterm-checksum 0</c> undoes on its side.</para>
+    /// <para>Attributes deliberately contribute nothing. esctest compares a cell's checksum to
+    /// the bare codepoint of the character it expects, so a weight per attribute bit would fail
+    /// every assertion on styled text.</para>
+    /// <para>The page parameter is accepted and ignored: there is one screen. Coordinates are
+    /// 1-based screen positions, clamped, whole screen when omitted.</para>
+    /// </remarks>
+    private void RequestChecksumRectangularArea(Params parameters)
+    {
+        var id = parameters.GetParam(0, 0);
+        // parameters[1] is the page, ignored. Coordinates are read in the ORIGIN MODE system,
+        // like a cursor address and like every rectangle operation: a program that addresses its
+        // region relatively asks about it relatively.
+        var originX = _terminal.OriginMode ? _buffer.ScrollLeft : 0;
+        var originY = _terminal.OriginMode ? _buffer.ScrollTop : 0;
+        var top = Math.Max(1, parameters.GetParam(2, 1) + originY);
+        var left = Math.Max(1, parameters.GetParam(3, 1) + originX);
+        var bottom = Math.Min(_terminal.Rows, parameters.GetParam(4, _terminal.Rows - originY) + originY);
+        var right = Math.Min(_terminal.Cols, parameters.GetParam(5, _terminal.Cols - originX) + originX);
+
+        var sum = 0;
+        for (var row = top; row <= bottom; row++)
+        {
+            var line = _buffer.Lines[_buffer.YBase + row - 1];
+            if (line is null)
+                continue;
+
+            for (var col = left; col <= right && col <= line.Length; col++)
+            {
+                var cell = line[col - 1];
+                var content = cell.Content;
+                if (string.IsNullOrEmpty(content))
+                {
+                    // The trailing half of a wide character is a placeholder, not a blank: its
+                    // character was already counted in full one cell to the left.
+                    if (cell.Width == 0)
+                        continue;
+                    sum += 0x20;
+                    continue;
+                }
+
+                foreach (var ch in content)
+                    sum += ch;
+            }
+        }
+
+        _terminal.RaiseDataReceived($"\u001bP{id}!~{(0x10000 - sum) & 0xFFFF:X4}\u001b\\");
+    }
 }

@@ -87,6 +87,14 @@ public enum TerminalMode
     /// When set, allows backspace to wrap from column 0 to the previous line.
     /// </summary>
     ReverseWraparound = 45,
+
+    /// <summary>
+    /// DECSET 1045 -- classic reverse wraparound. Mode 45 became inline-only in xterm 2023
+    /// (crossing rows only where the line actually wrapped, which is what erasing a wrapped
+    /// command line needs); 1045 keeps the original behaviour, wrapping from any position and
+    /// from the top of the region to its bottom.
+    /// </summary>
+    ReverseWraparoundExtended = 1045,
     
     /// <summary>
     /// Application Keypad (DECNKM).
@@ -133,6 +141,9 @@ public enum TerminalMode
     /// Use Alternate Screen Buffer with cursor save/restore.
     /// </summary>
     AltBufferCursor = 1047,
+
+    /// <summary>DECSET/DECRST 1048 -- save and restore the cursor, exactly as DECSC/DECRC do.</summary>
+    SaveCursorMode = 1048,
     
     /// <summary>
     /// Save cursor and use Alternate Screen Buffer.

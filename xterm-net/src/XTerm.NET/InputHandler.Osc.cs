@@ -14,6 +14,62 @@ namespace XTerm;
 /// </summary>
 public partial class InputHandler
 {
+    /// <summary>
+    /// The special colours -- bold, underline, blink, reverse, italic -- OSC 5 names directly
+    /// and OSC 4 names as palette indexes past 255. Kept beside the palette rather than in it:
+    /// the palette is a lock-free snapshot on the render hot path, and these five are read by
+    /// nothing but the queries that set them. Their default is the default foreground, which is
+    /// what an unset special means everywhere one is honoured.
+    /// </summary>
+    private readonly int?[] _specialColors = new int?[5];
+
+    internal void ResetSpecialColors() => Array.Clear(_specialColors);
+
+    private int SpecialColor(int slot)
+        => _specialColors[slot] ?? _terminal.Colors.Foreground;
+
+    /// <summary>Handles one index;spec pair aimed at a special colour, for OSC 4 and OSC 5 alike.</summary>
+    private void HandleSpecialColorPair(int mode, int slot, string spec)
+    {
+        var reportIndex = mode == 4 ? ColorPalette.Size + slot : slot;
+        if (spec == "?")
+        {
+            _terminal.RaiseDataReceived(
+                $"\u001b]{mode};{reportIndex};{ColorSpec.Format(SpecialColor(slot))}{_terminal.OscReplyTerminator}");
+            return;
+        }
+
+        if (ColorSpec.TryParse(spec, out var rgb))
+            _specialColors[slot] = rgb;
+    }
+
+    /// <summary>OSC 5 -- the special colours by their own numbering.</summary>
+    private void HandleSpecialColorChange(string data)
+    {
+        var parts = data.Split(';');
+        for (var i = 0; i + 1 < parts.Length; i += 2)
+        {
+            if (int.TryParse(parts[i], out var slot) && slot >= 0 && slot < _specialColors.Length)
+                HandleSpecialColorPair(5, slot, parts[i + 1]);
+        }
+    }
+
+    /// <summary>OSC 105 -- reset special colours, all of them when bare.</summary>
+    private void HandleSpecialColorReset(string data)
+    {
+        if (string.IsNullOrEmpty(data))
+        {
+            ResetSpecialColors();
+            return;
+        }
+
+        foreach (var part in data.Split(';'))
+        {
+            if (int.TryParse(part, out var slot) && slot >= 0 && slot < _specialColors.Length)
+                _specialColors[slot] = null;
+        }
+    }
+
     private void HandleColorPaletteChange(string data)
     {
         // OSC 4 ; index ; spec [ ; index ; spec ]... ST
@@ -23,8 +79,15 @@ public partial class InputHandler
 
         for (var i = 0; i + 1 < parts.Length; i += 2)
         {
-            if (!int.TryParse(parts[i], out var index) || index < 0 || index >= ColorPalette.Size)
+            if (!int.TryParse(parts[i], out var index) || index < 0
+                || index >= ColorPalette.Size + _specialColors.Length)
             {
+                continue;
+            }
+
+            if (index >= ColorPalette.Size)
+            {
+                HandleSpecialColorPair(4, index - ColorPalette.Size, parts[i + 1]);
                 continue;
             }
 
@@ -32,7 +95,7 @@ public partial class InputHandler
             {
                 // Answering with the CURRENT colour, not a constant. A program asking this is
                 // usually about to pick its own colours to match.
-                _terminal.RaiseDataReceived($"\u001b]4;{index};{ColorSpec.Format(_terminal.Colors[index])}\u0007");
+                _terminal.RaiseDataReceived($"\u001b]4;{index};{ColorSpec.Format(_terminal.Colors[index])}{_terminal.OscReplyTerminator}");
                 continue;
             }
 
@@ -553,7 +616,7 @@ public partial class InputHandler
                 // The real colour, not a constant. Programs query OSC 11 to decide whether they are
                 // on a light or a dark terminal; answering black regardless told every one of them
                 // "dark", and a light theme got dark-theme colours drawn onto it.
-                _terminal.RaiseDataReceived($"\u001b]{resource};{ColorSpec.Format(current)}\u0007");
+                _terminal.RaiseDataReceived($"\u001b]{resource};{ColorSpec.Format(current)}{_terminal.OscReplyTerminator}");
             }
             else if (ColorSpec.TryParse(spec, out var rgb))
             {
@@ -693,12 +756,12 @@ public partial class InputHandler
             {
                 if (bytes is null)
                     return;
-                _terminal.RaiseDataReceived($"\u001b]52;{target};{Convert.ToBase64String(bytes)}\u0007");
+                _terminal.RaiseDataReceived($"\u001b]52;{target};{Convert.ToBase64String(bytes)}{_terminal.OscReplyTerminator}");
             });
             _terminal.RaiseClipboardReadRequested(args);
             if (args.Data is { } sync && args.Disarm())
             {
-                _terminal.RaiseDataReceived($"\u001b]52;{target};{Convert.ToBase64String(sync)}\u0007");
+                _terminal.RaiseDataReceived($"\u001b]52;{target};{Convert.ToBase64String(sync)}{_terminal.OscReplyTerminator}");
             }
             return;
         }
@@ -812,16 +875,22 @@ public partial class InputHandler
 
         if (string.IsNullOrEmpty(data))
         {
+            // ALL of them includes the special colours: xterm's bare OSC 104 puts the whole
+            // colour state back, and esctest leans on that before every test.
             _terminal.Colors.ResetAllColors();
+            ResetSpecialColors();
             return;
         }
 
         foreach (var part in data.Split(';'))
         {
-            if (int.TryParse(part, out var index) && index >= 0 && index < ColorPalette.Size)
-            {
+            if (!int.TryParse(part, out var index) || index < 0)
+                continue;
+
+            if (index >= ColorPalette.Size && index < ColorPalette.Size + _specialColors.Length)
+                _specialColors[index - ColorPalette.Size] = null;
+            else if (index < ColorPalette.Size)
                 _terminal.Colors.ResetColor(index);
-            }
         }
     }
 

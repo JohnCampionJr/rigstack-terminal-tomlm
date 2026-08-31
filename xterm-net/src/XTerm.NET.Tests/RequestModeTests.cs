@@ -220,14 +220,11 @@ public class RequestModeTests
     }
 
     /// <summary>
-    /// Silence for the modes this terminal keeps no state for. Mode 8 and its like are accepted by
-    /// DECSET and change nothing, so there is nothing to read back; replying "reset" to a mode an
-    /// application has just set would be a guess, and a wrong one.
+    /// Silence for the modes this terminal genuinely keeps no state for. The stored toggles
+    /// (DECSCLM, DECNRCM and friends) moved out of this list when DECRQM learned to answer them;
+    /// what remains is the truly untracked, where "reset" would be a guess.
     /// </summary>
     [Theory]
-    [InlineData(4)]      // smooth scroll (DECSCLM), accepted and ignored
-    [InlineData(8)]      // auto repeat, always on and not stored
-    [InlineData(42)]     // national replacement character set
     [InlineData(1035)]   // NumLock modifiers
     [InlineData(1001)]   // highlight mouse tracking, not implemented
     [InlineData(1016)]   // pixel-position mouse, not implemented
@@ -267,22 +264,30 @@ public class RequestModeTests
     }
 
     /// <summary>
-    /// The ANSI modes this terminal keeps no state for get the same silence as an untracked private
-    /// mode. LNM is the one an application is most likely to ask about; nothing here reads or writes
-    /// it, so a "reset" reply would be a guess.
+    /// KAM, SRM and LNM are STORED now -- set, reset and read back like any tracked mode, because
+    /// esctest (and the programs it stands in for) toggle them and expect the toggle reported.
     /// </summary>
     [Theory]
-    [InlineData(2)]   // keyboard action mode (KAM), not implemented
-    [InlineData(12)]  // send/receive (SRM), not implemented
-    [InlineData(20)]  // automatic newline (LNM), not implemented
-    public void Says_nothing_about_ansi_modes_it_keeps_no_state_for(int mode)
+    [InlineData(2)]   // keyboard action mode (KAM)
+    [InlineData(12)]  // send/receive (SRM)
+    [InlineData(20)]  // automatic newline (LNM)
+    public void Stored_ansi_modes_toggle_and_report(int mode)
     {
         var terminal = Fresh();
         var replies = Replies(terminal);
 
         terminal.Write(Esc.Csi($"{mode}$p"));
+        terminal.Write(Esc.Csi($"{mode}h"));
+        terminal.Write(Esc.Csi($"{mode}$p"));
+        terminal.Write(Esc.Csi($"{mode}l"));
+        terminal.Write(Esc.Csi($"{mode}$p"));
 
-        Assert.Empty(replies);
+        Assert.Equal(new[]
+        {
+            Esc.Csi($"{mode};2$y"),
+            Esc.Csi($"{mode};1$y"),
+            Esc.Csi($"{mode};2$y"),
+        }, replies);
     }
 
     /// <summary>

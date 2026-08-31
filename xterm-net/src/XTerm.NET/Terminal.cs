@@ -39,6 +39,45 @@ public class Terminal : IDisposable
     public bool IsAlternateBufferActive => _usingAltBuffer;
 
     // Terminal state
+    /// <summary>LNM (SM 20): a line feed implies a carriage return. Stored beside the other
+    /// modes the input handler tracks, acted on here because LF executes here.</summary>
+    public bool LineFeedMode { get; set; }
+
+    /// <summary>The terminator of the OSC being handled right now, for replies to mirror --
+    /// xterm answers BEL-terminated queries with BEL and ST-terminated ones with ST.</summary>
+    internal string OscReplyTerminator => _parser.LastOscEndedWithBel ? "\u0007" : "\u001b\\";
+
+    /// <summary>
+    /// DECSCL's operating level: 61 for VT100 through 65 for VT500, default 65. Features from
+    /// above the level are gated off -- DECRQM needs 63, DECSLRM needs 64 -- which is what makes
+    /// the level a real setting rather than a stored number.
+    /// </summary>
+    public int ConformanceLevel { get; set; } = 65;
+
+    /// <summary>
+    /// DECSET 41, xterm's "more(1) fix": a tab arriving while a wrap is pending wraps first and
+    /// then tabs, instead of being absorbed at the phantom column.
+    /// </summary>
+    public bool MoreFixMode { get; set; }
+
+    /// <summary>DECCOLM's current answer: whether the screen is in 132-column mode.</summary>
+    public bool ColumnMode132 { get; private set; }
+
+    /// <summary>
+    /// DECSET/DECRST 3. Switching clears the screen, homes the cursor and resets the margins --
+    /// the DEC behaviour programs rely on for a clean slate -- and resizes the grid to 132 or 80
+    /// columns. The caller gates this on Allow80To132 (mode 40), as xterm does.
+    /// </summary>
+    public void SetColumnMode(bool wide)
+    {
+        ColumnMode132 = wide;
+        Resize(wide ? 132 : 80, Rows);
+        Buffer.SetScrollRegion(0, Rows - 1);
+        Buffer.SetLeftRightMargins(0, Cols - 1);
+        _inputHandler.EraseWholeScreen();
+        Buffer.SetCursor(0, 0);
+    }
+
     public bool InsertMode { get; set; }
     public bool ApplicationCursorKeys { get; set; }
     public bool ApplicationKeypad { get; set; }
@@ -59,6 +98,9 @@ public class Terminal : IDisposable
     public bool LeftRightMarginMode { get; set; }
     public bool CursorVisible { get; set; }
     public bool ReverseWraparound { get; set; }
+
+    /// <summary>DECSET 1045 -- classic reverse wraparound; see <see cref="Common.TerminalMode.ReverseWraparoundExtended"/>.</summary>
+    public bool ReverseWraparoundExtended { get; set; }
     public bool ReverseVideo { get; set; }
     public bool SendFocusEvents { get; set; }
     public bool Win32InputMode { get; set; }
@@ -114,6 +156,29 @@ public class Terminal : IDisposable
     public bool AltSendsEscape { get; set; }
     
     public string Title { get; set; }
+
+    /// <summary>The icon label (OSC 1), reported by XTWINOPS 20. Kept separate from
+    /// <see cref="Title"/> exactly as xterm keeps them, so the two report independently.</summary>
+    public string IconTitle { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The window state XTWINOPS 1/2/3 last asked for, reported back by winops 11 and 13 when the
+    /// host does not answer the <see cref="WindowInfoRequested"/> event itself. A widget that IS
+    /// a real window handles the event; a headless or embedded terminal still answers coherently.
+    /// </summary>
+    internal bool WindowIconified;
+
+    /// <summary>See <see cref="WindowIconified"/>.</summary>
+    internal int WindowX;
+
+    /// <summary>See <see cref="WindowIconified"/>.</summary>
+    internal int WindowY;
+
+    /// <summary>Title mode (CSI &gt; Pm t / T): titles are SET as hex-encoded strings.</summary>
+    internal bool TitleSetHex;
+
+    /// <summary>Title mode: title REPORTS are hex-encoded.</summary>
+    internal bool TitleQueryHex;
     public string? CurrentDirectory { get; set; }
     public string? CurrentHyperlink { get; set; }
 
@@ -506,6 +571,8 @@ public class Terminal : IDisposable
         LeftRightMarginMode = false;
         CursorVisible = true;
         ReverseWraparound = false;
+        ReverseWraparoundExtended = false;
+        ConformanceLevel = 65;
         SendFocusEvents = false;
         InBandResize = false;
     }
@@ -786,6 +853,47 @@ public class Terminal : IDisposable
     /// <summary>
     /// Resets the terminal to initial state.
     /// </summary>
+    /// <summary>
+    /// DECSTR -- soft terminal reset (CSI ! p). The subset of <see cref="Reset"/> the VT
+    /// standard names: modes, margins, rendition, charsets and the SAVED cursor go back to
+    /// defaults, while the screen contents, the live cursor position, the tab stops and the
+    /// window state stay exactly where they are. esctest issues one before every single test,
+    /// which is what makes an unimplemented DECSTR poison whole families: any mode a test sets
+    /// leaks into every test after it.
+    /// </summary>
+    public void SoftReset()
+    {
+        InsertMode = false;
+        ApplicationCursorKeys = false;
+        ApplicationKeypad = false;
+        OriginMode = false;
+        CursorVisible = true;
+        ReverseWraparound = false;
+        ReverseWraparoundExtended = false;
+
+        // xterm's deliberate deviation from the VT spec, which esctest tests for by name:
+        // DECSTR turns autowrap ON, because everything after 1985 assumes it.
+        Options.Wraparound = true;
+
+        // Margins to full screen, and the DECLRMM mode with them. xterm historically left the
+        // mode set -- the bug esctest names in test_DECSET_DECLRMM_ModeResetByDECSTR -- and the
+        // test asserts the FIXED behaviour.
+        LeftRightMarginMode = false;
+        Buffer.SetScrollRegion(0, Rows - 1);
+        Buffer.SetLeftRightMargins(0, Cols - 1);
+
+        // Normal rendition, default charsets, and a saved-cursor context of home-with-defaults,
+        // so DECRC after DECSTR restores the origin rather than a dead program's state.
+        _inputHandler.ResetAttributes();
+        _inputHandler.ResetStoredModes();
+        _inputHandler.ResetProtectionMode();
+        LineFeedMode = false;
+
+        _inputHandler.ResetCharsets();
+        _normalBuffer?.ResetSavedCursor();
+        _altBuffer?.ResetSavedCursor();
+    }
+
     public void Reset()
     {
         // RIS puts the tab stops back to their defaults along with everything else; a program's
@@ -802,9 +910,28 @@ public class Terminal : IDisposable
             _inputHandler.SetBuffer(_buffer);
         }
 
+        // RIS undoes DECCOLM's 132 columns before anything else -- xterm checks the current
+        // width and resizes back to 80, and esctest RIS_ResetDECCOLM checks that it happened.
+        if (ColumnMode132)
+            SetColumnMode(false);
+
+        // Both screens come back blank: RIS while the alternate buffer is live must not leave
+        // the old contents waiting behind the next DECSET 47.
+        if (_altBuffer is not null)
+        {
+            for (var i = 0; i < _altBuffer.Lines.Length; i++)
+                _altBuffer.Lines[i]?.Fill(global::XTerm.Buffer.BufferCell.Space, 0, Cols);
+        }
+
+        // Title modes go back to plain text; the titles themselves and the title stacks
+        // survive, as they do in xterm.
+        TitleSetHex = false;
+        TitleQueryHex = false;
+
         // Reset parser
         _parser.Reset();
         _inputHandler.ResetAttributes();
+        _inputHandler.ResetProtectionMode();
 
         // Reset modes
         InsertMode = false;
@@ -820,6 +947,7 @@ public class Terminal : IDisposable
         LeftRightMarginMode = false;
         CursorVisible = true;
         ReverseWraparound = false;
+        ReverseWraparoundExtended = false;
         ReverseVideo = false;
         SendFocusEvents = false;
         EightBitInput = false;
@@ -1506,8 +1634,13 @@ public class Terminal : IDisposable
             return;
 
         var shapeBefore = PointerShape;
+        // ONE cursor, two screens: xterm shares the cursor across the switch, which is what lets
+        // DECSET 47 flip screens mid-drawing without teleporting the pen.
+        var x = _buffer.X;
+        var y = _buffer.Y;
         _buffer = _altBuffer!;
         _usingAltBuffer = true;
+        _buffer.SetCursor(x, y);
         // The protocol's flags are per screen; the switch itself carries them so every path in
         // (1049, 1047, 47) behaves the same.
         KittyKeyboardState.SwitchScreen(toAltScreen: true);
@@ -1528,8 +1661,11 @@ public class Terminal : IDisposable
             return;
 
         var shapeBefore = PointerShape;
+        var x = _buffer.X;
+        var y = _buffer.Y;
         _buffer = _normalBuffer!;
         _usingAltBuffer = false;
+        _buffer.SetCursor(x, y);
         KittyKeyboardState.SwitchScreen(toAltScreen: false);
         _inputHandler.SetBuffer(_buffer);
 
@@ -1566,9 +1702,28 @@ public class Terminal : IDisposable
                 break;
 
             case 0x09: // HT - Tab
+                // A tab at the PHANTOM column is where curses' famous more(1) bug lives: it fills
+                // a row and then tabs. With DECSET 41 the tab wraps first, as the printed
+                // character would have, and lands on the new row's first stop; without it the tab
+                // is absorbed where it stands, and the next printable does the wrapping.
+                if (_buffer.PendingWrap)
+                {
+                    if (!MoreFixMode)
+                        break;
+
+                    if (_buffer.Y == _buffer.ScrollBottom)
+                        _buffer.ScrollUp(1);
+                    else
+                        _buffer.SetCursor(_buffer.X, _buffer.Y + 1);
+                    _buffer.CarriageReturn();
+                }
+
                 // Was hardcoded to 8 while CHT and CBT honoured Options.TabStopWidth, so the two
-                // tab motions disagreed on the same screen. Both go through the stop set now.
-                _buffer.SetCursor(NextTabStop(_buffer.X), _buffer.Y);
+                // tab motions disagreed on the same screen. Both go through the stop set now --
+                // and stop at the right MARGIN for a cursor inside one, as DEC tabs always have.
+                var tabLimit = LeftRightMarginMode && _buffer.X <= _buffer.ScrollRight
+                    ? _buffer.ScrollRight : Cols - 1;
+                _buffer.SetCursor(Math.Min(NextTabStop(_buffer.X), tabLimit), _buffer.Y);
                 break;
 
             case 0x0A: // LF - Line Feed
@@ -1598,8 +1753,17 @@ public class Terminal : IDisposable
     {
         if (_buffer.Y == _buffer.ScrollBottom)
         {
-            // Scroll up
-            _buffer.ScrollUp(1);
+            // A cursor OUTSIDE the left/right margins is outside the region: a line feed there
+            // neither scrolls the region's contents nor steps past its bottom row. It stays put,
+            // as it does on the screen's last row.
+            var insideColumns = !LeftRightMarginMode
+                                || (_buffer.X >= _buffer.ScrollLeft && _buffer.X <= _buffer.ScrollRight);
+            if (insideColumns)
+                _buffer.ScrollUp(1);
+        }
+        else if (_buffer.Y == Rows - 1)
+        {
+            // Below the region entirely: pinned at the screen's edge.
         }
         else
         {
@@ -1607,9 +1771,10 @@ public class Terminal : IDisposable
             _buffer.SetCursor(_buffer.X, _buffer.Y + 1);
         }
 
-        // If ConvertEol is enabled, also do a carriage return — to the line’s start as CR
+        // If ConvertEol is enabled -- or a program set LNM, which means the same thing from
+        // the other side of the pty -- also do a carriage return, to the line's start as CR
         // defines it, which with margins is the left margin, not column 0
-        if (Options.ConvertEol)
+        if (Options.ConvertEol || LineFeedMode)
         {
             _buffer.CarriageReturn();
         }

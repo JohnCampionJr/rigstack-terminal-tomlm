@@ -21,9 +21,10 @@ public class InputHandlerTests
     /// </summary>
     private static string ExpectedSecondaryDeviceAttributes()
     {
-        var version = typeof(InputHandler).Assembly.GetName().Version;
-        var firmwareVersion = version is null ? 0 : version.Major * 100 + version.Minor;
-        return $"\u001b[>1;{firmwareVersion};0c";
+        // > 64 = VT520 family for the default DECSCL level 65; 383 is the xterm patch level this
+        // emulator answers as -- programs gate features on this field, so it tracks xterm, not
+        // the package version.
+        return "\u001b[>64;383;0c";
     }
 
     [Fact]
@@ -983,8 +984,8 @@ public class InputHandlerTests
         // Act - Use "?n" for private mode
         handler.HandleCsi("?n", params_);
 
-        // Assert - Should respond with CSI ? row ; col R (1-based)
-        Assert.Equal("\u001b[?9;16R", receivedData); // row 9, col 16 (1-based)
+        // Assert - CSI ? row ; col ; page R (1-based); the page is always 1
+        Assert.Equal("\u001b[?9;16;1R", receivedData);
     }
 
     [Fact]
@@ -1101,11 +1102,10 @@ public class InputHandlerTests
         // Act
         handler.HandleCsi("c", params_);
 
-        // Assert - CSI ? 62 ; 4 ; 22 c: a VT220 with Sixel and ANSI colour, which is what the code
-        // in this repository actually implements. Attribute 4 is how libsixel-based programs decide
-        // whether to send a picture at all, so dropping it from this reply silently turns every
+        // Assert - xterm's level-5 list plus attribute 4, Sixel, which is how libsixel-based
+        // programs decide whether to send a picture at all; dropping it silently turns every
         // image back into text art.
-        Assert.Equal("\u001b[?62;4;22c", receivedData);
+        Assert.Equal("\u001b[?65;4;1;2;6;9;15;16;17;18;21;22;28;29c", receivedData);
     }
 
     [Fact]
@@ -1125,7 +1125,7 @@ public class InputHandlerTests
         handler.HandleCsi("c", params_);
 
         // Assert - claiming Sixel while it is switched off would send pictures we then drop
-        Assert.Equal("\u001b[?62;22c", receivedData);
+        Assert.Equal("\u001b[?65;1;2;6;9;15;16;17;18;21;22;28;29c", receivedData);
     }
 
     [Fact]
@@ -1143,8 +1143,8 @@ public class InputHandlerTests
         // Act - Use ">c" for secondary DA
         handler.HandleCsi(">c", params_);
 
-        // Assert - CSI > 1 ; package-version ; 0 c. Terminal type 1 is a VT220, so it agrees with
-        // the 62 the primary reply sends; the old 0 said VT100 and contradicted it.
+        // Assert - CSI > 64 ; 383 ; 0 c: the VT520 family matching the 65 the primary reply
+        // sends, and the claimed xterm patch level.
         Assert.Equal(ExpectedSecondaryDeviceAttributes(), receivedData);
     }
 
@@ -2445,7 +2445,15 @@ public class InputHandlerTests
         var reply = Capture(terminal, "\x1bP$qm\x1b\\");
         Assert.StartsWith("\x1bP1$r", reply);
         Assert.EndsWith("m\x1b\\", reply);
-        return reply["\x1bP1$r".Length..^"m\x1b\\".Length];
+        var body = reply["\x1bP1$r".Length..^"m\x1b\\".Length];
+
+        // Every reply leads with the reset, as xterm's does, so the reply REPLAYS to these
+        // attributes instead of composing onto whatever is in force. Asserted here once and
+        // stripped, so each test states only the attributes it is about.
+        if (body == "0")
+            return "0";
+        Assert.StartsWith("0;", body);
+        return body["0;".Length..];
     }
 
     [Fact]
@@ -2614,7 +2622,7 @@ public class InputHandlerTests
     {
         var terminal = CreateTerminal();
         var reply = Capture(terminal, "\x1bP$q\"p\x1b\\");
-        Assert.Equal("\x1bP1$r62;1\"p\x1b\\", reply);
+        Assert.Equal("\x1bP1$r65;1\"p\x1b\\", reply);
     }
 
     [Fact]
