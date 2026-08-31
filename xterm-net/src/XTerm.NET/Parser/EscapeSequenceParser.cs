@@ -474,6 +474,7 @@ public class EscapeSequenceParser
                     // everything after it.
                     if (code == 0x1B || code == 0x07 || code == 0x9C)
                     {
+                        _oscEndedWithBel = code == 0x07;
                         DispatchOsc();
                         Transition(code == 0x1B ? ParserState.Escape : ParserState.Ground);
                     }
@@ -1289,6 +1290,12 @@ public class EscapeSequenceParser
     {
         Dcs?.Invoke(this, new DcsEventArgs(data, parameters));
     }
+
+    /// <summary>Whether the OSC being dispatched ended with BEL rather than ST -- replies mirror it.</summary>
+    private bool _oscEndedWithBel;
+
+    /// <summary>The terminator of the OSC currently being dispatched, for replies to mirror.</summary>
+    internal bool LastOscEndedWithBel => _oscEndedWithBel;
 
     private void DispatchOsc()
     {

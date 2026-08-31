@@ -466,7 +466,7 @@ public class ColorPaletteTests
     [InlineData("rgb:f/0/0", 0xFF0000)]              // 1 digit: f is FULL intensity, not 0x0f
     [InlineData("rgb:ffff/0000/0000", 0xFF0000)]     // 4 digits, as emitted by queries
     [InlineData("#ff0000", 0xFF0000)]
-    [InlineData("#f00", 0xFF0000)]
+    [InlineData("#f00", 0xF00000)]   // X11 left-justifies hash digits: f -> f0, not ff
     [InlineData("#ffff00000000", 0xFF0000)]
     [InlineData("red", 0xFF0000)]
     [InlineData("RED", 0xFF0000)]
@@ -501,5 +501,66 @@ public class ColorPaletteTests
     {
         Assert.True(ColorSpec.TryParse(ColorSpec.Format(0x123456), out var rgb));
         Assert.Equal(0x123456, rgb);
+    }
+    // ---- Special colors (OSC 4 index 256+, OSC 5) --------------------------------------------
+
+    [Fact]
+    public void Osc5_SetsAndReportsASpecialColor()
+    {
+        var terminal = CreateTerminal();
+        terminal.Write("\x1B]5;0;#112233\x07");
+        var replies = CaptureReplies(terminal);
+        terminal.Write("\x1B]5;0;?\x07");
+        Assert.Equal("\u001b]5;0;rgb:1111/2222/3333\u0007", Assert.Single(replies));
+    }
+
+    [Fact]
+    public void Osc4_Index257_IsTheSameSlotAsOsc5_Index1()
+    {
+        var terminal = CreateTerminal();
+        terminal.Write("\x1B]4;257;#445566\x07");
+        var replies = CaptureReplies(terminal);
+        terminal.Write("\x1B]5;1;?\x07");
+        Assert.Equal("\u001b]5;1;rgb:4444/5555/6666\u0007", Assert.Single(replies));
+    }
+
+    [Fact]
+    public void SpecialColor_DefaultsToTheForeground()
+    {
+        var terminal = CreateTerminal(new ThemeOptions { Foreground = "#010203" });
+        var replies = CaptureReplies(terminal);
+        terminal.Write("\x1B]5;2;?\x07");
+        Assert.Equal("\u001b]5;2;rgb:0101/0202/0303\u0007", Assert.Single(replies));
+    }
+
+    [Fact]
+    public void Osc105_And_BareOsc104_ResetSpecialColors()
+    {
+        var terminal = CreateTerminal(new ThemeOptions { Foreground = "#010203" });
+        terminal.Write("\x1B]5;0;#ffffff\x07");
+        terminal.Write("\x1B]105;0\x07");
+        terminal.Write("\x1B]5;1;#ffffff\x07");
+        terminal.Write("\x1B]104\x07");            // bare 104 clears the specials too, like xterm
+        var replies = CaptureReplies(terminal);
+        terminal.Write("\x1B]5;0;?\x07");
+        terminal.Write("\x1B]5;1;?\x07");
+        Assert.Equal(2, replies.Count);
+        Assert.All(replies, r => Assert.EndsWith("rgb:0101/0202/0303\u0007", r));
+    }
+
+    // ---- Reply terminator mirrors the query's ------------------------------------------------
+
+    [Fact]
+    public void OscReplies_MirrorTheQueryTerminator()
+    {
+        var terminal = CreateTerminal();
+        var replies = CaptureReplies(terminal);
+        terminal.Write("\x1B]4;1;?\x07");           // BEL in, BEL out
+        terminal.Write("\x1B]4;1;?\x1B\\");         // ST in, ST out
+        terminal.Write("\x1B]10;?\x1B\\");
+        Assert.Equal(3, replies.Count);
+        Assert.EndsWith("\u0007", replies[0]);
+        Assert.EndsWith("\u001b\\", replies[1]);
+        Assert.EndsWith("\u001b\\", replies[2]);
     }
 }

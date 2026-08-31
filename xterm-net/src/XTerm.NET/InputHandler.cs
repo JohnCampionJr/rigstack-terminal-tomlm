@@ -1063,6 +1063,14 @@ public partial class InputHandler
                     HandleColorPaletteChange(arg);
                     break;
 
+                case OscCommand.ChangeSpecialColor:
+                    HandleSpecialColorChange(arg);
+                    break;
+
+                case OscCommand.ResetSpecialColor:
+                    HandleSpecialColorReset(arg);
+                    break;
+
                 case OscCommand.CurrentDirectory:
                     HandleCurrentDirectory(arg);
                     break;

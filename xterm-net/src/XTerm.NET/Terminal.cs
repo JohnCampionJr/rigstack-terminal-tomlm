@@ -43,6 +43,10 @@ public class Terminal : IDisposable
     /// modes the input handler tracks, acted on here because LF executes here.</summary>
     public bool LineFeedMode { get; set; }
 
+    /// <summary>The terminator of the OSC being handled right now, for replies to mirror --
+    /// xterm answers BEL-terminated queries with BEL and ST-terminated ones with ST.</summary>
+    internal string OscReplyTerminator => _parser.LastOscEndedWithBel ? "\u0007" : "\u001b\\";
+
     /// <summary>
     /// DECSCL's operating level: 61 for VT100 through 65 for VT500, default 65. Features from
     /// above the level are gated off -- DECRQM needs 63, DECSLRM needs 64 -- which is what makes
