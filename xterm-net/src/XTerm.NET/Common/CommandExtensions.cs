@@ -63,6 +63,8 @@ public static class CsiCommandExtensions
         { "m", CsiCommand.SelectGraphicRendition },
         { "n", CsiCommand.DeviceStatusReport },
         { "?n", CsiCommand.DeviceStatusReport }, // DEC DSR
+        { ">t", CsiCommand.SetTitleModes },      // XTSMTITLE
+        { ">T", CsiCommand.ResetTitleModes },    // XTRMTITLE
         { "?s", CsiCommand.XtermSaveMode },      // XTSAVE
         { "?r", CsiCommand.XtermRestoreMode },   // XTRESTORE
         { "r", CsiCommand.SetScrollRegion },

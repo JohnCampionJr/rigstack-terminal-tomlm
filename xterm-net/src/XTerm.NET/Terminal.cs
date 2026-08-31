@@ -156,6 +156,29 @@ public class Terminal : IDisposable
     public bool AltSendsEscape { get; set; }
     
     public string Title { get; set; }
+
+    /// <summary>The icon label (OSC 1), reported by XTWINOPS 20. Kept separate from
+    /// <see cref="Title"/> exactly as xterm keeps them, so the two report independently.</summary>
+    public string IconTitle { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The window state XTWINOPS 1/2/3 last asked for, reported back by winops 11 and 13 when the
+    /// host does not answer the <see cref="WindowInfoRequested"/> event itself. A widget that IS
+    /// a real window handles the event; a headless or embedded terminal still answers coherently.
+    /// </summary>
+    internal bool WindowIconified;
+
+    /// <summary>See <see cref="WindowIconified"/>.</summary>
+    internal int WindowX;
+
+    /// <summary>See <see cref="WindowIconified"/>.</summary>
+    internal int WindowY;
+
+    /// <summary>Title mode (CSI &gt; Pm t / T): titles are SET as hex-encoded strings.</summary>
+    internal bool TitleSetHex;
+
+    /// <summary>Title mode: title REPORTS are hex-encoded.</summary>
+    internal bool TitleQueryHex;
     public string? CurrentDirectory { get; set; }
     public string? CurrentHyperlink { get; set; }
 
@@ -886,6 +909,24 @@ public class Terminal : IDisposable
             _usingAltBuffer = false;
             _inputHandler.SetBuffer(_buffer);
         }
+
+        // RIS undoes DECCOLM's 132 columns before anything else -- xterm checks the current
+        // width and resizes back to 80, and esctest RIS_ResetDECCOLM checks that it happened.
+        if (ColumnMode132)
+            SetColumnMode(false);
+
+        // Both screens come back blank: RIS while the alternate buffer is live must not leave
+        // the old contents waiting behind the next DECSET 47.
+        if (_altBuffer is not null)
+        {
+            for (var i = 0; i < _altBuffer.Lines.Length; i++)
+                _altBuffer.Lines[i]?.Fill(global::XTerm.Buffer.BufferCell.Space, 0, Cols);
+        }
+
+        // Title modes go back to plain text; the titles themselves and the title stacks
+        // survive, as they do in xterm.
+        TitleSetHex = false;
+        TitleQueryHex = false;
 
         // Reset parser
         _parser.Reset();

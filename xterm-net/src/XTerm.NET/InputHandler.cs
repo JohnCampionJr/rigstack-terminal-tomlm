@@ -694,6 +694,14 @@ public partial class InputHandler
                 XtermRestoreMode(parameters);
                 break;
 
+            case CsiCommand.SetTitleModes:
+                SetTitleModes(parameters, enable: true);
+                break;
+
+            case CsiCommand.ResetTitleModes:
+                SetTitleModes(parameters, enable: false);
+                break;
+
             case CsiCommand.InsertColumns:
                 InsertColumns(parameters);
                 break;
@@ -1066,14 +1074,20 @@ public partial class InputHandler
             {
                 case OscCommand.SetIconAndTitle:
                 case OscCommand.SetWindowTitle:
-                    _terminal.Title = arg;
-                    _terminal.RaiseTitleChanged(arg);
-                    break;
-
                 case OscCommand.SetIconName:
-                    // Icon name - not typically supported in modern terminals
-                    recognized = false;
+                {
+                    var text = DecodeTitleArgument(arg);
+                    if (text is null)
+                        break;
+                    if (command != OscCommand.SetIconName)
+                    {
+                        _terminal.Title = text;
+                        _terminal.RaiseTitleChanged(text);
+                    }
+                    if (command != OscCommand.SetWindowTitle)
+                        _terminal.IconTitle = text;
                     break;
+                }
 
                 case OscCommand.ChangeColor:
                     HandleColorPaletteChange(arg);

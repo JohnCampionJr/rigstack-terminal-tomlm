@@ -1112,6 +1112,7 @@ public partial class InputHandler
             case 1: // De-iconify window (restore from minimized)
                 if (_terminal.Options.WindowOptions.RestoreWin)
                 {
+                    _terminal.WindowIconified = false;
                     _terminal.RaiseWindowRestored();
                 }
                 break;
@@ -1119,6 +1120,7 @@ public partial class InputHandler
             case 2: // Iconify window (minimize)
                 if (_terminal.Options.WindowOptions.MinimizeWin)
                 {
+                    _terminal.WindowIconified = true;
                     _terminal.RaiseWindowMinimized();
                 }
                 break;
@@ -1128,6 +1130,8 @@ public partial class InputHandler
                 {
                     var x = parameters.GetParam(1, 0);
                     var y = parameters.GetParam(2, 0);
+                    _terminal.WindowX = x;
+                    _terminal.WindowY = y;
                     _terminal.RaiseWindowMoved(x, y);
                 }
                 break;
@@ -1210,25 +1214,23 @@ public partial class InputHandler
             case 11: // Report window state (iconified or not)
                 if (_terminal.Options.WindowOptions.GetWinState)
                 {
+                    // Response: CSI 1 t (not iconified) or CSI 2 t (iconified). When no host
+                    // answers the event, the virtual state winops 1 and 2 maintain does.
                     var args = _terminal.RaiseWindowInfoRequested(WindowInfoRequest.State);
-                    if (args.Handled)
-                    {
-                        // Response: CSI 1 t (not iconified) or CSI 2 t (iconified)
-                        var stateCode = args.IsIconified ? 2 : 1;
-                        _terminal.RaiseDataReceived($"\u001b[{stateCode}t");
-                    }
+                    var iconified = args.Handled ? args.IsIconified : _terminal.WindowIconified;
+                    _terminal.RaiseDataReceived($"\u001b[{(iconified ? 2 : 1)}t");
                 }
                 break;
 
             case 13: // Report window position
                 if (_terminal.Options.WindowOptions.GetWinPosition)
                 {
+                    // Response: CSI 3 ; x ; y t, from the host if it answers, else from the
+                    // position winop 3 last set.
                     var args = _terminal.RaiseWindowInfoRequested(WindowInfoRequest.Position);
-                    if (args.Handled)
-                    {
-                        // Response: CSI 3 ; x ; y t
-                        _terminal.RaiseDataReceived($"\u001b[3;{args.X};{args.Y}t");
-                    }
+                    var x = args.Handled ? args.X : _terminal.WindowX;
+                    var y = args.Handled ? args.Y : _terminal.WindowY;
+                    _terminal.RaiseDataReceived($"\u001b[3;{x};{y}t");
                 }
                 break;
 
@@ -1287,31 +1289,50 @@ public partial class InputHandler
             case 20: // Report icon label
                 if (_terminal.Options.WindowOptions.GetIconTitle)
                 {
+                    // Response: OSC L label ST. ST, not BEL: this reply answers a CSI query, and
+                    // xterm (and esctest's reader) terminate it with ST unconditionally.
                     var args = _terminal.RaiseWindowInfoRequested(WindowInfoRequest.IconTitle);
-                    if (args.Handled && args.Title != null)
-                    {
-                        // Response: OSC L label ST
-                        _terminal.RaiseDataReceived($"\u001b]L{args.Title}\u0007");
-                    }
+                    var label = args.Handled && args.Title != null ? args.Title : _terminal.IconTitle;
+                    _terminal.RaiseDataReceived($"\u001b]L{EncodeTitleReport(label)}\u001b\\");
                 }
                 break;
 
             case 21: // Report window title
                 if (_terminal.Options.WindowOptions.GetWinTitle)
                 {
-                    // Response: OSC l title ST - use the terminal's current title
+                    // Response: OSC l title ST
                     var title = _terminal.Title ?? string.Empty;
-                    _terminal.RaiseDataReceived($"\u001b]l{title}\u0007");
+                    _terminal.RaiseDataReceived($"\u001b]l{EncodeTitleReport(title)}\u001b\\");
                 }
                 break;
 
-            case 22: // Save window title
-                // Push title onto stack (not typically implemented)
+            case 22: // Push titles onto the stack
+                // One stack, each entry holding BOTH titles regardless of the sub-parameter --
+                // xterm's model, and the tests pin it down: pushing icon-and-window then popping
+                // just the icon consumes the whole entry, so a following window pop finds the
+                // stack empty; pushing icon then window then popping both restores each from the
+                // top entry, which snapshotted both titles.
+                _titleStack.Add((_terminal.IconTitle, _terminal.Title ?? string.Empty));
                 break;
 
-            case 23: // Restore window title
-                // Pop title from stack (not typically implemented)
+            case 23: // Pop titles from the stack
+            {
+                if (_titleStack.Count == 0)
+                    break;
+                // Sub-parameter picks what the popped entry restores: 0 = both, 1 = icon,
+                // 2 = window. The entry is consumed either way.
+                var which = parameters.GetParam(1, 0);
+                var (icon, window) = _titleStack[^1];
+                _titleStack.RemoveAt(_titleStack.Count - 1);
+                if (which is 0 or 1)
+                    _terminal.IconTitle = icon;
+                if (which is 0 or 2)
+                {
+                    _terminal.Title = window;
+                    _terminal.RaiseTitleChanged(window);
+                }
                 break;
+            }
         }
     }
 
@@ -1387,6 +1408,56 @@ public partial class InputHandler
     /// matching XTRESTORE (CSI ? Pm r).
     /// </summary>
     private readonly Dictionary<int, bool> _xtermSavedModes = new();
+
+    /// <summary>The XTWINOPS 22/23 title stack; each entry snapshots both titles. See winop 22.</summary>
+    private readonly List<(string Icon, string Window)> _titleStack = new();
+
+    /// <summary>
+    /// Title modes, CSI &gt; Pm t to set and CSI &gt; Pm T to reset: 0 = titles are SET in hex,
+    /// 1 = title REPORTS are hex, 2/3 = the same in UTF-8, which this terminal already is.
+    /// </summary>
+    private void SetTitleModes(Params parameters, bool enable)
+    {
+        for (var i = 0; i < parameters.Length; i++)
+        {
+            switch (parameters.GetParam(i, 0))
+            {
+                case 0:
+                    _terminal.TitleSetHex = enable;
+                    break;
+                case 1:
+                    _terminal.TitleQueryHex = enable;
+                    break;
+                // 2 and 3 select UTF-8 titles; everything here is UTF-8 already, so they hold.
+            }
+        }
+    }
+
+    /// <summary>
+    /// Applies the hex-set title mode: returns the argument decoded when the mode is on,
+    /// unchanged when off, and null for a hex string too mangled to decode, which xterm drops.
+    /// </summary>
+    private string? DecodeTitleArgument(string arg)
+    {
+        if (!_terminal.TitleSetHex)
+            return arg;
+        if (arg.Length % 2 != 0)
+            return null;
+        try
+        {
+            return System.Text.Encoding.UTF8.GetString(Convert.FromHexString(arg));
+        }
+        catch (FormatException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Applies the hex-query title mode to an outgoing label report.</summary>
+    private string EncodeTitleReport(string text)
+        => _terminal.TitleQueryHex
+            ? Convert.ToHexString(System.Text.Encoding.UTF8.GetBytes(text))
+            : text;
 
     private void XtermSaveMode(Params parameters)
     {

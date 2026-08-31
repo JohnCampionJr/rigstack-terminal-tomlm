@@ -56,7 +56,6 @@ public class CsiCommandExtensionsTests
     [Theory]
     [InlineData(">m")]  // XTMODKEYS -> applied its arguments as SGR
     [InlineData(">n")]  // XTMODKEYS disable -> answered a device status report
-    [InlineData(">t")]  // XTSMTITLE -> performed a window operation
     [InlineData("?t")]
     [InlineData("?c")]  // not a sequence at all -> answered as a secondary DA
     [InlineData("?m")]

@@ -201,6 +201,12 @@ public enum CsiCommand
     /// <summary>XTRESTORE -- restore DEC private mode values (CSI ? Pm r).</summary>
     XtermRestoreMode,
 
+    /// <summary>Set title modes (CSI &gt; Pm t) -- hex or UTF-8 title setting and reporting.</summary>
+    SetTitleModes,
+
+    /// <summary>Reset title modes (CSI &gt; Pm T).</summary>
+    ResetTitleModes,
+
     /// <summary>DECIC -- insert columns at the cursor (CSI Pn ' }).</summary>
     InsertColumns,
 

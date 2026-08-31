@@ -412,7 +412,7 @@ public class WindowManipulationTests
         // Assert
         Assert.True(responseReceived);
         Assert.Contains("Test Title", capturedResponse);
-        Assert.Equal("\u001b]lTest Title\u0007", capturedResponse);
+        Assert.Equal("\u001b]lTest Title\u001b\\", capturedResponse);   // ST, as xterm terminates label reports
     }
 
     [Fact]
@@ -662,7 +662,7 @@ public class WindowManipulationTests
     }
 
     [Fact]
-    public void WindowInfoRequest_StateQuery_NoResponseWhenNotHandled()
+    public void WindowInfoRequest_StateQuery_UnhandledFallsBackToVirtualState()
     {
         // Arrange
         var windowOptions = new WindowOptions { GetWinState = true };
@@ -682,8 +682,9 @@ public class WindowManipulationTests
         // Act
         terminal.Write("\x1b[11t");
 
-        // Assert
-        Assert.Null(capturedResponse); // No response when not handled
+        // Assert - an unhandled event falls back to the virtual window state, which starts
+        // deiconified, so the report is CSI 1 t
+        Assert.Equal("\u001b[1t", capturedResponse);
     }
 
     [Fact]
@@ -837,11 +838,11 @@ public class WindowManipulationTests
 
         // Assert
         Assert.NotNull(capturedResponse);
-        Assert.Equal("\u001b]LMy Icon Title\u0007", capturedResponse); // Format: OSC L title BEL
+        Assert.Equal("\u001b]LMy Icon Title\u001b\\", capturedResponse); // Format: OSC L title ST
     }
 
     [Fact]
-    public void WindowInfoRequest_IconTitleQuery_NoResponseWhenTitleIsNull()
+    public void WindowInfoRequest_IconTitleQuery_NullAnswerFallsBackToTerminalLabel()
     {
         // Arrange
         var windowOptions = new WindowOptions { GetIconTitle = true };
@@ -865,8 +866,8 @@ public class WindowManipulationTests
         // Act
         terminal.Write("\x1b[20t");
 
-        // Assert
-        Assert.Null(capturedResponse); // No response when title is null
+        // Assert - a null answer falls back to the terminal's own (empty) icon label
+        Assert.Equal("\u001b]L\u001b\\", capturedResponse);
     }
 
     [Fact]
@@ -942,7 +943,7 @@ public class WindowManipulationTests
 
         // Assert
         Assert.NotNull(capturedResponse);
-        Assert.Equal("\u001b]lTerminal Window Title\u0007", capturedResponse); // Format: OSC l title BEL
+        Assert.Equal("\u001b]lTerminal Window Title\u001b\\", capturedResponse); // Format: OSC l title ST
     }
 
     [Fact]
