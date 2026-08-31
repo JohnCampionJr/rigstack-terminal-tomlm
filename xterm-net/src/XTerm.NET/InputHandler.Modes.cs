@@ -42,6 +42,13 @@ public partial class InputHandler
 
         var mode = parameters.GetParam(0, 0);
 
+        // Mode 0 is what a MISSING parameter defaults to, and it is not a mode. Everything
+        // below answers even for a mode it does not recognise, but that is a different case:
+        // here no mode was named at all, and replying would hand an application a report it
+        // never asked for.
+        if (mode == 0)
+            return;
+
         int state;
         if (!isPrivate && PermanentlyResetAnsiModes.Contains(mode))
         {
@@ -61,18 +68,17 @@ public partial class InputHandler
             }
             else
             {
-                if (!TryGetPrivateModeState(mode, out var set))
-                    return;
-                state = set ? 1 : 2;
+                // 0 -- "not recognised" -- rather than silence. DECRQM is defined to answer
+                // every request, and a client that blocks on the report hangs on a terminal that
+                // sends nothing. vttest shows the difference as "failed" against modes 2 and
+                // 10-13; DECRQSS in this same emulator already answers its unsupported requests
+                // with the invalid-request form, and this is the same idea.
+                state = TryGetPrivateModeState(mode, out var set) ? (set ? 1 : 2) : 0;
             }
-        }
-        else if (TryGetAnsiModeState(mode, out var set))
-        {
-            state = set ? 1 : 2;
         }
         else
         {
-            return;
+            state = TryGetAnsiModeState(mode, out var set) ? (set ? 1 : 2) : 0;
         }
 
         // The marker is echoed back so the reply answers the question that was asked --

@@ -106,7 +106,7 @@ public class VtTestConformanceTests
     /// Ps=0 is the defined "mode not recognized" value. Silence is not an answer: a client that
     /// blocks on the report hangs. See tomlm/XTerm.NET#125.
     /// </remarks>
-    [Fact(Skip = "Unfixed: HandleRequestMode returns without replying for unknown modes. tomlm/XTerm.NET#125")]
+    [Fact]
     public void Request_mode_answers_even_for_an_unrecognised_mode()
     {
         var (terminal, replies) = Listening();
@@ -139,7 +139,7 @@ public class VtTestConformanceTests
     /// rows and columns, and CSI 13 t falls back to the position winop 3 last set. See
     /// tomlm/XTerm.NET#126.
     /// </remarks>
-    [Fact(Skip = "Unfixed: CSI 14/15/16 t reply only when a host handler sets Handled. tomlm/XTerm.NET#126")]
+    [Fact]
     public void Window_size_in_pixels_is_answered_without_a_host_handler()
     {
         var (terminal, replies) = Listening();
@@ -174,7 +174,7 @@ public class VtTestConformanceTests
     /// vttest erases the display between screens, so a line attribute that survives an erase
     /// survives the rest of the session. See tomlm/XTerm.NET#129.
     /// </remarks>
-    [Fact(Skip = "Unfixed: ED leaves line attributes set. tomlm/XTerm.NET#129")]
+    [Fact]
     public void Erasing_the_display_clears_line_attributes()
     {
         var (terminal, _) = Listening();

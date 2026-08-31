@@ -1237,12 +1237,16 @@ public partial class InputHandler
             case 14: // Report window size in pixels
                 if (_terminal.Options.WindowOptions.GetWinSizePixels)
                 {
+                    // Answered whether or not a host handler does. An emulator has no pixels
+                    // of its own, so zeroes are the honest values -- but silence is not an
+                    // answer, and enabling the report is a statement that the question will be
+                    // answered. The position report next door already works this way.
                     var args = _terminal.RaiseWindowInfoRequested(WindowInfoRequest.SizePixels);
-                    if (args.Handled)
-                    {
-                        // Response: CSI 4 ; height ; width t
-                        _terminal.RaiseDataReceived($"\u001b[4;{args.HeightPixels};{args.WidthPixels}t");
-                    }
+                    var height = args.Handled ? args.HeightPixels : 0;
+                    var width = args.Handled ? args.WidthPixels : 0;
+
+                    // Response: CSI 4 ; height ; width t
+                    _terminal.RaiseDataReceived($"\u001b[4;{height};{width}t");
                 }
                 break;
 
@@ -1250,11 +1254,11 @@ public partial class InputHandler
                 if (_terminal.Options.WindowOptions.GetScreenSizePixels)
                 {
                     var args = _terminal.RaiseWindowInfoRequested(WindowInfoRequest.ScreenSizePixels);
-                    if (args.Handled)
-                    {
-                        // Response: CSI 5 ; height ; width t
-                        _terminal.RaiseDataReceived($"\u001b[5;{args.HeightPixels};{args.WidthPixels}t");
-                    }
+                    var height = args.Handled ? args.HeightPixels : 0;
+                    var width = args.Handled ? args.WidthPixels : 0;
+
+                    // Response: CSI 5 ; height ; width t
+                    _terminal.RaiseDataReceived($"\u001b[5;{height};{width}t");
                 }
                 break;
 
@@ -1262,11 +1266,11 @@ public partial class InputHandler
                 if (_terminal.Options.WindowOptions.GetCellSizePixels)
                 {
                     var args = _terminal.RaiseWindowInfoRequested(WindowInfoRequest.CellSizePixels);
-                    if (args.Handled)
-                    {
-                        // Response: CSI 6 ; height ; width t
-                        _terminal.RaiseDataReceived($"\u001b[6;{args.CellHeight};{args.CellWidth}t");
-                    }
+                    var height = args.Handled ? args.CellHeight : 0;
+                    var width = args.Handled ? args.CellWidth : 0;
+
+                    // Response: CSI 6 ; height ; width t
+                    _terminal.RaiseDataReceived($"\u001b[6;{height};{width}t");
                 }
                 break;
 

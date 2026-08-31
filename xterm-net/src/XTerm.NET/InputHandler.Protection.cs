@@ -81,6 +81,19 @@ public partial class InputHandler
         var blank = BufferCell.Space;
         blank.Attributes = GetEraseAttributes();
 
+        // A line erased in full goes back to single width. The attribute describes how the
+        // line is DRAWN, and an erased line has nothing left to draw at double size -- so
+        // carrying it forward only doubles whatever is written next. vttest's double-size
+        // test made that visible: it erases the display between screens, so every screen
+        // after it stayed doubled.
+        //
+        // Full and non-selective only. A partial erase leaves text on the line that is still
+        // meant to be double, and a selective erase exists precisely to leave protected text
+        // standing -- resizing the line under it would undo that in the one case it was asked
+        // to preserve.
+        if (!selective && start == 0 && end >= _terminal.Cols)
+            line.LineAttribute = Buffer.LineAttribute.Normal;
+
         if (!_protectionUsed || _protectionMode == ProtectionOff)
         {
             line.Fill(blank, start, end);
