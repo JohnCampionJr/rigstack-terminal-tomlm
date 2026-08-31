@@ -43,7 +43,7 @@
   
   <ItemGroup Condition="'$(SolutionName)' != 'Iciclecreek.Avalonia.TerminalWindow.Local'">
     <PackageReference Include="Porta.Pty" Version="2.2.1" />
-    <PackageReference Include="XTerm.NET" Version="2.0.0-rc005" />
+    <PackageReference Include="XTerm.NET" Version="2.0.0-rc006" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(SolutionName)' == 'Iciclecreek.Avalonia.TerminalWindow.Local'">
