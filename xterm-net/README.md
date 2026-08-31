@@ -1,4 +1,6 @@
-﻿# XTerm.NET
+![Icon](https://raw.githubusercontent.com/tomlm/XTerm.NET/main/icon.png)
+
+# XTerm.NET
 
 [![Build Status](https://github.com/tomlm/XTerm.NET/actions/workflows/BuildAndRunTests.yml/badge.svg)](https://github.com/tomlm/XTerm.NET/actions/workflows/BuildAndRunTests.yml) [![NuGet Version](https://img.shields.io/nuget/v/XTerm.NET.svg)](https://www.nuget.org/packages/XTerm.NET/) [![NuGet Downloads](https://img.shields.io/nuget/dt/XTerm.NET.svg)](https://www.nuget.org/packages/XTerm.NET/) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -39,6 +41,9 @@ that part of the picture; Kitty is an *overlay* ordered against the text by its 
 - **Capability Queries** — Answers XTGETTCAP (`ESC P + q …`), so a program can ask the terminal what
   it can do instead of trusting whatever terminfo entry happens to be installed. See
   [Capability queries](#capability-queries)
+
+## Compliance
+![Compliance](https://raw.githubusercontent.com/tomlm/Iciclecreek.Avalonia.Terminal/main/compliance.png)
 
 ## Upgrading to 2.0
 
