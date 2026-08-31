@@ -36,7 +36,14 @@ Or via the Package Manager Console in Visual Studio:
 Install-Package Iciclecreek.Avalonia.Terminal
 ```
 
+## Compliance
+<img width="890" height="443" alt="image" src="https://github.com/user-attachments/assets/831a7de7-89fc-4f95-bf0d-0392053fb2f1" />
+
+
 ## Usage
+There are 2 Avalonia Controls:
+* **TerminalControl** - allows you to embed a terminal anywhere in xaml markup
+* **TerminalWindow** - a popup window with a terminal control in it.
 
 ### TerminalControl
 
