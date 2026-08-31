@@ -392,7 +392,17 @@ public partial class InputHandler
         var translatedData = data;
         if (data.Length == 1)
         {
-            translatedData = Charsets.TranslateChar(data[0], _activeCharset);
+            // A single shift outranks GL for this character and is spent doing it.
+            if (_singleShiftPending)
+            {
+                translatedData = Charsets.TranslateChar(data[0], _singleShiftCharset);
+                _singleShiftCharset = null;
+                _singleShiftPending = false;
+            }
+            else
+            {
+                translatedData = Charsets.TranslateChar(data[0], _activeCharset);
+            }
         }
 
         var width = GetStringCellWidth(translatedData);
@@ -701,8 +711,21 @@ public partial class InputHandler
 
     private void SetCharset(CharsetMode mode, string charsetId)
     {
-        var charset = Charsets.GetCharset(charsetId);
-        _charsets[mode] = charset;
+        // The ID is kept, not just the table it resolves to. A national set means one thing
+        // with DECNRCM set and ASCII without it, so the designation has to outlive the
+        // resolution -- a program designating French and then enabling NRC mode expects
+        // French, and it never designates again.
+        _charsetIds[mode] = charsetId;
+        _charsets[mode] = Charsets.GetCharset(charsetId, _terminal.NationalReplacementCharsets);
+        RefreshActiveCharset();
+    }
+
+    /// <summary>Re-resolves every designation, for when DECNRCM changes under them.</summary>
+    internal void RefreshDesignatedCharsets()
+    {
+        foreach (var mode in _charsetIds.Keys.ToList())
+            _charsets[mode] = Charsets.GetCharset(_charsetIds[mode], _terminal.NationalReplacementCharsets);
+
         RefreshActiveCharset();
     }
 
@@ -721,7 +744,37 @@ public partial class InputHandler
     public void ShiftIn()
     {
         _currentCharset = CharsetMode.G0;
+        _singleShiftCharset = null;
+        _singleShiftPending = false;
         RefreshActiveCharset();
+    }
+
+    /// <summary>
+    /// LS2 (ESC n) and LS3 (ESC o) - lock G2 or G3 into GL until the next shift.
+    /// </summary>
+    /// <remarks>
+    /// SO and SI above are the same operation for G1 and G0. G2 and G3 could be DESIGNATED
+    /// before this existed and never invoked, so whatever a program put in them printed as
+    /// ASCII -- and silently, since an unimplemented set and US ASCII look identical.
+    /// </remarks>
+    public void LockingShift(CharsetMode mode)
+    {
+        _currentCharset = mode;
+        RefreshActiveCharset();
+    }
+
+    /// <summary>
+    /// SS2 (ESC N) and SS3 (ESC O) - invoke G2 or G3 for the NEXT character only.
+    /// </summary>
+    /// <remarks>
+    /// The single shift is held pending rather than swapped in, so it expires by being consumed
+    /// instead of by something remembering to put the old set back. A shift with no character
+    /// after it simply never fires.
+    /// </remarks>
+    public void InvokeSingleShift(CharsetMode mode)
+    {
+        _singleShiftCharset = _charsets.GetValueOrDefault(mode);
+        _singleShiftPending = true;
     }
 
     /// <summary>
@@ -729,6 +782,7 @@ public partial class InputHandler
     /// </summary>
     public void ResetCharsets()
     {
+        _charsetIds.Clear();
         _charsets[CharsetMode.G0] = Charsets.ASCII;
         _charsets[CharsetMode.G1] = Charsets.ASCII;
         _charsets[CharsetMode.G2] = Charsets.ASCII;

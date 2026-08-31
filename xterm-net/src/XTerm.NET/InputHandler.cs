@@ -38,6 +38,27 @@ public partial class InputHandler
     /// through RefreshActiveCharset so the two cannot drift.
     /// </summary>
     private Dictionary<char, string>? _activeCharset;
+
+    /// <summary>What each G-set was DESIGNATED as, by its escape identifier.</summary>
+    /// <remarks>
+    /// Kept alongside the resolved tables because a designation outlives its resolution: a
+    /// national set resolves to ASCII while DECNRCM is reset and to itself once it is set, and
+    /// the program that designated it does not designate again when the mode changes.
+    /// </remarks>
+    private readonly Dictionary<CharsetMode, string> _charsetIds = new();
+
+    /// <summary>
+    /// The set a SINGLE shift has invoked for the next printed character, or null.
+    /// </summary>
+    /// <remarks>
+    /// Separate from <see cref="_activeCharset"/> because it outranks it for exactly one
+    /// character and then stops: SS2 and SS3 shift the character that follows and nothing
+    /// after it. Holding it as pending state rather than swapping the active set is what makes
+    /// "and then stops" automatic instead of something the print path has to remember to undo.
+    /// </remarks>
+    private Dictionary<char, string>? _singleShiftCharset;
+
+    private bool _singleShiftPending;
     private CharsetMode _currentCharset;
 
     // Variation selector and combining character constants
@@ -152,6 +173,7 @@ public partial class InputHandler
         // path can only stop. Rare enough to hand to Print rather than teach twice -- the default
         // is on, so nothing in normal output takes this branch.
         if (!UseRunPrinting || _terminal.InsertMode || _activeCharset is not null
+            || _singleShiftPending
             || _buffer.HasMultiRowSizedRuns || !_terminal.Options.Wraparound)
         {
             foreach (var b in data)
@@ -259,6 +281,7 @@ public partial class InputHandler
         // path can only stop. Rare enough to hand to Print rather than teach twice -- the default
         // is on, so nothing in normal output takes this branch.
         if (!UseRunPrinting || _terminal.InsertMode || _activeCharset is not null
+            || _singleShiftPending
             || _buffer.HasMultiRowSizedRuns || !_terminal.Options.Wraparound)
         {
             for (var k = 0; k < count; k++)
@@ -874,6 +897,18 @@ public partial class InputHandler
                     break;
                 case "7": // DECSC - Save Cursor
                     SaveCursor();
+                    break;
+                case "N": // SS2 - single shift G2, for the next character only
+                    InvokeSingleShift(CharsetMode.G2);
+                    break;
+                case "O": // SS3 - single shift G3
+                    InvokeSingleShift(CharsetMode.G3);
+                    break;
+                case "n": // LS2 - lock G2 into GL until the next shift
+                    LockingShift(CharsetMode.G2);
+                    break;
+                case "o": // LS3 - lock G3 into GL
+                    LockingShift(CharsetMode.G3);
                     break;
                 case "Z": // DECID - the ancient identify; answers like the primary DA
                     _terminal.RaiseDataReceived(PrimaryDeviceAttributes);
@@ -1770,8 +1805,9 @@ public partial class InputHandler
                     break;
 
                 case TerminalMode.NationalCharset:
-                    // Stored so DECRQM can answer truthfully; nothing acts on it.
                     TrySetStoredMode(mode, isPrivate: true, value: true);
+                    _terminal.NationalReplacementCharsets = true;
+                    RefreshDesignatedCharsets();
                     break;
 
                 case TerminalMode.ReverseWraparound:

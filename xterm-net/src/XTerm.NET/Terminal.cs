@@ -142,6 +142,13 @@ public class Terminal : IDisposable
     /// Mode 1034 (eightBitInput).
     /// </summary>
     public bool EightBitInput { get; set; }
+
+    /// <summary>DECNRCM (mode 42): whether national replacement sets are in force.</summary>
+    /// <remarks>
+    /// A designated national set behaves as ASCII while this is false, so changing it re-resolves
+    /// what is already designated rather than only affecting the next designation.
+    /// </remarks>
+    public bool NationalReplacementCharsets { get; set; }
     
     /// <summary>
     /// When enabled, pressing Meta+key sends ESC followed by the key.

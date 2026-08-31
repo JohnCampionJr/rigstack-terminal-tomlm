@@ -55,6 +55,143 @@ public static class Charsets
     };
 
     /// <summary>
+    /// The DEC national replacement character sets (NRCS), by their designator.
+    /// </summary>
+    /// <remarks>
+    /// <para>Each remaps a handful of positions in the ASCII range and leaves the rest alone --
+    /// which is what makes them REPLACEMENT sets rather than alphabets, and why a missing one is
+    /// invisible: the text comes out almost right, with the accented positions quietly reading as
+    /// # @ [ ] { } instead.</para>
+    ///
+    /// <para>They apply only while DECNRCM (mode 42) is set. With it reset the designation is
+    /// still remembered, but the set behaves as ASCII -- which is what the mode is for.</para>
+    /// </remarks>
+    public static readonly Dictionary<string, Dictionary<char, string>> National = new()
+    {
+        // French
+        ["R"] = new()
+        {
+            { '#', "\u00a3" },
+            { '@', "\u00e0" },
+            { '[', "\u00b0" },
+            { '\\', "\u00e7" },
+            { ']', "\u00a7" },
+            { '{', "\u00e9" },
+            { '|', "\u00f9" },
+            { '}', "\u00e8" },
+            { '~', "\u00a8" },
+        },
+        // German
+        ["K"] = new()
+        {
+            { '@', "\u00a7" },
+            { '[', "\u00c4" },
+            { '\\', "\u00d6" },
+            { ']', "\u00dc" },
+            { '{', "\u00e4" },
+            { '|', "\u00f6" },
+            { '}', "\u00fc" },
+            { '~', "\u00df" },
+        },
+        // Swedish
+        ["H"] = new()
+        {
+            { '@', "\u00c9" },
+            { '[', "\u00c4" },
+            { '\\', "\u00d6" },
+            { ']', "\u00c5" },
+            { '^', "\u00dc" },
+            { '`', "\u00e9" },
+            { '{', "\u00e4" },
+            { '|', "\u00f6" },
+            { '}', "\u00e5" },
+            { '~', "\u00fc" },
+        },
+        // Italian
+        ["Y"] = new()
+        {
+            { '#', "\u00a3" },
+            { '@', "\u00a7" },
+            { '[', "\u00b0" },
+            { '\\', "\u00e7" },
+            { ']', "\u00e9" },
+            { '`', "\u00f9" },
+            { '{', "\u00e0" },
+            { '|', "\u00f2" },
+            { '}', "\u00e8" },
+            { '~', "\u00ec" },
+        },
+        // Spanish
+        ["Z"] = new()
+        {
+            { '#', "\u00a3" },
+            { '@', "\u00a7" },
+            { '[', "\u00a1" },
+            { '\\', "\u00d1" },
+            { ']', "\u00bf" },
+            { '{', "\u00b0" },
+            { '|', "\u00f1" },
+            { '}', "\u00e7" },
+        },
+        // Norwegian/Danish
+        ["E"] = new()
+        {
+            { '@', "\u00c4" },
+            { '[', "\u00c6" },
+            { '\\', "\u00d8" },
+            { ']', "\u00c5" },
+            { '^', "\u00dc" },
+            { '`', "\u00e4" },
+            { '{', "\u00e6" },
+            { '|', "\u00f8" },
+            { '}', "\u00e5" },
+            { '~', "\u00fc" },
+        },
+        // Dutch
+        ["4"] = new()
+        {
+            { '#', "\u00a3" },
+            { '@', "\u00be" },
+            { '[', "\u0133" },
+            { '\\', "\u00bd" },
+            { ']', "\u007c" },
+            { '{', "\u00a8" },
+            { '|', "\u0066" },
+            { '}', "\u00bc" },
+            { '~', "\u00b4" },
+        },
+        // Swiss
+        ["="] = new()
+        {
+            { '#', "\u00f9" },
+            { '@', "\u00e0" },
+            { '[', "\u00e9" },
+            { '\\', "\u00e7" },
+            { ']', "\u00ea" },
+            { '^', "\u00ee" },
+            { '_', "\u00e8" },
+            { '`', "\u00f4" },
+            { '{', "\u00e4" },
+            { '|', "\u00f6" },
+            { '}', "\u00fc" },
+            { '~', "\u00fb" },
+        },
+        // Finnish
+        ["C"] = new()
+        {
+            { '[', "\u00c4" },
+            { '\\', "\u00d6" },
+            { ']', "\u00c5" },
+            { '^', "\u00dc" },
+            { '`', "\u00e9" },
+            { '{', "\u00e4" },
+            { '|', "\u00f6" },
+            { '}', "\u00e5" },
+            { '~', "\u00fc" },
+        },
+    };
+
+    /// <summary>
     /// ASCII character set (no translation).
     /// Null dictionary means pass-through.
     /// </summary>
@@ -65,15 +202,24 @@ public static class Charsets
     /// </summary>
     /// <param name="name">Charset identifier: "0" (DEC Graphics), "A" (UK), "B" (US ASCII)</param>
     /// <returns>Character translation dictionary, or null for pass-through</returns>
-    public static Dictionary<char, string>? GetCharset(string name)
+    public static Dictionary<char, string>? GetCharset(string name, bool nationalReplacement = false)
     {
-        return name switch
+        switch (name)
         {
-            "0" => VT100LineDrawing,  // DEC Special Graphics
-            "A" => UKCharset,          // UK
-            "B" => ASCII,              // US ASCII (default)
-            _ => ASCII                 // Default to ASCII for unknown charsets
-        };
+            case "0": return VT100LineDrawing;  // DEC Special Graphics
+            case "A": return UKCharset;          // UK
+            case "B": return ASCII;              // US ASCII (default)
+        }
+
+        // The national sets are gated on DECNRCM, so the same designation means different
+        // things depending on the mode -- which is why the caller re-resolves what it has
+        // designated when the mode changes rather than resolving once at designation time.
+        if (nationalReplacement && National.TryGetValue(name, out var national))
+            return national;
+
+        // Anything else is ASCII. That includes a national set while NRC is off, and it is
+        // the honest answer for a designation this terminal does not implement.
+        return ASCII;
     }
 
     /// <summary>

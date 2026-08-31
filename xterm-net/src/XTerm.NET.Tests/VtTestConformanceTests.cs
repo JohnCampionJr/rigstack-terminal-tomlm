@@ -224,7 +224,7 @@ public class VtTestConformanceTests
     /// vttest's single-shift test passes without this working, because it runs with G2 and G3 as
     /// ISO Latin-1 whose mapping is the identity. See tomlm/XTerm.NET#131.
     /// </remarks>
-    [Fact(Skip = "Unfixed: SS2/SS3/LS2/LS3 are not dispatched, so G2 and G3 are unreachable. tomlm/XTerm.NET#131")]
+    [Fact]
     public void A_locking_shift_reaches_G2()
     {
         var (terminal, _) = Listening();
@@ -256,7 +256,7 @@ public class VtTestConformanceTests
     /// <remarks>
     /// The primary DA advertises feature 9 while only UK is implemented. See tomlm/XTerm.NET#132.
     /// </remarks>
-    [Fact(Skip = "Unfixed: only DEC graphics, UK and ASCII exist; the rest fall back to ASCII. tomlm/XTerm.NET#132")]
+    [Fact]
     public void A_national_replacement_set_remaps_its_positions()
     {
         var (terminal, _) = Listening();

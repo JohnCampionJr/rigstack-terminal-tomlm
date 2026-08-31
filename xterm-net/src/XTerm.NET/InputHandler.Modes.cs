@@ -370,6 +370,8 @@ public partial class InputHandler
 
                 case TerminalMode.NationalCharset:
                     TrySetStoredMode(mode, isPrivate: true, value: false);
+                    _terminal.NationalReplacementCharsets = false;
+                    RefreshDesignatedCharsets();
                     break;
 
                 case TerminalMode.ReverseWraparound:
