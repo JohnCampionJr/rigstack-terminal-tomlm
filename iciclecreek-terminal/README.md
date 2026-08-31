@@ -287,6 +287,10 @@ told so and fall back to sending the pixels directly.
 - **Porta.Pty:** [https://github.com/tomlm/Porta.Pty](https://github.com/tomlm/Porta.Pty)
 - **Avalonia UI:** [https://avaloniaui.net/](https://avaloniaui.net/)
 
+# Authors
+* Tom Laird-McConnell — [tomlm](https://github.com/tomlm)
+* John Campion Jr — [JohnCampionJr](https://github.com/JohnCampionJr)
+
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
