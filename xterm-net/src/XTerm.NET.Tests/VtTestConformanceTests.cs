@@ -76,8 +76,8 @@ public class VtTestConformanceTests
         terminal.Write($"{Esc}[=c");
 
         var reply = Assert.Single(replies);
-        Assert.StartsWith($"{Esc}P!|", reply);
-        Assert.EndsWith($"{Esc}\\", reply);
+        Assert.StartsWith($"{Esc}P!|", reply, StringComparison.Ordinal);
+        Assert.EndsWith($"{Esc}\\", reply, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -94,8 +94,8 @@ public class VtTestConformanceTests
         terminal.Write($"{Esc}[0x");
 
         var reply = Assert.Single(replies);
-        Assert.StartsWith($"{Esc}[2;", reply);
-        Assert.EndsWith("x", reply);
+        Assert.StartsWith($"{Esc}[2;", reply, StringComparison.Ordinal);
+        Assert.EndsWith("x", reply, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -148,8 +148,8 @@ public class VtTestConformanceTests
         terminal.Write($"{Esc}[14t");
 
         var reply = Assert.Single(replies);
-        Assert.StartsWith($"{Esc}[4;", reply);
-        Assert.EndsWith("t", reply);
+        Assert.StartsWith($"{Esc}[4;", reply, StringComparison.Ordinal);
+        Assert.EndsWith("t", reply, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -164,5 +164,119 @@ public class VtTestConformanceTests
         terminal.Write($"{Esc}[18t");
 
         Assert.Equal($"{Esc}[8;24;80t", Assert.Single(replies));
+    }
+
+    /// <summary>
+    /// Erasing the display puts double-width/height lines back to normal. vttest menu 4, reported
+    /// from the Avalonia terminal as "stuck in double-size mode".
+    /// </summary>
+    /// <remarks>
+    /// vttest erases the display between screens, so a line attribute that survives an erase
+    /// survives the rest of the session. See tomlm/XTerm.NET#129.
+    /// </remarks>
+    [Fact(Skip = "Unfixed: ED leaves line attributes set. tomlm/XTerm.NET#129")]
+    public void Erasing_the_display_clears_line_attributes()
+    {
+        var (terminal, _) = Listening();
+
+        terminal.Write($"{Esc}[1;1H{Esc}#6WIDE");
+        Assert.Equal(XTerm.Buffer.LineAttribute.DoubleWidth, terminal.Buffer.Lines[0]!.LineAttribute);
+
+        terminal.Write($"{Esc}[2J");
+
+        Assert.Equal(XTerm.Buffer.LineAttribute.Normal, terminal.Buffer.Lines[0]!.LineAttribute);
+    }
+
+    /// <summary>
+    /// The per-line escape still works, so the test above is about the erase and not about DECSWL.
+    /// </summary>
+    [Fact]
+    public void DECSWL_puts_a_double_width_line_back()
+    {
+        var (terminal, _) = Listening();
+
+        terminal.Write($"{Esc}[1;1H{Esc}#6WIDE");
+        terminal.Write($"{Esc}[1;1H{Esc}#5");
+
+        Assert.Equal(XTerm.Buffer.LineAttribute.Normal, terminal.Buffer.Lines[0]!.LineAttribute);
+    }
+
+    /// <summary>
+    /// After S8C1T the terminal's own replies use the 8-bit CSI. vttest menu 11 -> 1 -> 3, where
+    /// both halves of the test currently return the same 7-bit reply.
+    /// </summary>
+    /// <remarks>See tomlm/XTerm.NET#130.</remarks>
+    [Fact(Skip = "Unfixed: S7C1T/S8C1T are not dispatched at all. tomlm/XTerm.NET#130")]
+    public void Eight_bit_controls_change_the_reply_prefix()
+    {
+        var (terminal, replies) = Listening();
+
+        terminal.Write($"{Esc} G");                     // S8C1T
+        terminal.Write($"{Esc}[6n");                    // DSR - cursor position
+
+        Assert.StartsWith("", Assert.Single(replies), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// G2 designated as DEC Special Graphics and invoked with a locking shift maps like G0 does.
+    /// </summary>
+    /// <remarks>
+    /// vttest's single-shift test passes without this working, because it runs with G2 and G3 as
+    /// ISO Latin-1 whose mapping is the identity. See tomlm/XTerm.NET#131.
+    /// </remarks>
+    [Fact(Skip = "Unfixed: SS2/SS3/LS2/LS3 are not dispatched, so G2 and G3 are unreachable. tomlm/XTerm.NET#131")]
+    public void A_locking_shift_reaches_G2()
+    {
+        var (terminal, _) = Listening();
+
+        terminal.Write($"{Esc}*0");                     // G2 = DEC Special Graphics
+        terminal.Write($"{Esc}n");                      // LS2
+        terminal.Write("aaa");
+
+        Assert.Equal("▒▒▒", terminal.GetLine(0));
+    }
+
+    /// <summary>
+    /// The same character set through G0, which does work -- the contrast the test above rests on.
+    /// </summary>
+    [Fact]
+    public void G0_reaches_the_special_graphics_set()
+    {
+        var (terminal, _) = Listening();
+
+        terminal.Write($"{Esc}(0aaa{Esc}(B");
+
+        Assert.Equal("▒▒▒", terminal.GetLine(0));
+    }
+
+    /// <summary>
+    /// A national replacement set remaps the positions it is defined to remap. French is the case
+    /// vttest exercises once NRC mode is enabled.
+    /// </summary>
+    /// <remarks>
+    /// The primary DA advertises feature 9 while only UK is implemented. See tomlm/XTerm.NET#132.
+    /// </remarks>
+    [Fact(Skip = "Unfixed: only DEC graphics, UK and ASCII exist; the rest fall back to ASCII. tomlm/XTerm.NET#132")]
+    public void A_national_replacement_set_remaps_its_positions()
+    {
+        var (terminal, _) = Listening();
+
+        terminal.Write($"{Esc}[?42h");                  // DECNRCM
+        terminal.Write($"{Esc}(R#{Esc}(B");             // French G0, then the position it remaps
+
+        Assert.Equal("£", terminal.GetLine(0));    // pound sign
+    }
+
+    /// <summary>
+    /// UK is implemented, and remaps the one position it defines -- the contrast for the test above.
+    /// </summary>
+    [Fact]
+    public void The_UK_set_remaps_its_one_position()
+    {
+        var (terminal, _) = Listening();
+
+        terminal.Write($"{Esc}(A#{Esc}(B");
+
+        Assert.Equal("£", terminal.GetLine(0));
     }
 }
