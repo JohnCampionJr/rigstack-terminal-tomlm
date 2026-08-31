@@ -51,6 +51,7 @@ public static class CsiCommandExtensions
         { "X", CsiCommand.EraseChars },
         { "Z", CsiCommand.CursorBackwardTab },
         { "b", CsiCommand.RepeatPrecedingCharacter },
+        { "x", CsiCommand.RequestTerminalParameters },  // DECREQTPARM
         { "c", CsiCommand.DeviceAttributes },   // DA1 - primary
         { ">c", CsiCommand.DeviceAttributes },  // DA2 - secondary
         { "d", CsiCommand.LinePositionAbsolute },

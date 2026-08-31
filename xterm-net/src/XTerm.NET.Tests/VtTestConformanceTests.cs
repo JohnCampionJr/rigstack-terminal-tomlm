@@ -86,7 +86,7 @@ public class VtTestConformanceTests
     /// <remarks>
     /// CSI 0 x reports with sol=2, CSI 1 x with sol=3. See tomlm/XTerm.NET#124.
     /// </remarks>
-    [Fact(Skip = "Unfixed: no handler for the CSI final character 'x'. tomlm/XTerm.NET#124")]
+    [Fact]
     public void Request_terminal_parameters_is_answered()
     {
         var (terminal, replies) = Listening();

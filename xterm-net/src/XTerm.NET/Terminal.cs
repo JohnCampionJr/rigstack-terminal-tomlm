@@ -1733,28 +1733,10 @@ public class Terminal : IDisposable
                 break;
 
             case 0x09: // HT - Tab
-                // A tab at the PHANTOM column is where curses' famous more(1) bug lives: it fills
-                // a row and then tabs. With DECSET 41 the tab wraps first, as the printed
-                // character would have, and lands on the new row's first stop; without it the tab
-                // is absorbed where it stands, and the next printable does the wrapping.
-                if (_buffer.PendingWrap)
-                {
-                    if (!MoreFixMode)
-                        break;
-
-                    if (_buffer.Y == _buffer.ScrollBottom)
-                        _buffer.ScrollUp(1);
-                    else
-                        _buffer.SetCursor(_buffer.X, _buffer.Y + 1);
-                    _buffer.CarriageReturn();
-                }
-
-                // Was hardcoded to 8 while CHT and CBT honoured Options.TabStopWidth, so the two
-                // tab motions disagreed on the same screen. Both go through the stop set now --
-                // and stop at the right MARGIN for a cursor inside one, as DEC tabs always have.
-                var tabLimit = LeftRightMarginMode && _buffer.X <= _buffer.ScrollRight
-                    ? _buffer.ScrollRight : Cols - 1;
-                _buffer.SetCursor(Math.Min(NextTabStop(_buffer.X), tabLimit), _buffer.Y);
+                // The motion lives with CHT, which is n of these -- see InputHandler.Tab.
+                // They were separate and drifted twice, most recently over the phantom
+                // column, where only this one checked for a pending wrap.
+                _inputHandler.Tab();
                 break;
 
             case 0x0A: // LF - Line Feed

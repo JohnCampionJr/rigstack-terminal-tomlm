@@ -230,5 +230,33 @@ public class VtTestBehaviourTests
 
         terminal.Write($"{Esc}[48t");
         Assert.Equal(48, terminal.Rows);
+    }
+
+    /// <summary>
+    /// CHT is n tabs, including at the phantom column. vttest menu 11.8.1.2 draws the same row of
+    /// marks with tabs and with CHT and expects them to look the same.
+    /// </summary>
+    /// <remarks>
+    /// They differed because CHT moved the cursor without checking for a pending wrap, which
+    /// cancelled it -- so the next printable overwrote the last column instead of wrapping. The two
+    /// share one motion now; this is what stops them drifting a third time.
+    /// </remarks>
+    [Theory]
+    [InlineData("	")]
+    [InlineData("[1I")]
+    [InlineData("[I")]
+    public void Tabbing_off_the_line_wraps_the_same_way_however_it_is_spelled(string tab)
+    {
+        var terminal = Sized(20, 4);
+        terminal.Write($"{Esc}[2J{Esc}[H");
+
+        for (var i = 0; i < 5; i++)
+        {
+            terminal.Write(tab);
+            terminal.Write("*");
+        }
+
+        Assert.Equal("        *       *  *", terminal.GetLine(0));
+        Assert.Equal("*       *", terminal.GetLine(1));
     }
 }

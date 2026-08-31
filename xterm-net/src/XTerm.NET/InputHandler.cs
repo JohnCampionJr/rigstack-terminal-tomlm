@@ -749,6 +749,10 @@ public partial class InputHandler
                 _statusDisplayType = parameters.GetParam(0, 0);
                 break;
 
+            case CsiCommand.RequestTerminalParameters:
+                RequestTerminalParameters(parameters);
+                break;
+
             case CsiCommand.SetColumnsPerPage:
                 // DECSCPP. 80 and 132 are the only widths DEC defines, and 0 means 80.
                 // It does NOT erase: unlike DECCOLM it says nothing about the contents,

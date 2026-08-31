@@ -139,6 +139,7 @@ public enum CsiCommand
     /// Repeat the preceding graphic character (CSI Pn b), REP.
     /// </summary>
     RepeatPrecedingCharacter,
+    RequestTerminalParameters,
 
     /// <summary>
     /// Set Top and Bottom Margins (CSI r).
