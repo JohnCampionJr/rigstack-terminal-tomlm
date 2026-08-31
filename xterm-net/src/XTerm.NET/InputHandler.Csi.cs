@@ -370,21 +370,19 @@ public partial class InputHandler
         _buffer.SetCursor(col, row);
     }
 
-    private void EraseInDisplay(Params parameters)
+    private void EraseInDisplay(Params parameters, bool selective = false)
     {
         var mode = parameters.GetParam(0, 0);
-        var emptyCell = BufferCell.Space;
-        emptyCell.Attributes = GetEraseAttributes();
 
         var hasBlocks = _buffer.HasMultiRowSizedRuns;
 
         switch (mode)
         {
             case 0: // Erase below
-                EraseInLine(parameters); // Current line from cursor
+                EraseInLine(parameters, selective); // Current line from cursor
                 for (int i = _buffer.Y + 1; i < _terminal.Rows; i++)
                 {
-                    _buffer.Lines[_buffer.YBase + i]?.Fill(emptyCell);
+                    EraseLineCells(_buffer.Lines[_buffer.YBase + i], 0, _terminal.Cols, selective);
                     if (hasBlocks)
                         EraseBlocksHangingOver(_buffer.YBase + i, 0, _terminal.Cols);
                 }
@@ -392,16 +390,16 @@ public partial class InputHandler
             case 1: // Erase above
                 for (int i = 0; i < _buffer.Y; i++)
                 {
-                    _buffer.Lines[_buffer.YBase + i]?.Fill(emptyCell);
+                    EraseLineCells(_buffer.Lines[_buffer.YBase + i], 0, _terminal.Cols, selective);
                     if (hasBlocks)
                         EraseBlocksHangingOver(_buffer.YBase + i, 0, _terminal.Cols);
                 }
-                EraseInLine(parameters); // Current line to cursor
+                EraseInLine(parameters, selective); // Current line to cursor
                 break;
             case 2: // Erase all — the visible screen only; the scrollback is kept
                 for (int i = 0; i < _terminal.Rows; i++)
                 {
-                    _buffer.Lines[_buffer.YBase + i]?.Fill(emptyCell);
+                    EraseLineCells(_buffer.Lines[_buffer.YBase + i], 0, _terminal.Cols, selective);
                     if (hasBlocks)
                         EraseBlocksHangingOver(_buffer.YBase + i, 0, _terminal.Cols);
                 }
@@ -425,30 +423,27 @@ public partial class InputHandler
             _buffer.RefreshMultiRowSizedRuns();
     }
 
-    private void EraseInLine(Params parameters)
+    private void EraseInLine(Params parameters, bool selective = false)
     {
         var mode = parameters.GetParam(0, 0);
         var line = _buffer.Lines[_buffer.Y + _buffer.YBase];
         if (line == null)
             return;
 
-        var emptyCell = BufferCell.Space;
-        emptyCell.Attributes = GetEraseAttributes();
-
         switch (mode)
         {
             case 0: // Erase to right
-                line.Fill(emptyCell, _buffer.X, _terminal.Cols);
+                EraseLineCells(line, _buffer.X, _terminal.Cols, selective);
                 if (_buffer.HasMultiRowSizedRuns)
                     EraseBlocksHangingOver(_buffer.Y + _buffer.YBase, _buffer.X, _terminal.Cols - _buffer.X);
                 break;
             case 1: // Erase to left
-                line.Fill(emptyCell, 0, _buffer.X + 1);
+                EraseLineCells(line, 0, _buffer.X + 1, selective);
                 if (_buffer.HasMultiRowSizedRuns)
                     EraseBlocksHangingOver(_buffer.Y + _buffer.YBase, 0, _buffer.X + 1);
                 break;
             case 2: // Erase entire line
-                line.Fill(emptyCell);
+                EraseLineCells(line, 0, _terminal.Cols, selective);
                 if (_buffer.HasMultiRowSizedRuns)
                     EraseBlocksHangingOver(_buffer.Y + _buffer.YBase, 0, _terminal.Cols);
                 break;
@@ -650,10 +645,8 @@ public partial class InputHandler
         var count = Math.Max(parameters.GetParam(0, 1), 1);
         var line = _buffer.Lines[_buffer.Y + _buffer.YBase];
 
-        var emptyCell = BufferCell.Space;
-        emptyCell.Attributes = GetEraseAttributes();
-
-        line?.Fill(emptyCell, _buffer.X, Math.Min(_buffer.X + count, _terminal.Cols));
+        // ECH honours the ISO guard (SPA/EPA) but not DECSCA -- it is an ordinary erase.
+        EraseLineCells(line, _buffer.X, Math.Min(_buffer.X + count, _terminal.Cols), selective: false);
         if (_buffer.HasMultiRowSizedRuns)
             EraseBlocksHangingOver(_buffer.Y + _buffer.YBase, _buffer.X,
             Math.Min(_buffer.X + count, _terminal.Cols) - _buffer.X);

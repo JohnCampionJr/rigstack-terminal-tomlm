@@ -36,12 +36,19 @@ public struct AttributeData : IEquatable<AttributeData>
     private const int STRIKETHROUGH = 1 << 7;
     private const int OVERLINE = 1 << 8;
 
-    // Underline style in bits 9-11, underline colour id in 12-31. Both were free: Extended is a
-    // 32-bit field with nine flags in it.
+    // Underline style in bits 9-11, underline colour id in 12-29, protection in 30-31. The
+    // colour is an id into an interning table, not a colour value, so eighteen bits is tens of
+    // thousands of distinct underline colours per session -- far past any real screen -- and
+    // giving two of its bits to protection costs nothing anyone can produce.
     private const int UNDERLINE_STYLE_SHIFT = 9;
     private const int UNDERLINE_STYLE_MASK = 0x7 << UNDERLINE_STYLE_SHIFT;
     private const int UNDERLINE_COLOR_SHIFT = 12;
-    private const uint UNDERLINE_COLOR_MASK = 0xFFFFFu << UNDERLINE_COLOR_SHIFT;
+    private const uint UNDERLINE_COLOR_MASK = 0x3FFFFu << UNDERLINE_COLOR_SHIFT;
+
+    // DECSCA's protection and ISO 6429's guard (SPA/EPA) are INDEPENDENT: DECSED and DECSEL
+    // honour the first, ED/EL/ECH honour the second, and neither implies the other.
+    private const int PROTECTED = 1 << 30;
+    private const int GUARDED = unchecked((int)0x80000000);
 
     public static AttributeData Default => new AttributeData
     {
@@ -84,6 +91,12 @@ public struct AttributeData : IEquatable<AttributeData>
     public bool IsStrikethrough() => (Extended & STRIKETHROUGH) != 0;
     public bool IsOverline() => (Extended & OVERLINE) != 0;
 
+    /// <summary>DECSCA protection: honoured by the selective erases, DECSED and DECSEL.</summary>
+    public bool IsProtected() => (Extended & PROTECTED) != 0;
+
+    /// <summary>ISO guard (SPA/EPA): honoured by ED, EL and ECH.</summary>
+    public bool IsGuarded() => (Extended & GUARDED) != 0;
+
     public void SetBold(bool value) => SetFlag(BOLD, value);
     public void SetDim(bool value) => SetFlag(DIM, value);
     public void SetItalic(bool value) => SetFlag(ITALIC, value);
@@ -102,6 +115,8 @@ public struct AttributeData : IEquatable<AttributeData>
     public void SetInvisible(bool value) => SetFlag(INVISIBLE, value);
     public void SetStrikethrough(bool value) => SetFlag(STRIKETHROUGH, value);
     public void SetOverline(bool value) => SetFlag(OVERLINE, value);
+    public void SetProtected(bool value) => SetFlag(PROTECTED, value);
+    public void SetGuarded(bool value) => SetFlag(GUARDED, value);
 
     private void SetFlag(int flag, bool value)
     {

@@ -198,6 +198,9 @@ public enum CsiCommand
     /// <summary>DECDC -- delete columns at the cursor (CSI Pn ' ~).</summary>
     DeleteColumns,
 
+    /// <summary>DECSCA -- select character protection attribute (CSI Ps " q).</summary>
+    SelectCharacterProtection,
+
     /// <summary>DECRQCRA -- request a checksum of a rectangular area (CSI Pid;Pp;Pt;Pl;Pb;Pr * y).</summary>
     RequestChecksumRectangularArea,
 

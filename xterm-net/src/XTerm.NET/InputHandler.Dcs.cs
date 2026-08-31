@@ -151,7 +151,7 @@ public partial class InputHandler
             "r" => $"\x1bP1$r{_buffer.ScrollTop + 1};{_buffer.ScrollBottom + 1}r\x1b\\",
             " q" => $"\x1bP1$r{SerializeDecscusr()} q\x1b\\",
             "\"p" => "\x1bP1$r62;1\"p\x1b\\",
-            "\"q" => "\x1bP1$r0\"q\x1b\\",
+            "\"q" => $"\x1bP1$r{(_curAttr.IsProtected() ? 1 : 0)}\"q\x1b\\",
             _ => Deny,
         };
 

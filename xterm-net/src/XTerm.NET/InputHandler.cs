@@ -609,11 +609,11 @@ public partial class InputHandler
                 break;
 
             case CsiCommand.EraseInDisplay:
-                EraseInDisplay(parameters);
+                EraseInDisplay(parameters, isPrivate);
                 break;
 
             case CsiCommand.EraseInLine:
-                EraseInLine(parameters);
+                EraseInLine(parameters, isPrivate);
                 break;
 
             case CsiCommand.InsertLines:
@@ -688,6 +688,10 @@ public partial class InputHandler
 
             case CsiCommand.DeleteColumns:
                 DeleteColumns(parameters);
+                break;
+
+            case CsiCommand.SelectCharacterProtection:
+                SelectCharacterProtection(parameters);
                 break;
 
             case CsiCommand.RequestChecksumRectangularArea:
@@ -827,6 +831,14 @@ public partial class InputHandler
                 case "7": // DECSC - Save Cursor
                     SaveCursor();
                     break;
+                case "V": // SPA - Start of Protected Area
+                    StartProtectedArea();
+                    break;
+
+                case "W": // EPA - End of Protected Area
+                    EndProtectedArea();
+                    break;
+
                 case "6": // DECBI - Back Index
                     BackIndex();
                     break;
