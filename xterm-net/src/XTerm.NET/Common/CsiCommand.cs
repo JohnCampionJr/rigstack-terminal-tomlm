@@ -184,6 +184,7 @@ public enum CsiCommand
     SoftReset,
 
     /// <summary>DECCRA -- copy a rectangular area (CSI ... $ v).</summary>
+    SetColumnsPerPage,
     CopyRectangularArea,
 
     /// <summary>DECFRA -- fill a rectangular area with a character (CSI Pch;Pt;Pl;Pb;Pr $ x).</summary>

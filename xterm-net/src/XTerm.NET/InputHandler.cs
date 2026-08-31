@@ -749,6 +749,14 @@ public partial class InputHandler
                 _statusDisplayType = parameters.GetParam(0, 0);
                 break;
 
+            case CsiCommand.SetColumnsPerPage:
+                // DECSCPP. 80 and 132 are the only widths DEC defines, and 0 means 80.
+                // It does NOT erase: unlike DECCOLM it says nothing about the contents,
+                // and vttest's page-format test fills the screen and then checks it.
+                var pageColumns = parameters.GetParam(0, 0);
+                _terminal.SetPageWidth(pageColumns >= 132 ? 132 : 80, clear: false);
+                break;
+
             case CsiCommand.SetLinesPerScreen:
                 var screenLines = parameters.GetParam(0, 0);
                 if (screenLines >= 1)
@@ -1802,6 +1810,10 @@ public partial class InputHandler
 
                 case TerminalMode.ShowCursor:
                     _terminal.CursorVisible = true;
+                    break;
+
+                case TerminalMode.NoClearOnColumnChange:
+                    _terminal.NoClearOnColumnChange = true;
                     break;
 
                 case TerminalMode.NationalCharset:

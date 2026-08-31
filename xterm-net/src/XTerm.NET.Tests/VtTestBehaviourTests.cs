@@ -177,4 +177,58 @@ public class VtTestBehaviourTests
         // 0x41 + 0x42 = 0x83, negated over 16 bits is 0xFF7D.
         Assert.Equal($"{Esc}P1!~FF7D{Esc}\\", Assert.Single(replies));
     }
+
+    /// <summary>
+    /// The three ways to change the page size differ only in whether they erase.
+    /// </summary>
+    /// <remarks>
+    /// DECCOLM erases, DECNCSM (mode 95) turns that off, and DECSCPP never erases at all -- it sets
+    /// the width and says nothing about the contents. vttest's page-format tests cannot check any of
+    /// this through a pty: it samples the screen size when a test starts and does not re-measure, so
+    /// its "80 of 132 columns" is its own view rather than the terminal's.
+    /// </remarks>
+    [Fact]
+    public void Page_size_controls_differ_only_in_whether_they_erase()
+    {
+        var terminal = Sized(80, 24);
+        terminal.Write($"{Esc}[?40h");                              // Allow80To132
+
+        // DECCOLM: resizes and erases.
+        terminal.Write($"{Esc}[1;1HKEEP ME");
+        terminal.Write($"{Esc}[?3h");
+        Assert.Equal(132, terminal.Cols);
+        Assert.Equal(string.Empty, terminal.GetLine(0));
+
+        // DECNCSM: resizes and keeps.
+        terminal.Write($"{Esc}[?95h");
+        terminal.Write($"{Esc}[1;1HKEEP ME");
+        terminal.Write($"{Esc}[?3l");
+        Assert.Equal(80, terminal.Cols);
+        Assert.Equal("KEEP ME", terminal.GetLine(0));
+
+        // DECSCPP: resizes and keeps, whatever DECNCSM says.
+        terminal.Write($"{Esc}[?95l");
+        terminal.Write($"{Esc}[132$|");
+        Assert.Equal(132, terminal.Cols);
+        Assert.Equal("KEEP ME", terminal.GetLine(0));
+
+        terminal.Write($"{Esc}[80$|");
+        Assert.Equal(80, terminal.Cols);
+    }
+
+    /// <summary>
+    /// DECSLPP sets the page length. It already worked, and is pinned because a sweep reported it
+    /// as broken on the strength of vttest's own row count -- which is not evidence about this.
+    /// </summary>
+    [Fact]
+    public void Lines_per_page_resizes_the_terminal()
+    {
+        var terminal = Sized(80, 24);
+
+        terminal.Write($"{Esc}[25t");
+        Assert.Equal(25, terminal.Rows);
+
+        terminal.Write($"{Esc}[48t");
+        Assert.Equal(48, terminal.Rows);
+    }
 }

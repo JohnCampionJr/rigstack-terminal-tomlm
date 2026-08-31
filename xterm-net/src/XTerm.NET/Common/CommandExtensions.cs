@@ -80,6 +80,7 @@ public static class CsiCommandExtensions
         { "?$p", CsiCommand.RequestMode },  // DECRQM - DEC private mode
         { "*y", CsiCommand.RequestChecksumRectangularArea },  // DECRQCRA
         { "!p", CsiCommand.SoftReset },  // DECSTR
+        { "$|", CsiCommand.SetColumnsPerPage },   // DECSCPP
         { "$v", CsiCommand.CopyRectangularArea },   // DECCRA
         { "$x", CsiCommand.FillRectangularArea },   // DECFRA
         { "$z", CsiCommand.EraseRectangularArea },  // DECERA

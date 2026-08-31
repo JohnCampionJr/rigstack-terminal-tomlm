@@ -95,7 +95,7 @@ foreach (var step in script)
     string Snapshot()
     {
         lock (terminal)
-            return string.Join("|", Enumerable.Range(0, 24).Select(terminal.GetLine));
+            return string.Join("|", Enumerable.Range(0, terminal.Rows).Select(terminal.GetLine));
     }
 
     var previous = Snapshot();
@@ -111,7 +111,9 @@ foreach (var step in script)
     Console.WriteLine($"########## after {(step == "-" ? "(wait)" : step.Replace("\r", "<CR>"))} ##########");
     lock (terminal)
     {
-        for (var row = 0; row < 24; row++)
+        // terminal.Rows, not 24: DECSLPP and DECSCPP resize the page, and a hardcoded 24 hides
+        // the rows a resize added -- which reads as the resize not happening.
+        for (var row = 0; row < terminal.Rows; row++)
         {
             var rawLine = terminal.Buffer.Lines[row]?.TranslateToString(false) ?? string.Empty;
             var line = terminal.GetLine(row);

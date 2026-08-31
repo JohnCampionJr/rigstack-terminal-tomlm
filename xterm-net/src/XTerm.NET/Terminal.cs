@@ -68,13 +68,37 @@ public class Terminal : IDisposable
     /// the DEC behaviour programs rely on for a clean slate -- and resizes the grid to 132 or 80
     /// columns. The caller gates this on Allow80To132 (mode 40), as xterm does.
     /// </summary>
-    public void SetColumnMode(bool wide)
+    public void SetColumnMode(bool wide) => SetPageWidth(wide ? 132 : 80, clear: !NoClearOnColumnChange);
+
+    /// <summary>
+    /// DECNCSM (mode 95): whether a DECCOLM column change keeps the screen instead of erasing it.
+    /// </summary>
+    public bool NoClearOnColumnChange { get; set; }
+
+    /// <summary>
+    /// Sets the page width, resetting the margins and homing the cursor, and erasing only when
+    /// asked to.
+    /// </summary>
+    /// <remarks>
+    /// The erase is the only thing the three ways in here disagree about, which is why it is a
+    /// parameter rather than something each caller repeats:
+    ///
+    /// <list type="bullet">
+    /// <item>DECCOLM erases, which is the DEC behaviour programs rely on for a clean slate.</item>
+    /// <item>DECCOLM with DECNCSM set does not, which is what that mode is for.</item>
+    /// <item>DECSCPP never does. It sets the page width and says nothing about the contents.</item>
+    /// </list>
+    /// </remarks>
+    internal void SetPageWidth(int columns, bool clear)
     {
-        ColumnMode132 = wide;
-        Resize(wide ? 132 : 80, Rows);
+        ColumnMode132 = columns >= 132;
+        Resize(columns, Rows);
         Buffer.SetScrollRegion(0, Rows - 1);
         Buffer.SetLeftRightMargins(0, Cols - 1);
-        _inputHandler.EraseWholeScreen();
+
+        if (clear)
+            _inputHandler.EraseWholeScreen();
+
         Buffer.SetCursor(0, 0);
     }
 

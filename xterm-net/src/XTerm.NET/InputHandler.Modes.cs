@@ -176,6 +176,10 @@ public partial class InputHandler
             case (int)TerminalMode.AltBufferFull:
                 set = _terminal.IsAlternateBufferActive;
                 return true;
+            case (int)TerminalMode.NoClearOnColumnChange:
+                set = _terminal.NoClearOnColumnChange;
+                return true;
+
             case (int)TerminalMode.EightBitInput:
                 set = _terminal.EightBitInput;
                 return true;
@@ -366,6 +370,10 @@ public partial class InputHandler
 
                 case TerminalMode.ShowCursor:
                     _terminal.CursorVisible = false;
+                    break;
+
+                case TerminalMode.NoClearOnColumnChange:
+                    _terminal.NoClearOnColumnChange = false;
                     break;
 
                 case TerminalMode.NationalCharset:
