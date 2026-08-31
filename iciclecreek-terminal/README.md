@@ -37,8 +37,7 @@ Install-Package Iciclecreek.Avalonia.Terminal
 ```
 
 ## Compliance
-<img width="890" height="443" alt="image" src="https://github.com/user-attachments/assets/831a7de7-89fc-4f95-bf0d-0392053fb2f1" />
-
+![Compliance](https://raw.githubusercontent.com/tomlm/Iciclecreek.Avalonia.Terminal/main/compliance.png)
 
 ## Usage
 There are 2 Avalonia Controls:
@@ -277,8 +276,8 @@ terminalControl.Terminal.Options.KittyGraphicsEnabled = false;
 Kitty's file, temp-file and shared-memory transmission media (`t=f`, `t=t`, `t=s`) are deliberately
 refused — they would have the terminal open a path chosen by the process it is hosting. Clients are
 told so and fall back to sending the pixels directly.
-<img width="851" height="441" alt="image" src="https://github.com/user-attachments/assets/b47f8217-ec83-4d50-8fd0-2ef06b572b78" />
 
+![Kitty](https://raw.githubusercontent.com/tomlm/Iciclecreek.Avalonia.Terminal/main/kitty.png)
 
 ## Links
 
