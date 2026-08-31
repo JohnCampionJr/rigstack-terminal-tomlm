@@ -206,7 +206,7 @@ public class VtTestConformanceTests
     /// both halves of the test currently return the same 7-bit reply.
     /// </summary>
     /// <remarks>See tomlm/XTerm.NET#130.</remarks>
-    [Fact(Skip = "Unfixed: S7C1T/S8C1T are not dispatched at all. tomlm/XTerm.NET#130")]
+    [Fact]
     public void Eight_bit_controls_change_the_reply_prefix()
     {
         var (terminal, replies) = Listening();

@@ -969,6 +969,16 @@ public partial class InputHandler
                 case '#': // DEC line attribute sequences
                     HandleDecLineAttribute(finalChar);
                     break;
+
+                case ' ': // ANSI announcement sequences
+                    // S7C1T (ESC SP F) and S8C1T (ESC SP G) choose the form the terminal's own
+                    // REPLIES take: ESC [ or the single byte 0x9B. They say nothing about what
+                    // is accepted on input, which has always taken both.
+                    if (finalChar == "F")
+                        _terminal.EightBitControls = false;
+                    else if (finalChar == "G")
+                        _terminal.EightBitControls = true;
+                    break;
             }
         }
     }

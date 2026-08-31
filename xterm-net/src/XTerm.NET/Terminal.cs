@@ -954,6 +954,11 @@ public class Terminal : IDisposable
                 _altBuffer.Lines[i]?.Fill(global::XTerm.Buffer.BufferCell.Space, 0, Cols);
         }
 
+        // Replies go back to 7-bit. S8C1T is a choice a program made about this session, and
+        // RIS is where a session's choices end -- leaving it set would send 8-bit C1 controls
+        // to whatever runs next, which never asked for them.
+        EightBitControls = false;
+
         // Title modes go back to plain text; the titles themselves and the title stacks
         // survive, as they do in xterm.
         TitleSetHex = false;
@@ -1505,8 +1510,59 @@ public class Terminal : IDisposable
     internal MouseTracker GetMouseTracker() => _mouseTracker;
 
     // Internal methods for raising events (called by InputHandler)
-    internal void RaiseDataReceived(string data) => 
-        DataReceived?.Invoke(this, new TerminalEvents.DataEventArgs(data));
+    /// <summary>
+    /// Whether this terminal's own replies use 8-bit C1 controls, per S7C1T and S8C1T.
+    /// </summary>
+    /// <remarks>
+    /// Output only. Mode 1034 is the other direction -- what the KEYBOARD sends -- and the two
+    /// are independent.
+    /// </remarks>
+    public bool EightBitControls { get; set; }
+
+    /// <summary>
+    /// Sends a reply, in 7-bit or 8-bit form depending on S7C1T/S8C1T.
+    /// </summary>
+    /// <remarks>
+    /// <para>Converted HERE rather than at the fifty-odd places that build a reply. Every one of
+    /// them writes the 7-bit form, which stays readable and is what the tests are written
+    /// against; this is the single point where the choice can be applied without any of them
+    /// having to remember it exists.</para>
+    ///
+    /// <para>Only the LEADING introducer and a trailing ST are rewritten, deliberately. A reply
+    /// payload can contain anything -- base64 in OSC 52, a settings body in DECRQSS -- and
+    /// rewriting every ESC pair found anywhere would corrupt one that happened to look like an
+    /// introducer.</para>
+    /// </remarks>
+    internal void RaiseDataReceived(string data) =>
+        DataReceived?.Invoke(this, new TerminalEvents.DataEventArgs(
+            EightBitControls ? ToEightBitControls(data) : data));
+
+    private static string ToEightBitControls(string data)
+    {
+        if (data.Length < 2 || data[0] != '\u001b')
+            return data;
+
+        var c1 = data[1] switch
+        {
+            '[' => '\u009b',   // CSI
+            'P' => '\u0090',   // DCS
+            ']' => '\u009d',   // OSC
+            '^' => '\u009e',   // PM
+            '_' => '\u009f',   // APC
+            _ => '\u0000',
+        };
+
+        if (c1 == '\u0000')
+            return data;
+
+        var body = data[2..];
+
+        // The string terminator that closes a DCS, OSC, PM or APC goes with it.
+        if (body.EndsWith('\u001b' + "\\", StringComparison.Ordinal))
+            body = body[..^2] + '\u009c';
+
+        return c1 + body;
+    }
 
     internal void RaiseClipboardWriteRequested(string target, string mimeType, byte[] data) =>
         RaiseClipboardWriteRequested(target, new[] { new TerminalEvents.ClipboardFormat(mimeType, data) });
