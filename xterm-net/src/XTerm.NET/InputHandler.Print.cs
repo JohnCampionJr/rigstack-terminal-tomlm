@@ -720,6 +720,23 @@ public partial class InputHandler
         RefreshActiveCharset();
     }
 
+    /// <summary>
+    /// Designates a 96-character set: <c>ESC - Ps</c> (G1), <c>ESC . Ps</c> (G2),
+    /// <c>ESC / Ps</c> (G3).
+    /// </summary>
+    /// <remarks>
+    /// Latin-1 is the one that matters and it is a pass-through, so the visible effect of
+    /// getting this wrong is nil until the identifier collides: 'A' is Latin-1 in the
+    /// 96-set space and the United Kingdom set in the 94-set one. Anything else is left as
+    /// ASCII rather than guessed at.
+    /// </remarks>
+    private void SetNinetySixCharset(CharsetMode mode, string charsetId)
+    {
+        _charsetIds[mode] = charsetId;
+        _charsets[mode] = Charsets.ASCII;
+        RefreshActiveCharset();
+    }
+
     /// <summary>Re-resolves every designation, for when DECNRCM changes under them.</summary>
     internal void RefreshDesignatedCharsets()
     {

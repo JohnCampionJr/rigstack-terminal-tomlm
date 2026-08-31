@@ -258,5 +258,43 @@ public class VtTestBehaviourTests
 
         Assert.Equal("        *       *  *", terminal.GetLine(0));
         Assert.Equal("*       *", terminal.GetLine(1));
-    }
+    }
+
+    /// <summary>
+    /// DEC Special Graphics maps the whole run, including the four control pictures.
+    /// </summary>
+    /// <remarks>
+    /// b, c, d and e were missing from the table and came out as plain letters, sitting unnoticed
+    /// in the middle of a row of symbols that were all correct. Reported as tomlm/XTerm.NET#136.
+    /// </remarks>
+    [Fact]
+    public void Special_graphics_maps_the_control_pictures_too()
+    {
+        var terminal = Sized(30, 3);
+
+        terminal.Write($"{Esc}(0`abcdefghi{Esc}(B");
+
+        Assert.Equal("◆▒␉␌␍␊°±␤␋", terminal.GetLine(0));
+    }
+
+    /// <summary>
+    /// The 94- and 96-character-set designators name DIFFERENT sets with the same letter.
+    /// </summary>
+    /// <remarks>
+    /// 'A' is the United Kingdom set after ESC ( and ISO Latin-1 after ESC -. Routing the 96-set
+    /// forms through the 94-set lookup would designate UK for a program that asked for Latin-1 and
+    /// silently turn its '#' into a pound sign -- invisible in any test whose text avoids that one
+    /// character.
+    /// </remarks>
+    [Fact]
+    public void The_96_character_set_designators_are_a_separate_space()
+    {
+        var uk = Sized(30, 3);
+        uk.Write($"{Esc}(A#@[");
+        Assert.Equal("£@[", uk.GetLine(0));
+
+        var latin1 = Sized(30, 3);
+        latin1.Write($"{Esc}-A#@[");
+        Assert.Equal("#@[", latin1.GetLine(0));
+    }
 }

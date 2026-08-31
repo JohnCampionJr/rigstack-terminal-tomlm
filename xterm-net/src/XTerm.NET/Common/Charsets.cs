@@ -29,6 +29,10 @@ public static class Charsets
         // Special Characters
         { '`', "\u25c6" }, // ? Diamond
         { 'a', "\u2592" }, // ? Checkerboard (stipple)
+        { 'b', "\u2409" }, // HT symbol
+        { 'c', "\u240c" }, // FF symbol
+        { 'd', "\u240d" }, // CR symbol
+        { 'e', "\u240a" }, // LF symbol
         { 'f', "\u00b0" }, // ° Degree symbol
         { 'g', "\u00b1" }, // ± Plus/minus
         { 'h', "\u2424" }, // ? Newline symbol

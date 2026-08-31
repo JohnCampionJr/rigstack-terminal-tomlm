@@ -966,6 +966,24 @@ public partial class InputHandler
                 case '+': // Designate G3 character set
                     SetCharset(CharsetMode.G3, finalChar);
                     break;
+                case '-': // Designate G1 as a 96-character set
+                case '.': // Designate G2
+                case '/': // Designate G3
+                    // The 96-set forms, which the 94-set cases above do not cover. Their
+                    // identifiers live in a DIFFERENT space: 'A' here is ISO Latin-1, where
+                    // 'A' after ESC ( is the United Kingdom set. Routing these through the
+                    // same lookup would designate UK for a program that asked for Latin-1 and
+                    // silently turn its '#' into a pound sign.
+                    SetNinetySixCharset(
+                        intermediateChar switch
+                        {
+                            '-' => CharsetMode.G1,
+                            '.' => CharsetMode.G2,
+                            _ => CharsetMode.G3,
+                        },
+                        finalChar);
+                    break;
+
                 case '#': // DEC line attribute sequences
                     HandleDecLineAttribute(finalChar);
                     break;
