@@ -192,6 +192,12 @@ public enum CsiCommand
     /// <summary>DECERA -- erase a rectangular area (CSI Pt;Pl;Pb;Pr $ z).</summary>
     EraseRectangularArea,
 
+    /// <summary>DECIC -- insert columns at the cursor (CSI Pn ' }).</summary>
+    InsertColumns,
+
+    /// <summary>DECDC -- delete columns at the cursor (CSI Pn ' ~).</summary>
+    DeleteColumns,
+
     /// <summary>DECRQCRA -- request a checksum of a rectangular area (CSI Pid;Pp;Pt;Pl;Pb;Pr * y).</summary>
     RequestChecksumRectangularArea,
 

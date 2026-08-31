@@ -682,6 +682,14 @@ public partial class InputHandler
                 EraseRectangularArea(parameters);
                 break;
 
+            case CsiCommand.InsertColumns:
+                InsertColumns(parameters);
+                break;
+
+            case CsiCommand.DeleteColumns:
+                DeleteColumns(parameters);
+                break;
+
             case CsiCommand.RequestChecksumRectangularArea:
                 RequestChecksumRectangularArea(parameters);
                 break;
@@ -819,6 +827,14 @@ public partial class InputHandler
                 case "7": // DECSC - Save Cursor
                     SaveCursor();
                     break;
+                case "6": // DECBI - Back Index
+                    BackIndex();
+                    break;
+
+                case "9": // DECFI - Forward Index
+                    ForwardIndex();
+                    break;
+
                 case "8": // DECRC - Restore Cursor
                     RestoreCursor();
                     break;

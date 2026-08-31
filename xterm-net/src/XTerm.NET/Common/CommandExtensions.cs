@@ -79,6 +79,8 @@ public static class CsiCommandExtensions
         { "$v", CsiCommand.CopyRectangularArea },   // DECCRA
         { "$x", CsiCommand.FillRectangularArea },   // DECFRA
         { "$z", CsiCommand.EraseRectangularArea },  // DECERA
+        { "'}", CsiCommand.InsertColumns },         // DECIC
+        { "'~", CsiCommand.DeleteColumns },         // DECDC
         // The bare final character is DECLL (Load LEDs, "CSI Ps q"), which we do not implement, so
         // it is deliberately absent: mapping it to DECSCUSR meant "CSI 0 q" to clear the LEDs gave
         // the user a blinking cursor. DECSCUSR carries the SP intermediate and is " q" above.
