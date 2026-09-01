@@ -300,7 +300,13 @@ namespace Iciclecreek.Terminal
                 // program moves it with OSC 11, and then the program is the one that should win. A brush
                 // carrying alpha is left alone: that is a host asking to be seen through, which no RGB
                 // palette entry can express.
-                surface = new SolidColorBrush(BufferCellExtensions.FromRgb(_palette.Background));
+                //
+                // DECSCNM is a property of the DISPLAY, not of the cells that happen to hold text, so
+                // the surface inverts with them. Without this the mode reached only written cells and
+                // an inverted screen kept a band of page colour across every row a program had not
+                // reached -- the more visible half of the screen, on a screen that is mostly empty.
+                surface = new SolidColorBrush(BufferCellExtensions.FromRgb(
+                    _terminal.ReverseVideo ? _palette.Foreground : _palette.Background));
             }
 
             if (surface is not null)
@@ -1430,8 +1436,6 @@ namespace Iciclecreek.Terminal
                         (foreground, background, swapped) = (background, foreground, !swapped);
                     if (_terminal.ReverseVideo)
                         (foreground, background, swapped) = (background, foreground, !swapped);
-                    if (cell.Attributes.IsBlink() && this._cursorBlinkOn)
-                        (foreground, background, swapped) = (background, foreground, !swapped);
 
                     // The contrast floor applies wherever a cell's text is drawn, in the same slot:
                     // after the swaps, before conceal. A sized block is one cell's glyph, so the
@@ -1452,8 +1456,11 @@ namespace Iciclecreek.Terminal
                     // And here, the third place a cell's text is drawn. OSC 66 blocks shape their
                     // own runs too.
                     foreground = cell.ApplyConceal(foreground);
+                    foreground = cell.ApplyBlinkPhase(foreground, this._cursorBlinkOn);
 
-                    if (swapped || cell.GetBackgroundColor(_palette).HasValue)
+                    // ReverseVideo for the reason the run path gives: a cancelled double swap leaves
+                    // the cell's background differing from the inverted surface.
+                    if (swapped || _terminal.ReverseVideo || cell.GetBackgroundColor(_palette).HasValue)
                         context.FillRectangle(background, box);
 
                     // A blank cell has nothing to shape, but its background belongs to the block and is
@@ -1545,7 +1552,16 @@ namespace Iciclecreek.Terminal
                 {
                     // Render the line content at normal size - the transform will scale it
                     // Only render the first half of the columns since they'll be doubled
-                    int effectiveCols = _terminal.Cols / 2;
+                    // Rounded UP, because the division truncates and the cell it truncates away is
+                    // the rightmost one on screen. An odd number of columns leaves half a cell of
+                    // room at the right edge; a doubled row that reaches the edge -- the border of
+                    // a box, which is exactly what vttest draws -- puts its last character there,
+                    // and walking Cols / 2 dropped it. The box lost its right-hand side, and only
+                    // at odd widths, which is why resizing the window appeared to fix and unfix it.
+                    //
+                    // Drawing it is safe: the PushClip above trims whatever hangs past the edge, so
+                    // the extra cell is clipped rather than spilling.
+                    int effectiveCols = (_terminal.Cols + 1) / 2;
 
                     // Pictures, which this path used to skip entirely -- so a picture on a line a
                     // program had doubled simply disappeared, and the text still stored in those
@@ -1624,8 +1640,6 @@ namespace Iciclecreek.Terminal
                         // Apply terminal-wide reverse video mode (DECSCNM)
                         if (_terminal.ReverseVideo)
                             (foreground, background, swapped) = (background, foreground, !swapped);
-                        if (cell.Attributes.IsBlink() && this._cursorBlinkOn)
-                            (foreground, background, swapped) = (background, foreground, !swapped);
 
                         // The contrast floor, in the same slot as the run path: after the swaps,
                         // before conceal. Doubled lines draw their own text, so without this a
@@ -1648,6 +1662,7 @@ namespace Iciclecreek.Terminal
                         // here too -- otherwise a concealed password shows in full on any line a
                         // program happened to double.
                         foreground = cell.ApplyConceal(foreground);
+                        foreground = cell.ApplyBlinkPhase(foreground, this._cursorBlinkOn);
 
                         var typeface = new Typeface(FontFamily, cell.GetFontStyle(), cell.GetFontWeight());
                         var formattedText = new FormattedText(text, CultureInfo.CurrentCulture, FlowDirection.LeftToRight, typeface, FontSize, foreground);
@@ -1658,7 +1673,8 @@ namespace Iciclecreek.Terminal
 
                         var position = new Point(startX, startYPos);
 
-                        if ((swapped || cell.GetBackgroundColor(_palette).HasValue) && !dwRunHasBackdrop)
+                        if ((swapped || _terminal.ReverseVideo || cell.GetBackgroundColor(_palette).HasValue)
+                            && !dwRunHasBackdrop)
                             context.FillRectangle(background, rect);
                         context.DrawText(formattedText, position);
 
@@ -1674,6 +1690,11 @@ namespace Iciclecreek.Terminal
                             var dwBrush = cell.GetUnderlineColor(_palette) is { } uc
                                 ? new ImmutableSolidColorBrush(uc)
                                 : foreground;
+
+                            // Through the blink phase, as on the run path: an SGR 58 colour
+                            // resolved opaque here and kept a doubled row's underline lit through
+                            // the off half of the phase.
+                            dwBrush = cell.ApplyBlinkPhase(dwBrush, this._cursorBlinkOn);
                             var dwRun = new CachedTextRun(null, runStartX, cellCount, null,
                                                           UnderlineStyle: dwUnderline, UnderlineBrush: dwBrush);
                             DrawUnderline(context, dwRun, position, Math.Max(0, endX - startX), rowHeight);

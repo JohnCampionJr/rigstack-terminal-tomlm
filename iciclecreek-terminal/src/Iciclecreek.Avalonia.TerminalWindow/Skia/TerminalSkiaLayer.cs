@@ -289,6 +289,14 @@ namespace Iciclecreek.Terminal.Skia
             if (first.ClusterIndex >= 0 || first.Width != 1 || !CanLigate(alphabet, first.CodePoint))
                 return false;
 
+            // Concealed text never ligates. The per-cell path is where Conceal -- SGR 8, and the
+            // dark half of the blink phase -- hides the glyph and its decorations, and this run
+            // draws its blob and decorations without ever consulting the flag; taking the run made
+            // blinking ligatured text stay lit through the off phase. One check covers the whole
+            // candidate: the loop below only extends across cells whose flags EQUAL first's.
+            if ((first.Flags & SnapshotFlags.Conceal) != 0)
+                return false;
+
             // Two adjacent characters at minimum, or there is no context to substitute in.
             var end = col + 1;
             while (end < snapshot.Cols)
@@ -318,9 +326,9 @@ namespace Iciclecreek.Terminal.Skia
 
             var builder = _blobs ??= new SKTextBlobBuilder();
             var blobRun = builder.AllocateHorizontalRun(font, glyphs.Length, 0);
-            glyphs.CopyTo(blobRun.GetGlyphSpan());
+            glyphs.CopyTo(blobRun.Glyphs);
 
-            var positions = blobRun.GetPositionSpan();
+            var positions = blobRun.Positions;
             for (var i = 0; i < glyphs.Length; i++)
                 positions[i] = (col + i) * cw;
 
