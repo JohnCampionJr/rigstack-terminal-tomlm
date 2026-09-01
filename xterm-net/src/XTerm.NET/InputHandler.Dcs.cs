@@ -155,8 +155,11 @@ public partial class InputHandler
             "s" => $"\x1bP1$r{_buffer.ScrollLeft + 1};{_buffer.ScrollRight + 1}s\x1b\\",
             "t" => $"\x1bP1$r{_terminal.Rows}t\x1b\\",
             "*x" => $"\x1bP1$r{_attributeChangeExtent}*x\x1b\\",
-            "$}" => $"\x1bP1$r{_activeStatusDisplay}$}}\x1b\\",
-            "$~" => $"\x1bP1$r{_statusDisplayType}$~\x1b\\",
+            // From the TERMINAL, not from the cached copies: those are set when the control is
+            // parsed and nothing resets them, so after RIS this reported the status line still
+            // selected and its type still host-writable when both had been undone.
+            "$}" => $"\x1bP1$r{(_terminal.StatusLineActive ? 1 : 0)}$}}\x1b\\",
+            "$~" => $"\x1bP1$r{_terminal.StatusDisplayType}$~\x1b\\",
             "*|" => $"\x1bP1$r{_terminal.Rows}*|\x1b\\",
             _ => Deny,
         };

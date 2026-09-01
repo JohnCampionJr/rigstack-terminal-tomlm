@@ -1171,7 +1171,7 @@ public class InputHandlerTests
     }
 
     [Fact]
-    public void HandleCsi_DA_Tertiary_IsNotAnswered()
+    public void HandleCsi_DA_Tertiary_ReportsAZeroUnitId()
     {
         // Arrange
         var terminal = CreateTerminal();
@@ -1185,9 +1185,50 @@ public class InputHandlerTests
         // Act - "=c" is the tertiary DA, asking for a unit ID
         handler.HandleCsi("=c", params_);
 
-        // Assert - there is no unit ID to report, and terminals without DECRPTUI stay quiet.
-        // Answering a question nobody asked is worse than silence: the program would read a DA
-        // reply where it expected DECRPTUI, while still waiting for the reply it did ask for.
+        // Assert - DECRPTUI, with the site code and serial number as the zeros xterm reports.
+        // There is no unit to identify, but vttest and anything else that asks decodes this and
+        // waits forever for the silence it used to get.
+        Assert.Equal("\u001bP!|00000000\u001b\\", receivedData);
+    }
+
+    [Fact]
+    public void HandleCsi_DA_Tertiary_IsSilentBelowVt400()
+    {
+        // Arrange
+        var terminal = CreateTerminal();
+        var handler = new InputHandler(terminal);
+        terminal.ConformanceLevel = 62;   // VT200
+        var params_ = new Params();
+        params_.AddParam(0);
+
+        string? receivedData = null;
+        terminal.DataReceived += (_, e) => receivedData = e.Data;
+
+        // Act
+        handler.HandleCsi("=c", params_);
+
+        // Assert - DECRPTUI is a VT420 control, and a program that put the terminal back to a
+        // VT200 level with DECSCL gets the silence a terminal of that vintage would have given it.
+        Assert.Null(receivedData);
+    }
+
+    [Fact]
+    public void HandleCsi_DA_Tertiary_IgnoresAReply()
+    {
+        // Arrange
+        var terminal = CreateTerminal();
+        var handler = new InputHandler(terminal);
+        var params_ = new Params();
+        params_.AddParam(1);
+
+        string? receivedData = null;
+        terminal.DataReceived += (_, e) => receivedData = e.Data;
+
+        // Act
+        handler.HandleCsi("=c", params_);
+
+        // Assert - a non-zero parameter is another terminal's reply arriving on our input, and
+        // answering it starts a ping-pong. The primary and secondary DA already refuse it.
         Assert.Null(receivedData);
     }
 

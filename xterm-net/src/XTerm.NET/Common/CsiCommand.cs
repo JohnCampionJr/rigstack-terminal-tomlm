@@ -116,7 +116,8 @@ public enum CsiCommand
     TabClear,
     
     /// <summary>
-    /// Device Attributes (CSI c is the primary request, CSI &gt; c the secondary).
+    /// Device Attributes (CSI c is the primary request, CSI &gt; c the secondary, CSI = c the
+    /// tertiary).
     /// </summary>
     DeviceAttributes,
 
@@ -192,6 +193,12 @@ public enum CsiCommand
     /// <summary>DECCRA -- copy a rectangular area (CSI ... $ v).</summary>
     CopyRectangularArea,
 
+    /// <summary>DECCARA -- set SGR attributes over an area, leaving its characters alone (CSI Pt;Pl;Pb;Pr;Pm $ r).</summary>
+    ChangeAttributesRectangularArea,
+
+    /// <summary>DECRARA -- toggle SGR attributes over an area (CSI Pt;Pl;Pb;Pr;Pm $ t).</summary>
+    ReverseAttributesRectangularArea,
+
     /// <summary>DECFRA -- fill a rectangular area with a character (CSI Pch;Pt;Pl;Pb;Pr $ x).</summary>
     FillRectangularArea,
 
@@ -233,6 +240,15 @@ public enum CsiCommand
 
     /// <summary>DECRQCRA -- request a checksum of a rectangular area (CSI Pid;Pp;Pt;Pl;Pb;Pr * y).</summary>
     RequestChecksumRectangularArea,
+
+    /// <summary>DECRQDE -- request the displayed extent (CSI " v); answered with DECRPDE.</summary>
+    RequestDisplayedExtent,
+
+    /// <summary>DECRQUPSS -- request the user-preferred supplemental set (CSI &amp; u); answered with DECAUPSS.</summary>
+    RequestUserPreferredSupplementalSet,
+
+    /// <summary>DECRQTSR -- request a terminal state report (CSI Ps $ u); answered with DECTSR.</summary>
+    RequestTerminalStateReport,
 
     /// <summary>
     /// Set Kitty keyboard protocol flags (CSI = Ps ; Pm u).

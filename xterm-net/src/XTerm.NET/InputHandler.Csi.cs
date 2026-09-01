@@ -771,6 +771,78 @@ public partial class InputHandler
         _terminal.RaiseDataReceived($"\u001b[{sol};1;1;128;128;1;0x");
     }
 
+    /// <summary>
+    /// DECRQDE (<c>CSI " v</c>) -- reports the displayed extent as
+    /// <c>CSI Ph ; Pw ; Pc ; Pr ; Pp " w</c>: the page's height and width, the column and row of
+    /// the window's top-left corner within it, and the page number.
+    /// </summary>
+    /// <remarks>
+    /// The window IS the page here, so the corner is always 1;1 and there is one page. That makes
+    /// this the DEC spelling of what <c>CSI 18 t</c> already answers in the dtterm dialect --
+    /// a question this terminal has always known the answer to, and was the only one of the two
+    /// forms not answering. VT300 and up, as in xterm.
+    /// </remarks>
+    private void RequestDisplayedExtent()
+    {
+        if (_terminal.ConformanceLevel < 63)
+            return;
+
+        _terminal.RaiseDataReceived($"\u001b[{_terminal.Rows};{_terminal.Cols};1;1;1\"w");
+    }
+
+    /// <summary>
+    /// DECRQUPSS (<c>CSI &amp; u</c>) -- reports the user-preferred supplemental set as
+    /// <c>DCS Ps ! u &lt;designator&gt; ST</c>, where Ps is 0 for a 94-character set and 1 for a
+    /// 96-character one.
+    /// </summary>
+    /// <remarks>
+    /// The choice UPSS offers is DEC Supplemental Graphic or ISO Latin-1, and this terminal decodes
+    /// UTF-8: the supplemental half of Latin-1 is a pass-through here, and DEC Supplemental is not
+    /// reachable at all. So the answer is ISO Latin-1 -- <c>A</c>, a 96-character set -- which is
+    /// the same conclusion xterm reaches for the same reason. DECAUPSS, the assignment half, is not
+    /// implemented, so the default is the only value this can ever report; saying so is still worth
+    /// more than the silence a client waits on forever. VT300 and up.
+    /// </remarks>
+    private void RequestUserPreferredSupplementalSet()
+    {
+        if (_terminal.ConformanceLevel < 63)
+            return;
+
+        _terminal.RaiseDataReceived("\u001bP1!uA\u001b\\");
+    }
+
+    /// <summary>
+    /// DECRQTSR (<c>CSI Ps $ u</c>) -- the terminal state report, answered with the
+    /// cannot-report form <c>DCS 0 $ s ST</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>DECTSR serialises the whole terminal state into a payload DECRSTS restores later. This
+    /// terminal has no DECRSTS, and a terminal that cannot restore state has no business claiming
+    /// it can report it -- a report nothing can consume is a worse answer than an honest refusal,
+    /// because the client acts on it.</para>
+    /// <para>Refusing is not the same as saying nothing, though. DECRQSS already answers a request
+    /// it does not recognise with <c>DCS 0 $ r ST</c> rather than silence, and this is that same
+    /// shape one final character over: Ps = 0 is the invalid-request form of the same reply, and a
+    /// client reading it stops waiting. Ps = 0 or absent asks for nothing and gets nothing, which
+    /// is what the VT510 manual specifies for it.</para>
+    /// </remarks>
+    private void RequestTerminalStateReport(Params parameters)
+    {
+        // The refusal is still a report, and this terminal's primary DA offers attribute 17,
+        // terminal state interrogation, only from level 64. Answering below that would have the
+        // terminal declining a request it had already said it does not take -- so a program that
+        // lowered the level with DECSCL gets the same silence every other unavailable control
+        // gives it. The control itself is VT320 vintage; the capability it belongs to is what the
+        // DA reply gates, and matching the reply is what keeps the two from disagreeing.
+        if (_terminal.ConformanceLevel < 64)
+            return;
+
+        if (parameters.GetParam(0, 0) == 0)
+            return;
+
+        _terminal.RaiseDataReceived("\u001bP0$s\u001b\\");
+    }
+
     private void CursorForwardTab(Params parameters) =>
         Tab(Math.Max(parameters.GetParam(0, 1), 1));
 
@@ -1609,9 +1681,9 @@ public partial class InputHandler
         // which set is selected, so saving _currentCharset alone restored a pointer to a table
         // the program had since replaced: a TUI that saved the cursor mid-border finished the box
         // in letters.
-        var designations = _buffer.SavedCursorState.Designations ??= new Dictionary<char, string>?[4];
+        var designations = _buffer.SavedCursorState.Designations ??= new (string, bool)[4];
         for (var slot = 0; slot < designations.Length; slot++)
-            designations[slot] = _charsets.GetValueOrDefault((CharsetMode)slot);
+            designations[slot] = DesignationOf((CharsetMode)slot);
         _buffer.SavedCursorState.OriginMode = _terminal.OriginMode;
         _buffer.SavedCursorState.PendingWrap = _buffer.PendingWrap;
     }
@@ -1632,7 +1704,7 @@ public partial class InputHandler
         if (designations is not null)
         {
             for (var slot = 0; slot < designations.Length; slot++)
-                _charsets[(CharsetMode)slot] = designations[slot];
+                RestoreDesignation((CharsetMode)slot, designations[slot]);
         }
 
         _currentCharset = _buffer.SavedCursorState.Charset;
@@ -1651,19 +1723,42 @@ public partial class InputHandler
     /// </summary>
     /// <remarks>
     /// <para>The sum follows the DEC/xterm convention esctest's default expects: each cell
-    /// contributes its character's codepoints, a cell that holds nothing contributes a SPACE --
-    /// erased and never-written alike, which is also what lets DEC's trailing-blank trimming be
-    /// reasoned away by the client -- and the report carries the NEGATED total (0x10000 - sum),
-    /// which is what xterm sent before patch #279 and what esctest's default
+    /// contributes its character's codepoints, and the report carries the NEGATED total
+    /// (0x10000 - sum), which is what xterm sent before patch #279 and what esctest's default
     /// <c>--xterm-checksum 0</c> undoes on its side.</para>
-    /// <para>Attributes deliberately contribute nothing. esctest compares a cell's checksum to
-    /// the bare codepoint of the character it expects, so a weight per attribute bit would fail
-    /// every assertion on styled text.</para>
+    /// <para>TRAILING BLANKS ARE TRIMMED, which is the part this used to get wrong. DEC terminals
+    /// drop the run of blanks at the end of a row rather than counting it, so a blank cell inside
+    /// an area is worth 0x20 only when something further along the same row follows it. Counting
+    /// every blank instead put this emulator exactly 95 spaces above what vttest's own DECRQCRA
+    /// test computes for the two rows it checks -- the whole of the discrepancy, and the whole of
+    /// the reason to trim.</para>
+    /// <para>The FIRST cell counted is added whatever it holds, blank or not. That exception is
+    /// not decoration: esctest reads content back one cell at a time and expects a space to come
+    /// back as 0x20, so a rule that trimmed unconditionally would answer zero for every space on
+    /// the screen. vttest builds its expectation with the same exception, in the same place.</para>
+    /// <para>xterm's <c>xtermCheckRect</c> is the reference for the rest of this and diverges here,
+    /// in a way worth naming. Its held-back run is only ever accumulated under
+    /// <c>csNOTRIM</c> -- the flag meaning "do not trim at all", under which the trimmed total is
+    /// then discarded -- so in its default mode the run is always empty and EVERY blank drops,
+    /// interior ones included. That is neither what DEC documents nor what vttest predicts; the two
+    /// readings agree on every screen either tool checks, and this follows the documented one.</para>
+    /// <para>Attributes deliberately contribute nothing, where xterm weights six of them into the
+    /// cell's value (bold 0x80, blink 0x40, inverse 0x20, underline 0x10, invisible 0x8, protected
+    /// 0x4). esctest compares a cell's checksum to the bare codepoint of the character it expects,
+    /// so a weight per attribute bit would fail every assertion on styled text. The visible
+    /// consequence is confined to the trimming above: xterm never trims a styled space, because its
+    /// value is no longer 0x20, and this trims it like any other.</para>
     /// <para>The page parameter is accepted and ignored: there is one screen. Coordinates are
     /// 1-based screen positions, clamped, whole screen when omitted.</para>
     /// </remarks>
     private void RequestChecksumRectangularArea(Params parameters)
     {
+        // VT400 and up, with the rest of the rectangle family. esctest asserts the level before it
+        // reads a single cell back through this -- AssertVTLevel(4, "checksum") -- so the gate is
+        // one the conformance suite already assumes is here.
+        if (!RectangularEditingAvailable)
+            return;
+
         var id = parameters.GetParam(0, 0);
         // parameters[1] is the page, ignored. Coordinates are read in the ORIGIN MODE system,
         // like a cursor address and like every rectangle operation: a program that addresses its
@@ -1676,6 +1771,13 @@ public partial class InputHandler
         var right = Math.Min(_terminal.Cols, parameters.GetParam(5, _terminal.Cols - originX) + originX);
 
         var sum = 0;
+        // Blanks seen since the last counted character. They join the sum the moment something
+        // else on their row does, and are thrown away if the row ends first.
+        var pending = 0;
+        // Whether anything has been counted yet, which is the first-cell exemption above. A cell
+        // skipped outright does not spend it.
+        var first = true;
+
         for (var row = top; row <= bottom; row++)
         {
             var line = _buffer.Lines[_buffer.YBase + row - 1];
@@ -1686,19 +1788,32 @@ public partial class InputHandler
             {
                 var cell = line[col - 1];
                 var content = cell.Content;
+
+                // The trailing half of a wide character is a placeholder, not a blank: its
+                // character was already counted in full one cell to the left. A cell nothing has
+                // ever written to reads the same way, and neither adds anything.
                 if (string.IsNullOrEmpty(content))
-                {
-                    // The trailing half of a wide character is a placeholder, not a blank: its
-                    // character was already counted in full one cell to the left.
-                    if (cell.Width == 0)
-                        continue;
-                    sum += 0x20;
                     continue;
+
+                var value = 0;
+                foreach (var ch in content)
+                    value += ch;
+
+                if (first || value != 0x20)
+                {
+                    sum += value + pending;
+                    pending = 0;
+                }
+                else
+                {
+                    pending += value;
                 }
 
-                foreach (var ch in content)
-                    sum += ch;
+                first = false;
             }
+
+            // The row ended on blanks, so they were trailing ones.
+            pending = 0;
         }
 
         _terminal.RaiseDataReceived($"\u001bP{id}!~{(0x10000 - sum) & 0xFFFF:X4}\u001b\\");

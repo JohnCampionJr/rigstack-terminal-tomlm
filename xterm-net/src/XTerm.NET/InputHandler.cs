@@ -41,11 +41,19 @@ public partial class InputHandler
 
     /// <summary>What each G-set was DESIGNATED as, by its escape identifier.</summary>
     /// <remarks>
-    /// Kept alongside the resolved tables because a designation outlives its resolution: a
+    /// <para>Kept alongside the resolved tables because a designation outlives its resolution: a
     /// national set resolves to ASCII while DECNRCM is reset and to itself once it is set, and
-    /// the program that designated it does not designate again when the mode changes.
+    /// the program that designated it does not designate again when the mode changes.</para>
+    ///
+    /// <para>All four slots are always present, seeded to US ASCII, so a designation is a value
+    /// rather than a value-or-absent. DECSC, DECRC and DECNRCM each walk every slot, and "never
+    /// designated" and "designated B" mean the same thing to all three.</para>
     /// </remarks>
     private readonly Dictionary<CharsetMode, string> _charsetIds = new();
+
+    /// <summary>The four G-sets, for the walks that touch all of them.</summary>
+    private static readonly CharsetMode[] GSets =
+        [CharsetMode.G0, CharsetMode.G1, CharsetMode.G2, CharsetMode.G3];
 
     /// <summary>Which G-sets were designated as 96-character sets.</summary>
     /// <remarks>
@@ -55,17 +63,21 @@ public partial class InputHandler
     private readonly HashSet<CharsetMode> _ninetySixSets = new();
 
     /// <summary>
-    /// The set a SINGLE shift has invoked for the next printed character, or null.
+    /// The G-set a SINGLE shift has invoked for the next printed character, or null.
     /// </summary>
     /// <remarks>
-    /// Separate from <see cref="_activeCharset"/> because it outranks it for exactly one
+    /// <para>Separate from <see cref="_activeCharset"/> because it outranks it for exactly one
     /// character and then stops: SS2 and SS3 shift the character that follows and nothing
     /// after it. Holding it as pending state rather than swapping the active set is what makes
-    /// "and then stops" automatic instead of something the print path has to remember to undo.
+    /// "and then stops" automatic instead of something the print path has to remember to undo.</para>
+    ///
+    /// <para>The G-SET, not the table it resolved to when the shift arrived. A designation
+    /// between the shift and the character it shifts belongs to that character -- SS2 invokes
+    /// G2, and what G2 holds is a question with an answer at print time. Holding the table also
+    /// meant a reset could not reach it: RIS put the tables back and the pending shift went on
+    /// pointing at the one it had captured.</para>
     /// </remarks>
-    private Dictionary<char, string>? _singleShiftCharset;
-
-    private bool _singleShiftPending;
+    private CharsetMode? _singleShift;
     private CharsetMode _currentCharset;
 
     // Variation selector and combining character constants
@@ -117,8 +129,8 @@ public partial class InputHandler
             { CharsetMode.G3, Charsets.ASCII }
         };
 
-        _currentCharset = CharsetMode.G0; // G0 is active by default
-        RefreshActiveCharset();
+        // And the designations behind them, which ResetCharsets seeds alongside the tables.
+        ResetCharsets();
     }
 
     /// <summary>
@@ -180,7 +192,7 @@ public partial class InputHandler
         // path can only stop. Rare enough to hand to Print rather than teach twice -- the default
         // is on, so nothing in normal output takes this branch.
         if (!UseRunPrinting || _terminal.InsertMode || _activeCharset is not null
-            || _singleShiftPending
+            || _singleShift is not null
             || _buffer.HasMultiRowSizedRuns || !_terminal.Options.Wraparound)
         {
             foreach (var b in data)
@@ -288,7 +300,7 @@ public partial class InputHandler
         // path can only stop. Rare enough to hand to Print rather than teach twice -- the default
         // is on, so nothing in normal output takes this branch.
         if (!UseRunPrinting || _terminal.InsertMode || _activeCharset is not null
-            || _singleShiftPending
+            || _singleShift is not null
             || _buffer.HasMultiRowSizedRuns || !_terminal.Options.Wraparound)
         {
             for (var k = 0; k < count; k++)
@@ -704,6 +716,14 @@ public partial class InputHandler
                 CopyRectangularArea(parameters);
                 break;
 
+            case CsiCommand.ChangeAttributesRectangularArea:
+                MarkRectangularArea(parameters, reverse: false);
+                break;
+
+            case CsiCommand.ReverseAttributesRectangularArea:
+                MarkRectangularArea(parameters, reverse: true);
+                break;
+
             case CsiCommand.FillRectangularArea:
                 FillRectangularArea(parameters);
                 break;
@@ -749,11 +769,15 @@ public partial class InputHandler
                 break;
 
             case CsiCommand.SelectActiveStatusDisplay:
-                _activeStatusDisplay = parameters.GetParam(0, 0);
+                // Stored for DECRQSS as before, and now acted on. Storing the ACCEPTED value
+                // rather than the requested one is the point: DECSASD 1 is refused unless a
+                // host-writable status line exists, and reporting back a selection that was
+                // refused is what told a program its text had somewhere to go when it did not.
+                _terminal.SetActiveStatusDisplay(parameters.GetParam(0, 0));
                 break;
 
             case CsiCommand.SelectStatusDisplayType:
-                _statusDisplayType = parameters.GetParam(0, 0);
+                _terminal.SetStatusDisplayType(parameters.GetParam(0, 0));
                 break;
 
             case CsiCommand.RequestTerminalParameters:
@@ -787,6 +811,18 @@ public partial class InputHandler
 
             case CsiCommand.RequestChecksumRectangularArea:
                 RequestChecksumRectangularArea(parameters);
+                break;
+
+            case CsiCommand.RequestDisplayedExtent:
+                RequestDisplayedExtent();
+                break;
+
+            case CsiCommand.RequestUserPreferredSupplementalSet:
+                RequestUserPreferredSupplementalSet();
+                break;
+
+            case CsiCommand.RequestTerminalStateReport:
+                RequestTerminalStateReport(parameters);
                 break;
 
             case CsiCommand.DeviceStatusReport:
@@ -1224,6 +1260,10 @@ public partial class InputHandler
                     HandlePointerShape(arg);
                     break;
 
+                case OscCommand.FontOps:
+                    recognized = HandleFontOps(arg);
+                    break;
+
                 case OscCommand.Clipboard:
                     HandleClipboard(arg);
                     break;
@@ -1543,6 +1583,18 @@ public partial class InputHandler
             // "no cartridge ROM".
             _terminal.RaiseDataReceived(SecondaryDeviceAttributes);
         }
+        else if (identifier.StartsWith('='))
+        {
+            // Tertiary DA: CSI = Pp c, answered with DECRPTUI -- DCS ! | <8 hex digits> ST, the
+            // "terminal unit ID". There is no unit to identify, so the site code and serial number
+            // are zeros, which is exactly what xterm reports and what vttest decodes and displays.
+            //
+            // VT400 and up only, as in xterm: DECRPTUI arrived with the VT420, and a program that
+            // has put the terminal into a VT100 or VT200 conformance level with DECSCL is entitled
+            // to the silence a terminal of that vintage would have given it.
+            if (_terminal.ConformanceLevel >= 64)
+                _terminal.RaiseDataReceived("\u001bP!|00000000\u001b\\");
+        }
         else if (identifier.Length == 1)
         {
             // Primary DA: CSI ? Pl ; ... c, from the DECSCL operating level.
@@ -1551,11 +1603,9 @@ public partial class InputHandler
 
         // Any other prefix is left unanswered. "?c" is the one that used to go wrong: it is not the
         // secondary DA, but it sets isPrivate, so it was handed the secondary reply -- the answer to
-        // a question the program had not asked, while it was still waiting for the one it had.
-        // Neither it nor the tertiary DA, "=c", reaches this method any more: the lookup matches the
-        // whole identifier and only "c" and ">c" are listed, so both resolve to Unknown. Silence is
-        // the right outcome for the tertiary regardless: it asks for a unit ID this terminal does
-        // not have, and terminals without DECRPTUI say nothing.
+        // a question the program had not asked, while it was still waiting for the one it had. It
+        // does not reach this method any more: the lookup matches the whole identifier and "?c" is
+        // not listed, so it resolves to Unknown.
     }
 
     /// <summary>

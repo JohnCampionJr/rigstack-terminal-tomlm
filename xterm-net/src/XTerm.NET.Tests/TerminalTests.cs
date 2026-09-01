@@ -471,6 +471,63 @@ public class TerminalTests
     }
 
     [Fact]
+    public void Dispose_ClearsEveryEvent_NotJustTheOnesSomeoneRemembered()
+    {
+        // Dispose_ClearsAllEvents above is named for the contract and checks two events, which is
+        // how StatusLineChanged was added without cleanup and nothing noticed. Enumerated instead,
+        // so the test cannot fall behind the class: every field-like event on Terminal must be null
+        // after Dispose, and a new one is covered the moment it is declared.
+        //
+        // A retained subscriber is a leak with the terminal on the far end of it -- the host is
+        // usually the subscriber, and it holds a control, which holds a window.
+        var terminal = new Terminal();
+
+        // Subscribe to everything, so a field that was already null cannot pass by accident.
+        var events = typeof(Terminal)
+            .GetEvents(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance)
+            .ToList();
+
+        Assert.NotEmpty(events);
+
+        var subscribed = new List<System.Reflection.EventInfo>();
+        foreach (var e in events)
+        {
+            var handlerType = e.EventHandlerType!;
+            var invoke = handlerType.GetMethod("Invoke")!;
+            var parameters = invoke.GetParameters()
+                .Select(p => System.Linq.Expressions.Expression.Parameter(p.ParameterType))
+                .ToArray();
+            var handler = System.Linq.Expressions.Expression.Lambda(
+                handlerType,
+                System.Linq.Expressions.Expression.Empty(),
+                parameters).Compile();
+
+            e.AddEventHandler(terminal, handler);
+            subscribed.Add(e);
+        }
+
+        terminal.Dispose();
+
+        var retained = new List<string>();
+        foreach (var e in subscribed)
+        {
+            // The backing field of a field-like event carries the invocation list. An event with a
+            // hand-written add/remove has none, and cannot be checked this way.
+            var field = typeof(Terminal).GetField(
+                e.Name,
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+
+            if (field is null)
+                continue;
+
+            if (field.GetValue(terminal) is not null)
+                retained.Add(e.Name);
+        }
+
+        Assert.Empty(retained);
+    }
+
+    [Fact]
     public void Write_WithBackspace_MovesBack()
     {
         // Arrange

@@ -20,6 +20,8 @@ namespace XTerm.Tests;
 public class VtTestBehaviourTests
 {
     private const string Esc = "\u001b";
+    private const string ShiftOut = "\u000e";   // SO -- invoke G1 into GL
+    private const string ShiftIn = "\u000f";    // SI -- back to G0
 
     private static Terminal Sized(int cols = 40, int rows = 6) =>
         new(new TerminalOptions { Cols = cols, Rows = rows });
@@ -289,12 +291,15 @@ public class VtTestBehaviourTests
     [Fact]
     public void The_96_character_set_designators_are_a_separate_space()
     {
+        // Both halves designate G1 and invoke it with SO, so they differ by ONE thing: the
+        // space the designator came from. Designating G0 for one and G1 for the other left
+        // the comparison carrying a second difference it was not trying to test.
         var uk = Sized(30, 3);
-        uk.Write($"{Esc}(A#@[");
+        uk.Write($"{Esc})A{ShiftOut}#@[{ShiftIn}");
         Assert.Equal("£@[", uk.GetLine(0));
 
         var latin1 = Sized(30, 3);
-        latin1.Write($"{Esc}-A#@[");
+        latin1.Write($"{Esc}-A{ShiftOut}#@[{ShiftIn}");
         Assert.Equal("#@[", latin1.GetLine(0));
     }
 
@@ -388,5 +393,117 @@ public class VtTestBehaviourTests
             terminal.Write($"{Esc}[?42h{Esc}({designator}#@[");
             Assert.Equal("£à°", terminal.GetLine(0));
         }
+    }
+
+    /// <summary>
+    /// DECRC puts back the DESIGNATION, so a later DECNRCM re-resolves what was restored.
+    /// </summary>
+    /// <remarks>
+    /// <para>DECSC saved the table each G-set had resolved to rather than what it was designated
+    /// as, so the identifier behind a restored slot stayed as whatever had been designated AFTER
+    /// the save. The screen was right and the state behind it was not, which is why this needs a
+    /// mode change to show at all: the next DECNRCM re-resolves the restored slot into the wrong
+    /// set, arbitrarily far from the DECRC that caused it.</para>
+    ///
+    /// <para>Both spaces, because they fail differently. The 94-set pair loses line drawing to a
+    /// national set -- ESC ( 0, DECSC, ESC ( R, DECRC draws borders until the mode moves and then
+    /// draws letters. The 96-set pair is the identifier collision again: Latin-1 restored, then
+    /// re-resolved as the United Kingdom set.</para>
+    /// </remarks>
+    [Fact]
+    public void DECRC_restores_what_was_designated_not_what_it_resolved_to()
+    {
+        var graphics = Sized(30, 3);
+        graphics.Write($"{Esc})0{Esc}7{Esc})R{Esc}8");        // graphics, DECSC, French, DECRC
+        graphics.Write($"{Esc}[?42h");                        // DECNRCM, which re-resolves
+        graphics.Write($"{ShiftOut}qqq{ShiftIn}");
+        Assert.Equal("───", graphics.GetLine(0));
+
+        var latin1 = Sized(30, 3);
+        latin1.Write($"{Esc}-A{Esc}7{Esc})A{Esc}8");          // Latin-1, DECSC, UK, DECRC
+        latin1.Write($"{Esc}[?42h");
+        latin1.Write($"{ShiftOut}#@[{ShiftIn}");
+        Assert.Equal("#@[", latin1.GetLine(0));
+
+        // And the restore itself, which was never the broken half: without the mode change both
+        // of the above already came back right, and a test that stopped there would pass on the
+        // defect.
+        var immediate = Sized(30, 3);
+        immediate.Write($"{Esc})0{Esc}7{Esc})R{Esc}8");
+        immediate.Write($"{ShiftOut}qqq{ShiftIn}");
+        Assert.Equal("───", immediate.GetLine(0));
+
+        // DECNRCM moving BETWEEN the save and the restore, both directions. This is the half the
+        // doc comment claims and the three cases above do not reach: they move the mode after the
+        // DECRC, so replaying a saved TABLE would satisfy them. Here the table saved and the table
+        // wanted are different, and only re-resolving the designation produces the second one.
+        var modeOnAfterSave = Sized(30, 3);
+        modeOnAfterSave.Write($"{Esc})R{Esc}7");              // French designated with NRC OFF
+        modeOnAfterSave.Write($"{Esc}[?42h{Esc}8");           // NRC on, then restore
+        modeOnAfterSave.Write($"{ShiftOut}@{ShiftIn}");
+        Assert.Equal("à", modeOnAfterSave.GetLine(0));        // French, not the ASCII it saved
+
+        var modeOffAfterSave = Sized(30, 3);
+        modeOffAfterSave.Write($"{Esc}[?42h{Esc})R{Esc}7");   // French designated with NRC ON
+        modeOffAfterSave.Write($"{Esc}[?42l{Esc}8");          // NRC off, then restore
+        modeOffAfterSave.Write($"{ShiftOut}@{ShiftIn}");
+        Assert.Equal("@", modeOffAfterSave.GetLine(0));       // ASCII, not the French it saved
+    }
+
+    /// <summary>
+    /// A single shift is spent by the next graphic character, and by nothing else short of a reset.
+    /// </summary>
+    /// <remarks>
+    /// <para>Four ways in and three answers: SI cancelled a pending shift, SO and the locking
+    /// shifts did not, and RIS could not reach it at all -- the pending state held the TABLE G2
+    /// had resolved to, so a reset put the tables back and the shift went on pointing at the old
+    /// one. ESC * 0, SS2, RIS, 'q' printed a line-drawing dash on a terminal that had just been
+    /// reset to ASCII.</para>
+    ///
+    /// <para>The VT510 manual scopes a single shift to "the next graphic character". A locking
+    /// shift is not one, and neither is a designation -- so a designation between the shift and
+    /// the character it shifts belongs to that character, which is the last case here.</para>
+    /// </remarks>
+    [Fact]
+    public void A_single_shift_is_spent_by_the_next_graphic_character_and_nothing_else()
+    {
+        const string so = "\u000e";
+        const string si = "\u000f";
+
+        // RIS reaches it. Line drawing in G2, shift pending, reset -- the 'q' is a letter again.
+        var reset = Sized(20, 3);
+        reset.Write($"{Esc}*0{Esc}N{Esc}c" + "q");
+        Assert.Equal("q", reset.GetLine(0));
+
+        // The three locking shifts leave it standing, and now agree with each other.
+        foreach (var shift in new[] { si, so, $"{Esc}n" })
+        {
+            var terminal = Sized(20, 3);
+            terminal.Write($"{Esc}*0{Esc}N{shift}q");
+            Assert.Equal("─", terminal.GetLine(0));
+        }
+
+        // A designation after the shift counts: SS2 invokes G2, and what G2 holds is a question
+        // with an answer at print time rather than at shift time.
+        var late = Sized(20, 3);
+        late.Write($"{Esc}N{Esc}*0" + "q");
+        Assert.Equal("─", late.GetLine(0));
+
+        // And it really is spent, on one character and not two.
+        var once = Sized(20, 3);
+        once.Write($"{Esc}*0{Esc}N" + "qq");
+        Assert.Equal("─q", once.GetLine(0));
+
+        // A SUPPLEMENTARY character spends it too. It reaches Print as two UTF-16 code units,
+        // and the clear that spends the shift used to sit inside the single-code-unit branch --
+        // so the shift survived the emoji and landed on whatever came next. That does not skip
+        // the shift, it MOVES it: the q below drew as a box-drawing glyph on a terminal whose G2
+        // the program had finished with, the same class of bug as the RIS case above.
+        //
+        // The emoji itself is untranslated, because a 94-character set has no entry outside the
+        // BMP -- spending the shift and translating through it are different things.
+        var supplementary = Sized(20, 3);
+        supplementary.Write($"{Esc}*0{Esc}N" + "\U0001F600q");
+        Assert.Equal("\U0001F600q", supplementary.GetLine(0));
     }
 }

@@ -76,4 +76,94 @@ public class DeviceReportTests
         terminal.Write(Esc + "[?6n");
         Assert.Equal(Esc + "[?2;4;1R", replies[^1]);
     }
+
+    [Fact]
+    public void TertiaryDa_ReportsAUnitIdOfZeros()
+    {
+        var (terminal, replies) = Create();
+        terminal.Write(Esc + "[=c");
+        Assert.Equal(Esc + "P!|00000000" + Esc + "\\", Assert.Single(replies));
+    }
+
+    /// <summary>
+    /// DECRQDE, vttest menu 11.2.5 -> 6. The window IS the page, so the corner is 1;1 and there is
+    /// one page; the size is the same one CSI 18 t already reports in the dtterm dialect.
+    /// </summary>
+    [Fact]
+    public void Decrqde_ReportsTheDisplayedExtent()
+    {
+        var (terminal, replies) = Create();
+        terminal.Write(Esc + "[\"v");
+        Assert.Equal(Esc + "[24;80;1;1;1\"w", Assert.Single(replies));
+    }
+
+    [Fact]
+    public void Decrqde_IsSilentBelowVt300()
+    {
+        var (terminal, replies) = Create();
+        terminal.Write(Esc + "[62\"p");          // DECSCL: VT200
+        replies.Clear();
+        terminal.Write(Esc + "[\"v");
+        Assert.Empty(replies);
+    }
+
+    /// <summary>
+    /// DECRQUPSS, vttest menu 11.2.5 -> 5. A UTF-8 terminal's supplemental set is ISO Latin-1,
+    /// a 96-character set, which is the Ps = 1 form and the designator 'A'.
+    /// </summary>
+    [Fact]
+    public void Decrqupss_ReportsIsoLatin1()
+    {
+        var (terminal, replies) = Create();
+        terminal.Write(Esc + "[&u");
+        Assert.Equal(Esc + "P1!uA" + Esc + "\\", Assert.Single(replies));
+    }
+
+    /// <summary>
+    /// DECRQTSR, vttest menu 11.2.5 -> 4 -> 2. There is no DECRSTS to consume a terminal state
+    /// report, so the answer is the invalid-request form rather than a payload nothing can restore
+    /// -- and rather than the silence a client blocks on, which is how DECRQSS already declines.
+    /// </summary>
+    [Fact]
+    public void Decrqtsr_DeclinesInsteadOfStayingSilent()
+    {
+        var (terminal, replies) = Create();
+        terminal.Write(Esc + "[1$u");
+        Assert.Equal(Esc + "P0$s" + Esc + "\\", Assert.Single(replies));
+    }
+
+    [Fact]
+    public void Decrqtsr_WithNoParameterAsksForNothing()
+    {
+        var (terminal, replies) = Create();
+        terminal.Write(Esc + "[$u");
+        Assert.Empty(replies);
+    }
+
+    [Fact]
+    public void Decrqcra_IsSilentBelowLevel64()
+    {
+        var (terminal, replies) = Create();
+        terminal.Write(Esc + "[64\"p");
+        terminal.Write(Esc + "[1;0;1;1;1;1*y");
+        Assert.Single(replies);                 // answered at VT400
+
+        replies.Clear();
+        terminal.Write(Esc + "[62\"p");      // DECSCL: VT200
+        terminal.Write(Esc + "[1;0;1;1;1;1*y");
+        Assert.Empty(replies);
+    }
+
+    [Fact]
+    public void Decrqtsr_IsSilentBelowLevel64()
+    {
+        // The control is VT320 vintage, but the capability the primary DA offers for it --
+        // attribute 17, terminal state interrogation -- is advertised only from level 64.
+        // Declining a request the DA reply has already said the terminal does not take is the
+        // terminal contradicting itself.
+        var (terminal, replies) = Create();
+        terminal.Write(Esc + "[62\"p");
+        terminal.Write(Esc + "[1$u");
+        Assert.Empty(replies);
+    }
 }

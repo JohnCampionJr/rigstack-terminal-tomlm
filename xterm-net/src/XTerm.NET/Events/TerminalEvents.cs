@@ -574,6 +574,27 @@ public static class TerminalEvents
     }
 
     /// <summary>
+    /// A request for the name of the font the terminal is displayed in (OSC 50 ; ? ST). The
+    /// emulator has no fonts -- whatever draws its cells does -- so this is the seam that asks
+    /// whatever does.
+    /// </summary>
+    /// <remarks>
+    /// Answer by setting <see cref="FontName"/> and <see cref="Handled"/>. A handler that does not
+    /// answer, or that answers with an empty name, is a decline, and the terminal sends xterm's own
+    /// "no font to report" reply -- OSC 50 with no name -- rather than nothing. Silence is what a
+    /// client blocking on the report waits on forever; a reply saying the terminal will not say is
+    /// an answer it can act on.
+    /// </remarks>
+    public class FontQueryEventArgs : EventArgs
+    {
+        /// <summary>True once the handler has supplied a name.</summary>
+        public bool Handled { get; set; }
+
+        /// <summary>The font the terminal is drawn in, in whatever form the host names it.</summary>
+        public string? FontName { get; set; }
+    }
+
+    /// <summary>
     /// Buffer change event - fired when the active buffer switches.
     /// </summary>
     public class BufferChangedEventArgs : EventArgs

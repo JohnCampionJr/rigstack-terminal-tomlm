@@ -54,6 +54,7 @@ public static class CsiCommandExtensions
         { "x", CsiCommand.RequestTerminalParameters },  // DECREQTPARM
         { "c", CsiCommand.DeviceAttributes },   // DA1 - primary
         { ">c", CsiCommand.DeviceAttributes },  // DA2 - secondary
+        { "=c", CsiCommand.DeviceAttributes },  // DA3 - tertiary, the unit ID
         { "d", CsiCommand.LinePositionAbsolute },
         { "f", CsiCommand.CursorPosition }, // HVP - same as CUP
         { "g", CsiCommand.TabClear },
@@ -83,6 +84,8 @@ public static class CsiCommandExtensions
         { "!p", CsiCommand.SoftReset },  // DECSTR
         { "$|", CsiCommand.SetColumnsPerPage },   // DECSCPP
         { "$v", CsiCommand.CopyRectangularArea },   // DECCRA
+        { "$r", CsiCommand.ChangeAttributesRectangularArea },   // DECCARA
+        { "$t", CsiCommand.ReverseAttributesRectangularArea },  // DECRARA
         { "$x", CsiCommand.FillRectangularArea },   // DECFRA
         { "$z", CsiCommand.EraseRectangularArea },  // DECERA
         { "${", CsiCommand.SelectiveEraseRectangularArea },  // DECSERA
@@ -91,6 +94,9 @@ public static class CsiCommandExtensions
         { "\"q", CsiCommand.SelectCharacterProtection },  // DECSCA
         { "\"p", CsiCommand.SelectConformanceLevel },     // DECSCL
         { "*x", CsiCommand.SelectAttributeChangeExtent },  // DECSACE
+        { "\"v", CsiCommand.RequestDisplayedExtent },      // DECRQDE
+        { "&u", CsiCommand.RequestUserPreferredSupplementalSet },  // DECRQUPSS
+        { "$u", CsiCommand.RequestTerminalStateReport },   // DECRQTSR
         { "$}", CsiCommand.SelectActiveStatusDisplay },    // DECSASD
         { "$~", CsiCommand.SelectStatusDisplayType },      // DECSSDT
         { "*|", CsiCommand.SetLinesPerScreen },            // DECSNLS

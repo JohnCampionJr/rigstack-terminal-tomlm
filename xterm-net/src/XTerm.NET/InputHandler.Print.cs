@@ -392,17 +392,31 @@ public partial class InputHandler
         var translatedData = data;
         if (data.Length == 1)
         {
-            // A single shift outranks GL for this character and is spent doing it.
-            if (_singleShiftPending)
+            // A single shift outranks GL for this character and is spent doing it. Resolved
+            // here rather than when the shift arrived, so a designation in between counts.
+            if (_singleShift is { } shifted)
             {
-                translatedData = Charsets.TranslateChar(data[0], _singleShiftCharset);
-                _singleShiftCharset = null;
-                _singleShiftPending = false;
+                translatedData = Charsets.TranslateChar(data[0], _charsets.GetValueOrDefault(shifted));
+                _singleShift = null;
             }
             else
             {
                 translatedData = Charsets.TranslateChar(data[0], _activeCharset);
             }
+        }
+        else if (_singleShift is not null)
+        {
+            // A supplementary character is a graphic character too, and spends the shift like any
+            // other -- it just has nothing to spend it ON, because a 94- or 96-character set has no
+            // entry outside the BMP and TranslateChar takes a single code unit. Leaving the shift
+            // standing through it does not skip the shift, it MOVES it: the character after the
+            // emoji gets translated instead, so `SS2 <emoji> q` drew q as a box-drawing glyph on a
+            // terminal whose G2 the program had finished with.
+            //
+            // Second, after the length test rather than before it, because that is the branch every
+            // ordinary character takes -- see CLAUDE.md's first section. This one runs only for a
+            // surrogate pair, and only to clear a field.
+            _singleShift = null;
         }
 
         var width = GetStringCellWidth(translatedData);
@@ -709,17 +723,8 @@ public partial class InputHandler
         return true;
     }
 
-    private void SetCharset(CharsetMode mode, string charsetId)
-    {
-        // The ID is kept, not just the table it resolves to. A national set means one thing
-        // with DECNRCM set and ASCII without it, so the designation has to outlive the
-        // resolution -- a program designating French and then enabling NRC mode expects
-        // French, and it never designates again.
-        _charsetIds[mode] = charsetId;
-        _ninetySixSets.Remove(mode);
-        _charsets[mode] = Charsets.GetCharset(charsetId, _terminal.NationalReplacementCharsets);
-        RefreshActiveCharset();
-    }
+    private void SetCharset(CharsetMode mode, string charsetId) =>
+        Designate(mode, charsetId, ninetySix: false);
 
     /// <summary>
     /// Designates a 96-character set: <c>ESC - Ps</c> (G1), <c>ESC . Ps</c> (G2),
@@ -731,13 +736,39 @@ public partial class InputHandler
     /// 96-set space and the United Kingdom set in the 94-set one. Anything else is left as
     /// ASCII rather than guessed at.
     /// </remarks>
-    private void SetNinetySixCharset(CharsetMode mode, string charsetId)
+    private void SetNinetySixCharset(CharsetMode mode, string charsetId) =>
+        Designate(mode, charsetId, ninetySix: true);
+
+    /// <summary>Records a designation and resolves it, for both spaces.</summary>
+    /// <remarks>
+    /// The ID is kept, not just the table it resolves to. A national set means one thing with
+    /// DECNRCM set and ASCII without it, so the designation has to outlive the resolution -- a
+    /// program designating French and then enabling NRC mode expects French, and it never
+    /// designates again.
+    /// </remarks>
+    private void Designate(CharsetMode mode, string charsetId, bool ninetySix)
     {
         _charsetIds[mode] = charsetId;
-        _ninetySixSets.Add(mode);
-        _charsets[mode] = Charsets.ASCII;
+        if (ninetySix)
+            _ninetySixSets.Add(mode);
+        else
+            _ninetySixSets.Remove(mode);
+
+        _charsets[mode] = Resolve(charsetId, ninetySix);
         RefreshActiveCharset();
     }
+
+    /// <summary>What a designation means RIGHT NOW, given the mode state.</summary>
+    /// <remarks>
+    /// One answer for the three callers that need it -- designation, DECRC and DECNRCM -- because
+    /// the question is the same one and they got different answers while each resolved separately.
+    /// The space is half the question: 'A' is ISO Latin-1 after ESC - and the United Kingdom set
+    /// after ESC (, so an identifier without the space it came from cannot be resolved at all.
+    /// </remarks>
+    private Dictionary<char, string>? Resolve(string charsetId, bool ninetySix) =>
+        ninetySix
+            ? Charsets.ASCII
+            : Charsets.GetCharset(charsetId, _terminal.NationalReplacementCharsets);
 
     /// <summary>Re-resolves every designation, for when DECNRCM changes under them.</summary>
     /// <remarks>
@@ -749,14 +780,38 @@ public partial class InputHandler
     /// </remarks>
     internal void RefreshDesignatedCharsets()
     {
-        foreach (var mode in _charsetIds.Keys.ToList())
-        {
-            _charsets[mode] = _ninetySixSets.Contains(mode)
-                ? Charsets.ASCII
-                : Charsets.GetCharset(_charsetIds[mode], _terminal.NationalReplacementCharsets);
-        }
+        foreach (var mode in GSets)
+            _charsets[mode] = Resolve(_charsetIds[mode], _ninetySixSets.Contains(mode));
 
         RefreshActiveCharset();
+    }
+
+    /// <summary>The designation a G-set is holding, for DECSC to save.</summary>
+    internal (string Id, bool NinetySix) DesignationOf(CharsetMode mode) =>
+        (_charsetIds[mode], _ninetySixSets.Contains(mode));
+
+    /// <summary>
+    /// Puts a saved designation back, for DECRC, resolving it against the mode state as it is NOW.
+    /// </summary>
+    /// <remarks>
+    /// The DESIGNATION is what DECSC saves, not the table it had resolved to. Saving the table
+    /// restores the right glyphs and leaves the identifier behind it stale, so the next DECNRCM
+    /// re-resolves the restored slot from whatever was designated AFTER the save -- and a program
+    /// doing ESC ( 0, DECSC, ESC ( R, DECRC gets its line drawing back and then loses it again the
+    /// first time the mode moves, arbitrarily far from the DECRC that caused it.
+    ///
+    /// Resolving at restore time rather than replaying the saved table is also the right answer
+    /// when DECNRCM moved BETWEEN the save and the restore.
+    /// </remarks>
+    internal void RestoreDesignation(CharsetMode mode, (string Id, bool NinetySix) designation)
+    {
+        _charsetIds[mode] = designation.Id;
+        if (designation.NinetySix)
+            _ninetySixSets.Add(mode);
+        else
+            _ninetySixSets.Remove(mode);
+
+        _charsets[mode] = Resolve(designation.Id, designation.NinetySix);
     }
 
     /// <summary>
@@ -771,11 +826,14 @@ public partial class InputHandler
     /// <summary>
     /// Shift In - Select G0 character set (SI, 0x0F).
     /// </summary>
+    /// <remarks>
+    /// A pending single shift survives this, as it survives SO and the locking shifts. SI used
+    /// to cancel one and the other three did not, which is three answers to one question: a
+    /// single shift is spent by the next GRAPHIC character, and a locking shift is not one.
+    /// </remarks>
     public void ShiftIn()
     {
         _currentCharset = CharsetMode.G0;
-        _singleShiftCharset = null;
-        _singleShiftPending = false;
         RefreshActiveCharset();
     }
 
@@ -797,30 +855,43 @@ public partial class InputHandler
     /// SS2 (ESC N) and SS3 (ESC O) - invoke G2 or G3 for the NEXT character only.
     /// </summary>
     /// <remarks>
-    /// The single shift is held pending rather than swapped in, so it expires by being consumed
-    /// instead of by something remembering to put the old set back. A shift with no character
-    /// after it simply never fires.
+    /// <para>The single shift is held pending rather than swapped in, so it expires by being
+    /// consumed instead of by something remembering to put the old set back. A shift with no
+    /// character after it simply never fires.</para>
+    ///
+    /// <para>Consumption is the ONLY thing that spends it, short of a reset. The VT510 manual
+    /// says a single shift maps its G-set "for the next graphic character", and neither a
+    /// locking shift nor a designation is one.</para>
     /// </remarks>
-    public void InvokeSingleShift(CharsetMode mode)
-    {
-        _singleShiftCharset = _charsets.GetValueOrDefault(mode);
-        _singleShiftPending = true;
-    }
+    public void InvokeSingleShift(CharsetMode mode) => _singleShift = mode;
 
     /// <summary>
     /// Resets charset state to defaults.
     /// </summary>
     public void ResetCharsets()
     {
-        _charsetIds.Clear();
+        // A pending single shift is charset state, and RIS is exactly how someone recovers from
+        // a program that died between the shift and the character it was going to shift.
+        //
+        // _charsetIds is no longer cleared here: #149 made the loop below SEED every slot with the
+        // US ASCII designation rather than leave it absent, so clearing first would only empty a
+        // dictionary that is about to have all four entries written.
+        _singleShift = null;
         _ninetySixSets.Clear();
-        _charsets[CharsetMode.G0] = Charsets.ASCII;
-        _charsets[CharsetMode.G1] = Charsets.ASCII;
-        _charsets[CharsetMode.G2] = Charsets.ASCII;
-        _charsets[CharsetMode.G3] = Charsets.ASCII;
+        foreach (var mode in GSets)
+        {
+            // Seeded rather than cleared: US ASCII IS the designation every slot starts with, and
+            // saying so is what keeps every walk over the four total.
+            _charsetIds[mode] = UsAsciiId;
+            _charsets[mode] = Charsets.ASCII;
+        }
+
         _currentCharset = CharsetMode.G0;
         RefreshActiveCharset();
     }
+
+    /// <summary>The identifier US ASCII is designated by, which is where every G-set starts.</summary>
+    private const string UsAsciiId = "B";
 
     /// <summary>
     /// Prints the payload of an OSC 66 whose metadata could not be parsed, as ordinary text.
