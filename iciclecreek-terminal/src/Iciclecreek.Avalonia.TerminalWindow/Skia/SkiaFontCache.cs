@@ -42,6 +42,16 @@ namespace Iciclecreek.Terminal.Skia
         private readonly ConcurrentDictionary<(string Family, SnapshotFlags Style), SKTypeface> _faces = new();
         private readonly ConcurrentDictionary<(string Family, float Size), float> _baselines = new();
 
+        /// <summary>
+        /// One glyph, pre-shaped, per (face, size, codepoint). A terminal draws from a small
+        /// alphabet against a screen of thousands of cells, so this settles at a few hundred
+        /// entries — and every one of those cells previously paid DrawText's own codepoint-to-glyph
+        /// lookup again, on top of the ContainsGlyph lookup that had just made the same one. Built
+        /// once, a cell now draws a blob whose glyph is already known: DrawText(blob, ...) positions
+        /// and rasterizes, nothing more.
+        /// </summary>
+        private readonly ConcurrentDictionary<(IntPtr Face, float Size, int CodePoint), SKTextBlob?> _glyphBlobs = new();
+
         /// <summary>One shaper per face. Building one parses the font's tables; clusters repeat.</summary>
         private readonly ConcurrentDictionary<SKTypeface, SKShaper> _shapers = new();
 
@@ -151,17 +161,61 @@ namespace Iciclecreek.Terminal.Skia
             }
 
             var span = new ReadOnlySpan<char>(scratch, 0, length);
+            var text = TextFor(codePoint, span);
 
+            var blob = _glyphBlobs.GetOrAdd((font.Typeface.Handle, font.Size, codePoint), key =>
+            {
+                // Resolved ONCE per (face, size, codepoint) rather than on every cell that draws
+                // it: ContainsGlyph, the fallback search and DrawText(string, ...) each mapped the
+                // codepoint on their own, so a screen of the same handful of characters paid that
+                // work thousands of times a frame for an answer that never changes.
+                //
+                // The key is the face that was ASKED for; the blob is built with the face that
+                // actually DRAWS, which is not the same one whenever fallback is involved. Keying
+                // on the drawing face instead would force every cell to resolve fallback before it
+                // could find its own entry -- and fallback is not an edge case here, since the
+                // terminal font typically has no CJK and no emoji, so that is the common path for
+                // all non-Latin text.
+                var drawFont = font;
+
+                if (!font.ContainsGlyph(codePoint))
+                {
+                    var fallback = _fallback.GetOrAdd(codePoint, ResolveFallback);
+
+                    // A null face means nothing on the system claims this codepoint, so the primary
+                    // font stays and draws the missing-glyph box: a visible box says "this cell
+                    // holds something I cannot draw", where drawing nothing says "this cell is
+                    // empty" -- and the cell is NOT empty, as selecting and copying it would show.
+                    if (fallback is not null)
+                        drawFont = FallbackFont(fallback, font.Size);
+                }
+
+                var glyphs = drawFont.GetGlyphs(text);
+                if (glyphs.Length != 1)
+                    return null;   // an odd shape; the per-frame path below still handles it
+
+                using var builder = new SKTextBlobBuilder();
+                var run = builder.AllocatePositionedRun(drawFont, 1);
+                run.Glyphs[0] = glyphs[0];
+                run.Positions[0] = new SKPoint(0, 0);
+                return builder.Build();
+            });
+
+            if (blob is not null)
+            {
+                canvas.DrawText(blob, x, y, paint);
+                return;
+            }
+
+            // Only a codepoint the builder could not reduce to a single glyph reaches here, so the
+            // whole resolution is walked again -- rarely, and correctness comes first.
             if (font.ContainsGlyph(codePoint))
             {
-                // The span overload, not span.ToString(): this runs per visible codepoint per
-                // frame, so a string apiece was thousands of short-lived allocations a frame --
-                // exactly what the scratch buffer above exists to avoid.
                 // The string for this codepoint, remembered rather than rebuilt. This runs once per
                 // visible cell per frame, so span.ToString() was thousands of short-lived
                 // allocations a frame; a terminal draws from a small alphabet, so the cache settles
                 // at a few hundred entries and never allocates again.
-                canvas.DrawText(TextFor(codePoint, span), x, y, font, paint);
+                canvas.DrawText(text, x, y, font, paint);
                 return;
             }
 
@@ -173,11 +227,11 @@ namespace Iciclecreek.Terminal.Skia
                 // the missing-glyph box: a visible box says "this cell holds something I cannot draw",
                 // where drawing nothing says "this cell is empty" — and the cell is NOT empty, as
                 // selecting and copying it would show.
-                canvas.DrawText(span.ToString(), x, y, font, paint);
+                canvas.DrawText(text, x, y, font, paint);
                 return;
             }
 
-            canvas.DrawText(span.ToString(), x, y, FallbackFont(face, font.Size), paint);
+            canvas.DrawText(text, x, y, FallbackFont(face, font.Size), paint);
         }
 
         /// <summary>
@@ -376,6 +430,14 @@ namespace Iciclecreek.Terminal.Skia
         /// <summary>The face resolved for a codepoint, for tests that assert the resolution itself.</summary>
         internal SKTypeface? FallbackFace(int codePoint) => _fallback.GetOrAdd(codePoint, ResolveFallback);
 
+        /// <summary>
+        /// Whether a drawable glyph is held for this codepoint against this font, for tests that
+        /// assert the cache is actually being populated. Nothing about the rendered output shows
+        /// the difference between a cache that works and one that misses every time.
+        /// </summary>
+        internal bool HasCachedGlyph(int codePoint, SKFont font) =>
+            _glyphBlobs.TryGetValue((font.Typeface.Handle, font.Size, codePoint), out var blob) && blob is not null;
+
         private static SKTypeface? ResolveFallback(int codePoint)
         {
             var matched = SKFontManager.Default.MatchCharacter(codePoint);
@@ -551,6 +613,7 @@ namespace Iciclecreek.Terminal.Skia
             foreach (var shaper in _shapers.Values) shaper.Dispose();
             foreach (var font in _fonts.Values) font.Dispose();
             foreach (var font in _fallbackFonts.Values) font.Dispose();
+            foreach (var blob in _glyphBlobs.Values) blob?.Dispose();
 
             _shapers.Clear();
             _fonts.Clear();
@@ -560,6 +623,7 @@ namespace Iciclecreek.Terminal.Skia
             _baselines.Clear();
             _shapedRuns.Clear();
             _ligatureAlphabet.Clear();
+            _glyphBlobs.Clear();
             _images.Clear();
         }
     }
