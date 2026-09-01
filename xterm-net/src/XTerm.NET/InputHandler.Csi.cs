@@ -768,7 +768,7 @@ public partial class InputHandler
             return;
 
         var sol = request == 0 ? 2 : 3;
-        _terminal.RaiseDataReceived($"[{sol};1;1;128;128;1;0x");
+        _terminal.RaiseDataReceived($"\u001b[{sol};1;1;128;128;1;0x");
     }
 
     private void CursorForwardTab(Params parameters) =>

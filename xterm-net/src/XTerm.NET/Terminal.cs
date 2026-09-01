@@ -920,6 +920,11 @@ public class Terminal : IDisposable
         _inputHandler.ResetProtectionMode();
         LineFeedMode = false;
 
+        // Before ResetCharsets, so the designations it clears are re-resolved through a flag
+        // that is already down. DECRQM reported mode 42 as reset while a set designated after
+        // a soft reset was still being translated -- state and report disagreeing.
+        NationalReplacementCharsets = false;
+        NoClearOnColumnChange = false;
         _inputHandler.ResetCharsets();
         _normalBuffer?.ResetSavedCursor();
         _altBuffer?.ResetSavedCursor();
@@ -997,6 +1002,19 @@ public class Terminal : IDisposable
         SixelDisplayMode = false;
         SixelPrivateColorRegisters = true;
         SixelCursorRight = false;
+
+        // Same failure, two modes this change added. DECNCSM surviving RIS means the next
+        // DECCOLM silently skips the clean slate DEC guarantees; DECNRCM surviving it means
+        // the next program to designate a national set gets one it never asked for, since
+        // ResetCharsets clears the designations but not the flag they resolve through.
+        NoClearOnColumnChange = false;
+        NationalReplacementCharsets = false;
+        _inputHandler.RefreshDesignatedCharsets();
+
+        // ResetStoredModes says "for RIS" and only the SOFT reset was calling it, so every
+        // stored toggle survived the hard one -- DECRQM reported DECNRCM as still set after
+        // RIS had already put the behaviour back. The report and the behaviour now agree.
+        _inputHandler.ResetStoredModes();
 
         // And the charset designations, with the SO/SI shift state. InputHandler.ResetCharsets
         // existed for exactly this and was called from nowhere, so a program that designated line
@@ -1533,6 +1551,19 @@ public class Terminal : IDisposable
     /// rewriting every ESC pair found anywhere would corrupt one that happened to look like an
     /// introducer.</para>
     /// </remarks>
+    /// <summary>
+    /// Sends INPUT-direction data -- pasted text, and anything else standing in for what a
+    /// keyboard would have sent -- with no C1 conversion.
+    /// </summary>
+    /// <remarks>
+    /// Separate from <see cref="RaiseDataReceived"/> because S7C1T and S8C1T describe the
+    /// form of the terminal's own REPORTS. Running paste through that conversion rewrote
+    /// the leading ESC of a bracketed paste and left the closing bracket alone, so the two
+    /// halves of the frame disagreed and the application never saw the paste end.
+    /// </remarks>
+    internal void RaiseInputData(string data) =>
+        DataReceived?.Invoke(this, new TerminalEvents.DataEventArgs(data));
+
     internal void RaiseDataReceived(string data) =>
         DataReceived?.Invoke(this, new TerminalEvents.DataEventArgs(
             EightBitControls ? ToEightBitControls(data) : data));
@@ -1988,7 +2019,13 @@ public class Terminal : IDisposable
 
         text = PrepareForPaste(text);
 
-        RaiseDataReceived(BracketedPasteMode
+        // RaiseInputData, not RaiseDataReceived: this is keyboard-direction traffic, and the
+        // reply converter would rewrite the OPENING bracket to 0x9B and leave the closing one
+        // 7-bit -- by its own rule, which only touches a leading introducer. An application
+        // watching for ESC [ 201 ~ would then never see the end of the paste. S8C1T describes
+        // what the terminal REPORTS; mode 1034 is the keyboard direction, and they are
+        // independent.
+        RaiseInputData(BracketedPasteMode
             ? $"\u001b[200~{text}\u001b[201~"
             : text);
     }

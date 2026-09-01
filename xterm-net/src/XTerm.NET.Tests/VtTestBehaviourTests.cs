@@ -177,87 +177,87 @@ public class VtTestBehaviourTests
         // 0x41 + 0x42 = 0x83, negated over 16 bits is 0xFF7D.
         Assert.Equal($"{Esc}P1!~FF7D{Esc}\\", Assert.Single(replies));
     }
-
-    /// <summary>
-    /// The three ways to change the page size differ only in whether they erase.
-    /// </summary>
-    /// <remarks>
-    /// DECCOLM erases, DECNCSM (mode 95) turns that off, and DECSCPP never erases at all -- it sets
-    /// the width and says nothing about the contents. vttest's page-format tests cannot check any of
-    /// this through a pty: it samples the screen size when a test starts and does not re-measure, so
-    /// its "80 of 132 columns" is its own view rather than the terminal's.
-    /// </remarks>
-    [Fact]
-    public void Page_size_controls_differ_only_in_whether_they_erase()
-    {
-        var terminal = Sized(80, 24);
-        terminal.Write($"{Esc}[?40h");                              // Allow80To132
-
-        // DECCOLM: resizes and erases.
-        terminal.Write($"{Esc}[1;1HKEEP ME");
-        terminal.Write($"{Esc}[?3h");
-        Assert.Equal(132, terminal.Cols);
-        Assert.Equal(string.Empty, terminal.GetLine(0));
-
-        // DECNCSM: resizes and keeps.
-        terminal.Write($"{Esc}[?95h");
-        terminal.Write($"{Esc}[1;1HKEEP ME");
-        terminal.Write($"{Esc}[?3l");
-        Assert.Equal(80, terminal.Cols);
-        Assert.Equal("KEEP ME", terminal.GetLine(0));
-
-        // DECSCPP: resizes and keeps, whatever DECNCSM says.
-        terminal.Write($"{Esc}[?95l");
-        terminal.Write($"{Esc}[132$|");
-        Assert.Equal(132, terminal.Cols);
-        Assert.Equal("KEEP ME", terminal.GetLine(0));
-
-        terminal.Write($"{Esc}[80$|");
-        Assert.Equal(80, terminal.Cols);
-    }
-
-    /// <summary>
-    /// DECSLPP sets the page length. It already worked, and is pinned because a sweep reported it
-    /// as broken on the strength of vttest's own row count -- which is not evidence about this.
-    /// </summary>
-    [Fact]
-    public void Lines_per_page_resizes_the_terminal()
-    {
-        var terminal = Sized(80, 24);
-
-        terminal.Write($"{Esc}[25t");
-        Assert.Equal(25, terminal.Rows);
-
-        terminal.Write($"{Esc}[48t");
-        Assert.Equal(48, terminal.Rows);
+
+    /// <summary>
+    /// The three ways to change the page size differ only in whether they erase.
+    /// </summary>
+    /// <remarks>
+    /// DECCOLM erases, DECNCSM (mode 95) turns that off, and DECSCPP never erases at all -- it sets
+    /// the width and says nothing about the contents. vttest's page-format tests cannot check any of
+    /// this through a pty: it samples the screen size when a test starts and does not re-measure, so
+    /// its "80 of 132 columns" is its own view rather than the terminal's.
+    /// </remarks>
+    [Fact]
+    public void Page_size_controls_differ_only_in_whether_they_erase()
+    {
+        var terminal = Sized(80, 24);
+        terminal.Write($"{Esc}[?40h");                              // Allow80To132
+
+        // DECCOLM: resizes and erases.
+        terminal.Write($"{Esc}[1;1HKEEP ME");
+        terminal.Write($"{Esc}[?3h");
+        Assert.Equal(132, terminal.Cols);
+        Assert.Equal(string.Empty, terminal.GetLine(0));
+
+        // DECNCSM: resizes and keeps.
+        terminal.Write($"{Esc}[?95h");
+        terminal.Write($"{Esc}[1;1HKEEP ME");
+        terminal.Write($"{Esc}[?3l");
+        Assert.Equal(80, terminal.Cols);
+        Assert.Equal("KEEP ME", terminal.GetLine(0));
+
+        // DECSCPP: resizes and keeps, whatever DECNCSM says.
+        terminal.Write($"{Esc}[?95l");
+        terminal.Write($"{Esc}[132$|");
+        Assert.Equal(132, terminal.Cols);
+        Assert.Equal("KEEP ME", terminal.GetLine(0));
+
+        terminal.Write($"{Esc}[80$|");
+        Assert.Equal(80, terminal.Cols);
     }
-
-    /// <summary>
-    /// CHT is n tabs, including at the phantom column. vttest menu 11.8.1.2 draws the same row of
-    /// marks with tabs and with CHT and expects them to look the same.
-    /// </summary>
-    /// <remarks>
-    /// They differed because CHT moved the cursor without checking for a pending wrap, which
-    /// cancelled it -- so the next printable overwrote the last column instead of wrapping. The two
-    /// share one motion now; this is what stops them drifting a third time.
-    /// </remarks>
-    [Theory]
-    [InlineData("	")]
-    [InlineData("[1I")]
-    [InlineData("[I")]
-    public void Tabbing_off_the_line_wraps_the_same_way_however_it_is_spelled(string tab)
-    {
-        var terminal = Sized(20, 4);
-        terminal.Write($"{Esc}[2J{Esc}[H");
-
-        for (var i = 0; i < 5; i++)
-        {
-            terminal.Write(tab);
-            terminal.Write("*");
-        }
-
-        Assert.Equal("        *       *  *", terminal.GetLine(0));
-        Assert.Equal("*       *", terminal.GetLine(1));
+
+    /// <summary>
+    /// DECSLPP sets the page length. It already worked, and is pinned because a sweep reported it
+    /// as broken on the strength of vttest's own row count -- which is not evidence about this.
+    /// </summary>
+    [Fact]
+    public void Lines_per_page_resizes_the_terminal()
+    {
+        var terminal = Sized(80, 24);
+
+        terminal.Write($"{Esc}[25t");
+        Assert.Equal(25, terminal.Rows);
+
+        terminal.Write($"{Esc}[48t");
+        Assert.Equal(48, terminal.Rows);
+    }
+
+    /// <summary>
+    /// CHT is n tabs, including at the phantom column. vttest menu 11.8.1.2 draws the same row of
+    /// marks with tabs and with CHT and expects them to look the same.
+    /// </summary>
+    /// <remarks>
+    /// They differed because CHT moved the cursor without checking for a pending wrap, which
+    /// cancelled it -- so the next printable overwrote the last column instead of wrapping. The two
+    /// share one motion now; this is what stops them drifting a third time.
+    /// </remarks>
+    [Theory]
+    [InlineData("\t")]
+    [InlineData("\u001b[1I")]
+    [InlineData("\u001b[I")]
+    public void Tabbing_off_the_line_wraps_the_same_way_however_it_is_spelled(string tab)
+    {
+        var terminal = Sized(20, 4);
+        terminal.Write($"{Esc}[2J{Esc}[H");
+
+        for (var i = 0; i < 5; i++)
+        {
+            terminal.Write(tab);
+            terminal.Write("*");
+        }
+
+        Assert.Equal("        *       *  *", terminal.GetLine(0));
+        Assert.Equal("*       *", terminal.GetLine(1));
     }
 
     /// <summary>
@@ -296,5 +296,97 @@ public class VtTestBehaviourTests
         var latin1 = Sized(30, 3);
         latin1.Write($"{Esc}-A#@[");
         Assert.Equal("#@[", latin1.GetLine(0));
+    }
+
+    /// <summary>
+    /// A bracketed paste keeps both halves of its frame, whatever S8C1T says.
+    /// </summary>
+    /// <remarks>
+    /// Paste is keyboard-direction traffic, and the reply converter rewrites only a LEADING
+    /// introducer -- so running paste through it produced an 8-bit opening bracket and a 7-bit
+    /// closing one, and an application watching for the end of the paste never saw it.
+    /// </remarks>
+    [Fact]
+    public void A_paste_is_not_converted_by_S8C1T()
+    {
+        var terminal = Sized(40, 4);
+        var sent = new List<string>();
+        terminal.DataReceived += (_, e) => sent.Add(e.Data);
+
+        terminal.Write($"{Esc}[?2004h{Esc} G");
+        terminal.Paste("hi");
+
+        Assert.Equal($"{Esc}[200~hi{Esc}[201~", Assert.Single(sent));
+    }
+
+    /// <summary>
+    /// DECNCSM and DECNRCM come back down on both resets, in behaviour AND in what DECRQM says.
+    /// </summary>
+    [Theory]
+    [InlineData("ESCc")]
+    [InlineData("ESC[!p")]
+    public void The_new_modes_do_not_survive_a_reset(string reset)
+    {
+        var terminal = Sized(40, 4);
+        var replies = new List<string>();
+        terminal.DataReceived += (_, e) => replies.Add(e.Data);
+
+        terminal.Write($"{Esc}[?95h{Esc}[?42h");
+        terminal.Write(reset.Replace("ESC", Esc));
+
+        terminal.Write($"{Esc}[?95$p");
+        Assert.Equal($"{Esc}[?95;2$y", replies[^1]);
+
+        terminal.Write($"{Esc}[?42$p");
+        Assert.Equal($"{Esc}[?42;2$y", replies[^1]);
+
+        // And the flag is really down, not merely reported down.
+        terminal.Write($"{Esc}(R@[");
+        Assert.Equal("@[", terminal.GetLine(0));
+    }
+
+    /// <summary>
+    /// Text that SURVIVES a full erase keeps its line width.
+    /// </summary>
+    /// <remarks>
+    /// Under ISO protection a guarded cell survives even a plain erase, so resetting the attribute
+    /// on the way in would have shrunk a line that still had double-width text on it.
+    /// </remarks>
+    [Fact]
+    public void A_full_erase_keeps_the_width_of_a_line_whose_text_survived()
+    {
+        var terminal = Sized(20, 3);
+
+        terminal.Write($"{Esc}[1;1H{Esc}#6");
+        terminal.Write($"{Esc}VKEEP{Esc}W");
+        terminal.Write($"{Esc}[2J");
+
+        Assert.Equal("KEEP", terminal.GetLine(0));
+        Assert.Equal(XTerm.Buffer.LineAttribute.DoubleWidth, terminal.Buffer.Lines[0]!.LineAttribute);
+    }
+
+    /// <summary>DECSCPP declines a width it does not define rather than rounding to one.</summary>
+    [Theory]
+    [InlineData(81)]
+    [InlineData(999)]
+    public void Set_columns_per_page_ignores_a_width_it_does_not_define(int columns)
+    {
+        var terminal = Sized(80, 24);
+
+        terminal.Write($"{Esc}[{columns}$|");
+
+        Assert.Equal(80, terminal.Cols);
+    }
+
+    /// <summary>A national set reached by its alternate designator resolves to the same table.</summary>
+    [Fact]
+    public void A_national_set_answers_to_both_of_its_designators()
+    {
+        foreach (var designator in new[] { "R", "f" })
+        {
+            var terminal = Sized(20, 3);
+            terminal.Write($"{Esc}[?42h{Esc}({designator}#@[");
+            Assert.Equal("£à°", terminal.GetLine(0));
+        }
     }
 }

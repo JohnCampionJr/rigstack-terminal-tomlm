@@ -139,6 +139,8 @@ public enum CsiCommand
     /// Repeat the preceding graphic character (CSI Pn b), REP.
     /// </summary>
     RepeatPrecedingCharacter,
+
+    /// <summary>DECREQTPARM -- request the terminal's line parameters (CSI Ps x).</summary>
     RequestTerminalParameters,
 
     /// <summary>
@@ -184,8 +186,10 @@ public enum CsiCommand
     /// <summary>DECSTR -- soft terminal reset (CSI ! p).</summary>
     SoftReset,
 
-    /// <summary>DECCRA -- copy a rectangular area (CSI ... $ v).</summary>
+    /// <summary>DECSCPP -- set the page width in columns (CSI Ps $ |).</summary>
     SetColumnsPerPage,
+
+    /// <summary>DECCRA -- copy a rectangular area (CSI ... $ v).</summary>
     CopyRectangularArea,
 
     /// <summary>DECFRA -- fill a rectangular area with a character (CSI Pch;Pt;Pl;Pb;Pr $ x).</summary>

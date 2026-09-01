@@ -41,6 +41,7 @@ vttest and tmux inside WSL (`apt install vttest tmux`), and `dotnet` on PATH. Bu
 """
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -52,8 +53,11 @@ WORDS = re.compile(r"[A-Za-z]{3,}")
 def xterm_net(keys):
     """Screens as XTerm.NET painted them, one list of rows per step."""
     out = subprocess.run(
+    # check=True: a failed build or a crashed harness otherwise returns no screens, and no
+    # screens reads downstream as "the two terminals differ" -- a tooling failure wearing
+    # the costume of a finding.
         ["dotnet", "run", "-c", "Debug", "--no-build", "--", *keys],
-        cwd=VTDRIVE, capture_output=True, text=True, timeout=900).stdout
+        cwd=VTDRIVE, capture_output=True, text=True, timeout=900, check=True).stdout
 
     screens, current = [], None
     for line in out.splitlines():
@@ -89,7 +93,9 @@ def tmux(keys):
         if key != "-":
             literal = key.replace("\\r", "")
             if literal:
-                wsl(f"tmux send-keys -t vt '{literal}'")
+                # Quoted: this reaches tmux through `bash -lc`, so an apostrophe in a key script
+                # would end the quoting and run the rest as shell.
+                wsl(f"tmux send-keys -t vt {shlex.quote(literal)}")
             if "\\r" in key:
                 wsl("tmux send-keys -t vt Enter")
         screens.append(tmux_stable())

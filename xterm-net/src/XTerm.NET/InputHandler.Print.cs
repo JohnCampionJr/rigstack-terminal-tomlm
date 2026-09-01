@@ -716,6 +716,7 @@ public partial class InputHandler
         // resolution -- a program designating French and then enabling NRC mode expects
         // French, and it never designates again.
         _charsetIds[mode] = charsetId;
+        _ninetySixSets.Remove(mode);
         _charsets[mode] = Charsets.GetCharset(charsetId, _terminal.NationalReplacementCharsets);
         RefreshActiveCharset();
     }
@@ -733,15 +734,27 @@ public partial class InputHandler
     private void SetNinetySixCharset(CharsetMode mode, string charsetId)
     {
         _charsetIds[mode] = charsetId;
+        _ninetySixSets.Add(mode);
         _charsets[mode] = Charsets.ASCII;
         RefreshActiveCharset();
     }
 
     /// <summary>Re-resolves every designation, for when DECNRCM changes under them.</summary>
+    /// <remarks>
+    /// Through the space each was designated in. 'A' is ISO Latin-1 after ESC - and the
+    /// United Kingdom set after ESC (, so walking every designation through the 94-set
+    /// lookup would hand a program that asked for Latin-1 the UK set the first time
+    /// DECNRCM was toggled -- turning its '#' into a pound sign one mode change after the
+    /// designation that was handled correctly.
+    /// </remarks>
     internal void RefreshDesignatedCharsets()
     {
         foreach (var mode in _charsetIds.Keys.ToList())
-            _charsets[mode] = Charsets.GetCharset(_charsetIds[mode], _terminal.NationalReplacementCharsets);
+        {
+            _charsets[mode] = _ninetySixSets.Contains(mode)
+                ? Charsets.ASCII
+                : Charsets.GetCharset(_charsetIds[mode], _terminal.NationalReplacementCharsets);
+        }
 
         RefreshActiveCharset();
     }
@@ -800,6 +813,7 @@ public partial class InputHandler
     public void ResetCharsets()
     {
         _charsetIds.Clear();
+        _ninetySixSets.Clear();
         _charsets[CharsetMode.G0] = Charsets.ASCII;
         _charsets[CharsetMode.G1] = Charsets.ASCII;
         _charsets[CharsetMode.G2] = Charsets.ASCII;

@@ -87,18 +87,24 @@ public partial class InputHandler
         // test made that visible: it erases the display between screens, so every screen
         // after it stayed doubled.
         //
-        // Full and non-selective only. A partial erase leaves text on the line that is still
-        // meant to be double, and a selective erase exists precisely to leave protected text
-        // standing -- resizing the line under it would undo that in the one case it was asked
-        // to preserve.
-        if (!selective && start == 0 && end >= _terminal.Cols)
-            line.LineAttribute = Buffer.LineAttribute.Normal;
+        // Full and non-selective only, and only when nothing SURVIVED the erase. A partial
+        // erase leaves text that is still meant to be double; a selective erase exists to
+        // leave protected text standing; and under ISO protection a guarded cell survives
+        // even a plain erase, which is why this is decided after the walk below rather than
+        // before it -- resizing the line under surviving text is the same mistake in reverse.
+        var wholeLine = !selective && start == 0 && end >= _terminal.Cols;
 
         if (!_protectionUsed || _protectionMode == ProtectionOff)
         {
             line.Fill(blank, start, end);
+
+            if (wholeLine)
+                line.LineAttribute = Buffer.LineAttribute.Normal;
+
             return;
         }
+
+        var survived = false;
 
         for (var col = start; col < end && col < line.Length; col++)
         {
@@ -108,8 +114,15 @@ public partial class InputHandler
             // the selective erases honour DECSCA bits; a plain ED ploughs straight through.
             if ((_protectionMode == ProtectionIso && cell.Attributes.IsGuarded())
                 || (selective && cell.Attributes.IsProtected()))
+            {
+                survived = true;
                 continue;
+            }
+
             line.SetCell(col, ref blank);
         }
+
+        if (wholeLine && !survived)
+            line.LineAttribute = Buffer.LineAttribute.Normal;
     }
 }

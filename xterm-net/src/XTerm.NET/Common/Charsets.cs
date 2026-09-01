@@ -194,6 +194,27 @@ public static class Charsets
             { '~', "\u00fc" },
         },
     };
+
+    /// <summary>
+    /// The alternate designators DEC gives some national sets.
+    /// </summary>
+    /// <remarks>
+    /// Several sets have two spellings, and a program is entitled to send either -- the primary DA
+    /// advertises national replacement sets without saying which spelling. An unregistered one
+    /// falls through to ASCII, which is the failure this file's remarks describe: the text comes
+    /// out almost right, with the accented positions quietly reading as ASCII.
+    ///
+    /// French Canadian (Q, 9) and Portuguese (%6) are not here because they are tables this
+    /// terminal does not have yet, not spellings of tables it does.
+    /// </remarks>
+    private static readonly Dictionary<string, string> NationalAliases = new()
+    {
+        ["f"] = "R",   // French
+        ["7"] = "H",   // Swedish
+        ["5"] = "C",   // Finnish
+        ["6"] = "E",   // Norwegian/Danish
+        ["`"] = "E",   // Norwegian/Danish, the other spelling
+    };
 
     /// <summary>
     /// ASCII character set (no translation).
@@ -218,8 +239,12 @@ public static class Charsets
         // The national sets are gated on DECNRCM, so the same designation means different
         // things depending on the mode -- which is why the caller re-resolves what it has
         // designated when the mode changes rather than resolving once at designation time.
-        if (nationalReplacement && National.TryGetValue(name, out var national))
-            return national;
+        if (nationalReplacement)
+        {
+            var id = NationalAliases.TryGetValue(name, out var primary) ? primary : name;
+            if (National.TryGetValue(id, out var national))
+                return national;
+        }
 
         // Anything else is ASCII. That includes a national set while NRC is off, and it is
         // the honest answer for a designation this terminal does not implement.

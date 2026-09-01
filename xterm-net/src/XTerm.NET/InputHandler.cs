@@ -47,6 +47,13 @@ public partial class InputHandler
     /// </remarks>
     private readonly Dictionary<CharsetMode, string> _charsetIds = new();
 
+    /// <summary>Which G-sets were designated as 96-character sets.</summary>
+    /// <remarks>
+    /// The identifier alone does not say: 'A' is the UK set in one space and ISO Latin-1 in the
+    /// other, so re-resolving a designation needs to know which space it came from.
+    /// </remarks>
+    private readonly HashSet<CharsetMode> _ninetySixSets = new();
+
     /// <summary>
     /// The set a SINGLE shift has invoked for the next printed character, or null.
     /// </summary>
@@ -757,8 +764,13 @@ public partial class InputHandler
                 // DECSCPP. 80 and 132 are the only widths DEC defines, and 0 means 80.
                 // It does NOT erase: unlike DECCOLM it says nothing about the contents,
                 // and vttest's page-format test fills the screen and then checks it.
+                // 0, 80 and 132 are the widths DECSCPP defines, and 0 means 80. Anything else
+                // is ignored rather than rounded: coercing it turned CSI 81 $ | into a resize
+                // to 80 and CSI 999 $ | into one to 132, so a malformed request moved the
+                // screen instead of being declined.
                 var pageColumns = parameters.GetParam(0, 0);
-                _terminal.SetPageWidth(pageColumns >= 132 ? 132 : 80, clear: false);
+                if (pageColumns is 0 or 80 or 132)
+                    _terminal.SetPageWidth(pageColumns == 132 ? 132 : 80, clear: false);
                 break;
 
             case CsiCommand.SetLinesPerScreen:

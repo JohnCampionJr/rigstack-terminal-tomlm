@@ -20,7 +20,7 @@ namespace XTerm.Tests;
 /// </summary>
 public class VtTestConformanceTests
 {
-    private const string Esc = "";
+    private const string Esc = "\u001b";
 
     private static (Terminal Terminal, List<string> Replies) Listening()
     {

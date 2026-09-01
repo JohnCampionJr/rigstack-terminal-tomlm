@@ -82,7 +82,7 @@ foreach (var step in script)
 {
     if (step != "-")
     {
-        var keys = step.Replace("\\r", "\r").Replace("\\e", "");
+        var keys = step.Replace("\\r", "\r").Replace("\\e", "\u001b");
         var bytes = Encoding.UTF8.GetBytes(keys);
         connection.WriterStream.Write(bytes, 0, bytes.Length);
         connection.WriterStream.Flush();
