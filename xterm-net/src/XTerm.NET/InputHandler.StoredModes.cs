@@ -56,8 +56,9 @@ public partial class InputHandler
     /// status line to point at and never will.
     /// </summary>
     private int _attributeChangeExtent;   // DECSACE (* x)
-    private int _activeStatusDisplay;     // DECSASD ($ })
-    private int _statusDisplayType;       // DECSSDT ($ ~)
+    // DECSASD ($ }) and DECSSDT ($ ~) were cached here for DECRQSS to report. They are the
+    // terminal's state now, and DECRQSS reads it there -- a second copy is what let RIS undo the
+    // status line while the report went on describing the one that had been undone.
 
     /// <summary>Sets or resets a stored mode; false when the mode is not one of the stored set.</summary>
     private bool TrySetStoredMode(int mode, bool isPrivate, bool value)

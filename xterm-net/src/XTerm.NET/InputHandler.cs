@@ -757,11 +757,15 @@ public partial class InputHandler
                 break;
 
             case CsiCommand.SelectActiveStatusDisplay:
-                _activeStatusDisplay = parameters.GetParam(0, 0);
+                // Stored for DECRQSS as before, and now acted on. Storing the ACCEPTED value
+                // rather than the requested one is the point: DECSASD 1 is refused unless a
+                // host-writable status line exists, and reporting back a selection that was
+                // refused is what told a program its text had somewhere to go when it did not.
+                _terminal.SetActiveStatusDisplay(parameters.GetParam(0, 0));
                 break;
 
             case CsiCommand.SelectStatusDisplayType:
-                _statusDisplayType = parameters.GetParam(0, 0);
+                _terminal.SetStatusDisplayType(parameters.GetParam(0, 0));
                 break;
 
             case CsiCommand.RequestTerminalParameters:
