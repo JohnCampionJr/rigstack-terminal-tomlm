@@ -392,7 +392,17 @@ public partial class InputHandler
         var translatedData = data;
         if (data.Length == 1)
         {
-            translatedData = Charsets.TranslateChar(data[0], _activeCharset);
+            // A single shift outranks GL for this character and is spent doing it.
+            if (_singleShiftPending)
+            {
+                translatedData = Charsets.TranslateChar(data[0], _singleShiftCharset);
+                _singleShiftCharset = null;
+                _singleShiftPending = false;
+            }
+            else
+            {
+                translatedData = Charsets.TranslateChar(data[0], _activeCharset);
+            }
         }
 
         var width = GetStringCellWidth(translatedData);
@@ -701,8 +711,51 @@ public partial class InputHandler
 
     private void SetCharset(CharsetMode mode, string charsetId)
     {
-        var charset = Charsets.GetCharset(charsetId);
-        _charsets[mode] = charset;
+        // The ID is kept, not just the table it resolves to. A national set means one thing
+        // with DECNRCM set and ASCII without it, so the designation has to outlive the
+        // resolution -- a program designating French and then enabling NRC mode expects
+        // French, and it never designates again.
+        _charsetIds[mode] = charsetId;
+        _ninetySixSets.Remove(mode);
+        _charsets[mode] = Charsets.GetCharset(charsetId, _terminal.NationalReplacementCharsets);
+        RefreshActiveCharset();
+    }
+
+    /// <summary>
+    /// Designates a 96-character set: <c>ESC - Ps</c> (G1), <c>ESC . Ps</c> (G2),
+    /// <c>ESC / Ps</c> (G3).
+    /// </summary>
+    /// <remarks>
+    /// Latin-1 is the one that matters and it is a pass-through, so the visible effect of
+    /// getting this wrong is nil until the identifier collides: 'A' is Latin-1 in the
+    /// 96-set space and the United Kingdom set in the 94-set one. Anything else is left as
+    /// ASCII rather than guessed at.
+    /// </remarks>
+    private void SetNinetySixCharset(CharsetMode mode, string charsetId)
+    {
+        _charsetIds[mode] = charsetId;
+        _ninetySixSets.Add(mode);
+        _charsets[mode] = Charsets.ASCII;
+        RefreshActiveCharset();
+    }
+
+    /// <summary>Re-resolves every designation, for when DECNRCM changes under them.</summary>
+    /// <remarks>
+    /// Through the space each was designated in. 'A' is ISO Latin-1 after ESC - and the
+    /// United Kingdom set after ESC (, so walking every designation through the 94-set
+    /// lookup would hand a program that asked for Latin-1 the UK set the first time
+    /// DECNRCM was toggled -- turning its '#' into a pound sign one mode change after the
+    /// designation that was handled correctly.
+    /// </remarks>
+    internal void RefreshDesignatedCharsets()
+    {
+        foreach (var mode in _charsetIds.Keys.ToList())
+        {
+            _charsets[mode] = _ninetySixSets.Contains(mode)
+                ? Charsets.ASCII
+                : Charsets.GetCharset(_charsetIds[mode], _terminal.NationalReplacementCharsets);
+        }
+
         RefreshActiveCharset();
     }
 
@@ -721,7 +774,37 @@ public partial class InputHandler
     public void ShiftIn()
     {
         _currentCharset = CharsetMode.G0;
+        _singleShiftCharset = null;
+        _singleShiftPending = false;
         RefreshActiveCharset();
+    }
+
+    /// <summary>
+    /// LS2 (ESC n) and LS3 (ESC o) - lock G2 or G3 into GL until the next shift.
+    /// </summary>
+    /// <remarks>
+    /// SO and SI above are the same operation for G1 and G0. G2 and G3 could be DESIGNATED
+    /// before this existed and never invoked, so whatever a program put in them printed as
+    /// ASCII -- and silently, since an unimplemented set and US ASCII look identical.
+    /// </remarks>
+    public void LockingShift(CharsetMode mode)
+    {
+        _currentCharset = mode;
+        RefreshActiveCharset();
+    }
+
+    /// <summary>
+    /// SS2 (ESC N) and SS3 (ESC O) - invoke G2 or G3 for the NEXT character only.
+    /// </summary>
+    /// <remarks>
+    /// The single shift is held pending rather than swapped in, so it expires by being consumed
+    /// instead of by something remembering to put the old set back. A shift with no character
+    /// after it simply never fires.
+    /// </remarks>
+    public void InvokeSingleShift(CharsetMode mode)
+    {
+        _singleShiftCharset = _charsets.GetValueOrDefault(mode);
+        _singleShiftPending = true;
     }
 
     /// <summary>
@@ -729,6 +812,8 @@ public partial class InputHandler
     /// </summary>
     public void ResetCharsets()
     {
+        _charsetIds.Clear();
+        _ninetySixSets.Clear();
         _charsets[CharsetMode.G0] = Charsets.ASCII;
         _charsets[CharsetMode.G1] = Charsets.ASCII;
         _charsets[CharsetMode.G2] = Charsets.ASCII;

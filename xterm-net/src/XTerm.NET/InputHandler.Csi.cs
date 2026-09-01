@@ -701,19 +701,78 @@ public partial class InputHandler
         _buffer.SetCursor(_buffer.X, row);
     }
 
-    private void CursorForwardTab(Params parameters)
+    /// <summary>
+    /// One tab motion, for both C0 HT and CHT (<c>CSI Ps I</c>), which is n of them.
+    /// </summary>
+    /// <remarks>
+    /// <para>Shared because the two have drifted apart twice. First on the stop set, when HT
+    /// hardcoded 8 while CHT honoured <c>Options.TabStopWidth</c>. Then on the PHANTOM
+    /// column: HT checked for a pending wrap and CHT did not, so CHT cancelled it by moving
+    /// the cursor and the next printable overwrote the last column instead of wrapping onto
+    /// the next row. vttest draws the same row of marks with tabs and with CHT and expects
+    /// them to look the same; they did not.</para>
+    ///
+    /// <para>The phantom column is where curses' famous more(1) bug lives: a program fills a
+    /// row and then tabs. With DECSET 41 the tab wraps first, as the printed character would
+    /// have; without it the tab is absorbed where it stands and the next printable does the
+    /// wrapping. Either way the answer is the same for one tab or five.</para>
+    /// </remarks>
+    internal void Tab(int count = 1)
     {
-        // CHT - Cursor Forward Tabulation (CSI I)
-        var count = Math.Max(parameters.GetParam(0, 1), 1);
-
-        // Stops at the right margin, exactly as C0 HT does. The margin binds any cursor at or
-        // left of it -- starting left of the left margin tabs INTO the box and stops at its right
-        // edge, the same discipline printing follows -- while a cursor already right of the
-        // margin only stops at the screen edge.
-        var limit = _buffer.X <= _buffer.ScrollRight ? _buffer.ScrollRight : _terminal.Cols - 1;
         for (var i = 0; i < count; i++)
+        {
+            if (_buffer.PendingWrap)
+            {
+                if (!_terminal.MoreFixMode)
+                    return;
+
+                if (_buffer.Y == _buffer.ScrollBottom)
+                    _buffer.ScrollUp(1);
+                else
+                    _buffer.SetCursor(_buffer.X, _buffer.Y + 1);
+
+                _buffer.CarriageReturn();
+            }
+
+            // The margin binds any cursor at or left of it -- starting left of the left
+            // margin tabs INTO the box and stops at its right edge, the same discipline
+            // printing follows -- while a cursor already right of the margin only stops at
+            // the screen edge.
+            var limit = _terminal.LeftRightMarginMode && _buffer.X <= _buffer.ScrollRight
+                ? _buffer.ScrollRight
+                : _terminal.Cols - 1;
+
             _buffer.SetCursor(Math.Min(_terminal.NextTabStop(_buffer.X), limit), _buffer.Y);
+        }
     }
+
+    /// <summary>
+    /// DECREQTPARM (<c>CSI Ps x</c>) - answers with DECREPTPARM.
+    /// </summary>
+    /// <remarks>
+    /// <para>A VT100 asking about its serial line: parity, bit count, transmit and receive
+    /// speed, clock multiplier. None of it means anything to an emulator, and the values
+    /// below are the ones xterm sends for the same reason -- no parity, 8 bits, the highest
+    /// speed code, multiplier 1, no flags.</para>
+    ///
+    /// <para>Answered anyway because silence is not a decline: vttest's terminal-report test
+    /// paints nothing at all against a terminal that says nothing, and a client that blocks
+    /// on the reply waits forever. Ps 0 reports with sol=2, Ps 1 with sol=3; anything else
+    /// is not a request and is ignored, which is what stops a REPORT arriving on the input
+    /// from being answered as though it were one.</para>
+    /// </remarks>
+    private void RequestTerminalParameters(Params parameters)
+    {
+        var request = parameters.GetParam(0, 0);
+        if (request != 0 && request != 1)
+            return;
+
+        var sol = request == 0 ? 2 : 3;
+        _terminal.RaiseDataReceived($"\u001b[{sol};1;1;128;128;1;0x");
+    }
+
+    private void CursorForwardTab(Params parameters) =>
+        Tab(Math.Max(parameters.GetParam(0, 1), 1));
 
     private void CursorBackwardTab(Params parameters)
     {
@@ -1237,12 +1296,16 @@ public partial class InputHandler
             case 14: // Report window size in pixels
                 if (_terminal.Options.WindowOptions.GetWinSizePixels)
                 {
+                    // Answered whether or not a host handler does. An emulator has no pixels
+                    // of its own, so zeroes are the honest values -- but silence is not an
+                    // answer, and enabling the report is a statement that the question will be
+                    // answered. The position report next door already works this way.
                     var args = _terminal.RaiseWindowInfoRequested(WindowInfoRequest.SizePixels);
-                    if (args.Handled)
-                    {
-                        // Response: CSI 4 ; height ; width t
-                        _terminal.RaiseDataReceived($"\u001b[4;{args.HeightPixels};{args.WidthPixels}t");
-                    }
+                    var height = args.Handled ? args.HeightPixels : 0;
+                    var width = args.Handled ? args.WidthPixels : 0;
+
+                    // Response: CSI 4 ; height ; width t
+                    _terminal.RaiseDataReceived($"\u001b[4;{height};{width}t");
                 }
                 break;
 
@@ -1250,11 +1313,11 @@ public partial class InputHandler
                 if (_terminal.Options.WindowOptions.GetScreenSizePixels)
                 {
                     var args = _terminal.RaiseWindowInfoRequested(WindowInfoRequest.ScreenSizePixels);
-                    if (args.Handled)
-                    {
-                        // Response: CSI 5 ; height ; width t
-                        _terminal.RaiseDataReceived($"\u001b[5;{args.HeightPixels};{args.WidthPixels}t");
-                    }
+                    var height = args.Handled ? args.HeightPixels : 0;
+                    var width = args.Handled ? args.WidthPixels : 0;
+
+                    // Response: CSI 5 ; height ; width t
+                    _terminal.RaiseDataReceived($"\u001b[5;{height};{width}t");
                 }
                 break;
 
@@ -1262,11 +1325,11 @@ public partial class InputHandler
                 if (_terminal.Options.WindowOptions.GetCellSizePixels)
                 {
                     var args = _terminal.RaiseWindowInfoRequested(WindowInfoRequest.CellSizePixels);
-                    if (args.Handled)
-                    {
-                        // Response: CSI 6 ; height ; width t
-                        _terminal.RaiseDataReceived($"\u001b[6;{args.CellHeight};{args.CellWidth}t");
-                    }
+                    var height = args.Handled ? args.CellHeight : 0;
+                    var width = args.Handled ? args.CellWidth : 0;
+
+                    // Response: CSI 6 ; height ; width t
+                    _terminal.RaiseDataReceived($"\u001b[6;{height};{width}t");
                 }
                 break;
 

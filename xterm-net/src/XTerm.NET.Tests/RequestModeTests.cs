@@ -37,6 +37,9 @@ public class RequestModeTests
 
     private static string PermanentReport(int mode) => Esc.Csi($"?{mode};3$y");
 
+    /// <summary>DECRPM's "mode not recognised": Ps=0.</summary>
+    private static string UnrecognisedReport(int mode) => Esc.Csi($"?{mode};0$y");
+
     /// <summary>The same report for an ANSI mode, which carries no private marker.</summary>
     private static string AnsiReport(int mode, bool set) => Esc.Csi($"{mode};{(set ? 1 : 2)}$y");
 
@@ -220,23 +223,32 @@ public class RequestModeTests
     }
 
     /// <summary>
-    /// Silence for the modes this terminal genuinely keeps no state for. The stored toggles
-    /// (DECSCLM, DECNRCM and friends) moved out of this list when DECRQM learned to answer them;
-    /// what remains is the truly untracked, where "reset" would be a guess.
+    /// "Not recognised" for the modes this terminal genuinely keeps no state for.
     /// </summary>
+    /// <remarks>
+    /// This asserted SILENCE until vttest showed what that costs: menu 11.8.2.2 reports modes
+    /// 2 and 10-13 as "failed", because no report ever arrives and a client waiting for one
+    /// waits forever. DECRQM is defined to answer every request.
+    ///
+    /// The reasoning that put silence here still holds and is not contradicted: reporting
+    /// "reset" for an untracked mode WOULD be a guess. Ps=0 is not that guess -- it is the
+    /// defined value for "I do not recognise this mode", which is exactly what is true here,
+    /// and it is what DECRQSS in this same emulator already answers for the settings it does
+    /// not support.
+    /// </remarks>
     [Theory]
     [InlineData(1035)]   // NumLock modifiers
     [InlineData(1001)]   // highlight mouse tracking, not implemented
     [InlineData(1016)]   // pixel-position mouse, not implemented
     [InlineData(64738)]  // not a mode at all
-    public void Says_nothing_about_modes_it_keeps_no_state_for(int mode)
+    public void Reports_not_recognised_for_modes_it_keeps_no_state_for(int mode)
     {
         var terminal = Fresh();
         var replies = Replies(terminal);
 
         terminal.Write(Query(mode));
 
-        Assert.Empty(replies);
+        Assert.Equal(new[] { UnrecognisedReport(mode) }, replies);
     }
 
     /// <summary>

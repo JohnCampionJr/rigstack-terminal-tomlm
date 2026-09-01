@@ -140,6 +140,9 @@ public enum CsiCommand
     /// </summary>
     RepeatPrecedingCharacter,
 
+    /// <summary>DECREQTPARM -- request the terminal's line parameters (CSI Ps x).</summary>
+    RequestTerminalParameters,
+
     /// <summary>
     /// Set Top and Bottom Margins (CSI r).
     /// </summary>
@@ -182,6 +185,9 @@ public enum CsiCommand
 
     /// <summary>DECSTR -- soft terminal reset (CSI ! p).</summary>
     SoftReset,
+
+    /// <summary>DECSCPP -- set the page width in columns (CSI Ps $ |).</summary>
+    SetColumnsPerPage,
 
     /// <summary>DECCRA -- copy a rectangular area (CSI ... $ v).</summary>
     CopyRectangularArea,

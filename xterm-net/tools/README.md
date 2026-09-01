@@ -29,6 +29,47 @@ Two photographs rather than flat rectangles throughout: a solid colour hides a s
 drawn from the wrong row, or a picture stretched by a couple of pixels — and hides a blend entirely,
 since a tint over one flat colour is just another flat colour.
 
+## vttest/
+
+Drives [vttest](https://invisible-island.net/vttest/) against this emulator headlessly, and against
+tmux as a second opinion, then reports where the two screens differ.
+
+```
+dotnet build vttest/VtDrive/VtDrive.csproj
+
+python vttest/vtsweep.py 8 12                        walk menu 8, twelve RETURNs
+python vttest/vtsweep.py --keys - "11\r" "8\r" "2\r"  drive a sub-menu explicitly
+```
+
+`VtDrive` spawns vttest through a pty into a headless `Terminal`, wires `DataReceived` back to the
+pty so reports can be answered, wires `Resized` to `connection.Resize` so DECCOLM reaches the
+application, and dumps the screen after each step. Run it alone to read one screen:
+
+```
+dotnet run --project vttest/VtDrive -- - "6\r" "3\r"
+```
+
+**It nominates; it does not judge.** vttest states its own verdict for the tests worth trusting
+(`-- OK`, `-- Ignores origin mode`, `expected EAED`), and that is what decides which side is wrong —
+several differences this found were tmux's bugs, not ours. tmux has no VT52, ignores DECCOLM,
+reports untranslated characters for line-drawing and national sets, and implements neither DECRQM
+nor DECRQCRA, so those menus differ whatever we do.
+
+It is also blind to everything that is not text — colour, BCE fills, cell protection, line
+attributes. Those need a direct probe against the emulator, which is where
+`XTerm.NET.Tests/VtTestBehaviourTests` came from.
+
+**Windows-only, and that bounds it.** `VtDrive` spawns through `wsl.exe` and `vtsweep.py` drives
+tmux the same way, so nothing this tool finds can be re-checked on macOS or Linux — where the
+rest of CI runs. That matters more than usual here, because two findings from the first sweep
+turned out to be harness artifacts rather than emulator defects, and a second platform is how
+the next one gets caught before it becomes an issue. Switching the spawn to a native `vttest`
+off-Windows is a couple of lines; driving it is not — tried against Homebrew's vttest 2.7, the
+menu paints but keystrokes written to the master never advance it, so that half is unsolved.
+
+Needs `vttest` and `tmux` inside WSL. The findings this produced are issues #123-#126 and #128-#132,
+with the cases that judge themselves ported into `XTerm.NET.Tests/VtTestConformanceTests`.
+
 ## Assets
 
 Everything here is **CC0 or public domain** and safe to redistribute. All of it comes from Wikimedia

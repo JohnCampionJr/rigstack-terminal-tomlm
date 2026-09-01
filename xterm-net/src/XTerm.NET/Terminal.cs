@@ -68,13 +68,37 @@ public class Terminal : IDisposable
     /// the DEC behaviour programs rely on for a clean slate -- and resizes the grid to 132 or 80
     /// columns. The caller gates this on Allow80To132 (mode 40), as xterm does.
     /// </summary>
-    public void SetColumnMode(bool wide)
+    public void SetColumnMode(bool wide) => SetPageWidth(wide ? 132 : 80, clear: !NoClearOnColumnChange);
+
+    /// <summary>
+    /// DECNCSM (mode 95): whether a DECCOLM column change keeps the screen instead of erasing it.
+    /// </summary>
+    public bool NoClearOnColumnChange { get; set; }
+
+    /// <summary>
+    /// Sets the page width, resetting the margins and homing the cursor, and erasing only when
+    /// asked to.
+    /// </summary>
+    /// <remarks>
+    /// The erase is the only thing the three ways in here disagree about, which is why it is a
+    /// parameter rather than something each caller repeats:
+    ///
+    /// <list type="bullet">
+    /// <item>DECCOLM erases, which is the DEC behaviour programs rely on for a clean slate.</item>
+    /// <item>DECCOLM with DECNCSM set does not, which is what that mode is for.</item>
+    /// <item>DECSCPP never does. It sets the page width and says nothing about the contents.</item>
+    /// </list>
+    /// </remarks>
+    internal void SetPageWidth(int columns, bool clear)
     {
-        ColumnMode132 = wide;
-        Resize(wide ? 132 : 80, Rows);
+        ColumnMode132 = columns >= 132;
+        Resize(columns, Rows);
         Buffer.SetScrollRegion(0, Rows - 1);
         Buffer.SetLeftRightMargins(0, Cols - 1);
-        _inputHandler.EraseWholeScreen();
+
+        if (clear)
+            _inputHandler.EraseWholeScreen();
+
         Buffer.SetCursor(0, 0);
     }
 
@@ -142,6 +166,13 @@ public class Terminal : IDisposable
     /// Mode 1034 (eightBitInput).
     /// </summary>
     public bool EightBitInput { get; set; }
+
+    /// <summary>DECNRCM (mode 42): whether national replacement sets are in force.</summary>
+    /// <remarks>
+    /// A designated national set behaves as ASCII while this is false, so changing it re-resolves
+    /// what is already designated rather than only affecting the next designation.
+    /// </remarks>
+    public bool NationalReplacementCharsets { get; set; }
     
     /// <summary>
     /// When enabled, pressing Meta+key sends ESC followed by the key.
@@ -889,6 +920,11 @@ public class Terminal : IDisposable
         _inputHandler.ResetProtectionMode();
         LineFeedMode = false;
 
+        // Before ResetCharsets, so the designations it clears are re-resolved through a flag
+        // that is already down. DECRQM reported mode 42 as reset while a set designated after
+        // a soft reset was still being translated -- state and report disagreeing.
+        NationalReplacementCharsets = false;
+        NoClearOnColumnChange = false;
         _inputHandler.ResetCharsets();
         _normalBuffer?.ResetSavedCursor();
         _altBuffer?.ResetSavedCursor();
@@ -922,6 +958,11 @@ public class Terminal : IDisposable
             for (var i = 0; i < _altBuffer.Lines.Length; i++)
                 _altBuffer.Lines[i]?.Fill(global::XTerm.Buffer.BufferCell.Space, 0, Cols);
         }
+
+        // Replies go back to 7-bit. S8C1T is a choice a program made about this session, and
+        // RIS is where a session's choices end -- leaving it set would send 8-bit C1 controls
+        // to whatever runs next, which never asked for them.
+        EightBitControls = false;
 
         // Title modes go back to plain text; the titles themselves and the title stacks
         // survive, as they do in xterm.
@@ -961,6 +1002,19 @@ public class Terminal : IDisposable
         SixelDisplayMode = false;
         SixelPrivateColorRegisters = true;
         SixelCursorRight = false;
+
+        // Same failure, two modes this change added. DECNCSM surviving RIS means the next
+        // DECCOLM silently skips the clean slate DEC guarantees; DECNRCM surviving it means
+        // the next program to designate a national set gets one it never asked for, since
+        // ResetCharsets clears the designations but not the flag they resolve through.
+        NoClearOnColumnChange = false;
+        NationalReplacementCharsets = false;
+        _inputHandler.RefreshDesignatedCharsets();
+
+        // ResetStoredModes says "for RIS" and only the SOFT reset was calling it, so every
+        // stored toggle survived the hard one -- DECRQM reported DECNRCM as still set after
+        // RIS had already put the behaviour back. The report and the behaviour now agree.
+        _inputHandler.ResetStoredModes();
 
         // And the charset designations, with the SO/SI shift state. InputHandler.ResetCharsets
         // existed for exactly this and was called from nowhere, so a program that designated line
@@ -1474,8 +1528,72 @@ public class Terminal : IDisposable
     internal MouseTracker GetMouseTracker() => _mouseTracker;
 
     // Internal methods for raising events (called by InputHandler)
-    internal void RaiseDataReceived(string data) => 
+    /// <summary>
+    /// Whether this terminal's own replies use 8-bit C1 controls, per S7C1T and S8C1T.
+    /// </summary>
+    /// <remarks>
+    /// Output only. Mode 1034 is the other direction -- what the KEYBOARD sends -- and the two
+    /// are independent.
+    /// </remarks>
+    public bool EightBitControls { get; set; }
+
+    /// <summary>
+    /// Sends a reply, in 7-bit or 8-bit form depending on S7C1T/S8C1T.
+    /// </summary>
+    /// <remarks>
+    /// <para>Converted HERE rather than at the fifty-odd places that build a reply. Every one of
+    /// them writes the 7-bit form, which stays readable and is what the tests are written
+    /// against; this is the single point where the choice can be applied without any of them
+    /// having to remember it exists.</para>
+    ///
+    /// <para>Only the LEADING introducer and a trailing ST are rewritten, deliberately. A reply
+    /// payload can contain anything -- base64 in OSC 52, a settings body in DECRQSS -- and
+    /// rewriting every ESC pair found anywhere would corrupt one that happened to look like an
+    /// introducer.</para>
+    /// </remarks>
+    /// <summary>
+    /// Sends INPUT-direction data -- pasted text, and anything else standing in for what a
+    /// keyboard would have sent -- with no C1 conversion.
+    /// </summary>
+    /// <remarks>
+    /// Separate from <see cref="RaiseDataReceived"/> because S7C1T and S8C1T describe the
+    /// form of the terminal's own REPORTS. Running paste through that conversion rewrote
+    /// the leading ESC of a bracketed paste and left the closing bracket alone, so the two
+    /// halves of the frame disagreed and the application never saw the paste end.
+    /// </remarks>
+    internal void RaiseInputData(string data) =>
         DataReceived?.Invoke(this, new TerminalEvents.DataEventArgs(data));
+
+    internal void RaiseDataReceived(string data) =>
+        DataReceived?.Invoke(this, new TerminalEvents.DataEventArgs(
+            EightBitControls ? ToEightBitControls(data) : data));
+
+    private static string ToEightBitControls(string data)
+    {
+        if (data.Length < 2 || data[0] != '\u001b')
+            return data;
+
+        var c1 = data[1] switch
+        {
+            '[' => '\u009b',   // CSI
+            'P' => '\u0090',   // DCS
+            ']' => '\u009d',   // OSC
+            '^' => '\u009e',   // PM
+            '_' => '\u009f',   // APC
+            _ => '\u0000',
+        };
+
+        if (c1 == '\u0000')
+            return data;
+
+        var body = data[2..];
+
+        // The string terminator that closes a DCS, OSC, PM or APC goes with it.
+        if (body.EndsWith('\u001b' + "\\", StringComparison.Ordinal))
+            body = body[..^2] + '\u009c';
+
+        return c1 + body;
+    }
 
     internal void RaiseClipboardWriteRequested(string target, string mimeType, byte[] data) =>
         RaiseClipboardWriteRequested(target, new[] { new TerminalEvents.ClipboardFormat(mimeType, data) });
@@ -1702,28 +1820,10 @@ public class Terminal : IDisposable
                 break;
 
             case 0x09: // HT - Tab
-                // A tab at the PHANTOM column is where curses' famous more(1) bug lives: it fills
-                // a row and then tabs. With DECSET 41 the tab wraps first, as the printed
-                // character would have, and lands on the new row's first stop; without it the tab
-                // is absorbed where it stands, and the next printable does the wrapping.
-                if (_buffer.PendingWrap)
-                {
-                    if (!MoreFixMode)
-                        break;
-
-                    if (_buffer.Y == _buffer.ScrollBottom)
-                        _buffer.ScrollUp(1);
-                    else
-                        _buffer.SetCursor(_buffer.X, _buffer.Y + 1);
-                    _buffer.CarriageReturn();
-                }
-
-                // Was hardcoded to 8 while CHT and CBT honoured Options.TabStopWidth, so the two
-                // tab motions disagreed on the same screen. Both go through the stop set now --
-                // and stop at the right MARGIN for a cursor inside one, as DEC tabs always have.
-                var tabLimit = LeftRightMarginMode && _buffer.X <= _buffer.ScrollRight
-                    ? _buffer.ScrollRight : Cols - 1;
-                _buffer.SetCursor(Math.Min(NextTabStop(_buffer.X), tabLimit), _buffer.Y);
+                // The motion lives with CHT, which is n of these -- see InputHandler.Tab.
+                // They were separate and drifted twice, most recently over the phantom
+                // column, where only this one checked for a pending wrap.
+                _inputHandler.Tab();
                 break;
 
             case 0x0A: // LF - Line Feed
@@ -1919,7 +2019,13 @@ public class Terminal : IDisposable
 
         text = PrepareForPaste(text);
 
-        RaiseDataReceived(BracketedPasteMode
+        // RaiseInputData, not RaiseDataReceived: this is keyboard-direction traffic, and the
+        // reply converter would rewrite the OPENING bracket to 0x9B and leave the closing one
+        // 7-bit -- by its own rule, which only touches a leading introducer. An application
+        // watching for ESC [ 201 ~ would then never see the end of the paste. S8C1T describes
+        // what the terminal REPORTS; mode 1034 is the keyboard direction, and they are
+        // independent.
+        RaiseInputData(BracketedPasteMode
             ? $"\u001b[200~{text}\u001b[201~"
             : text);
     }

@@ -38,6 +38,34 @@ public partial class InputHandler
     /// through RefreshActiveCharset so the two cannot drift.
     /// </summary>
     private Dictionary<char, string>? _activeCharset;
+
+    /// <summary>What each G-set was DESIGNATED as, by its escape identifier.</summary>
+    /// <remarks>
+    /// Kept alongside the resolved tables because a designation outlives its resolution: a
+    /// national set resolves to ASCII while DECNRCM is reset and to itself once it is set, and
+    /// the program that designated it does not designate again when the mode changes.
+    /// </remarks>
+    private readonly Dictionary<CharsetMode, string> _charsetIds = new();
+
+    /// <summary>Which G-sets were designated as 96-character sets.</summary>
+    /// <remarks>
+    /// The identifier alone does not say: 'A' is the UK set in one space and ISO Latin-1 in the
+    /// other, so re-resolving a designation needs to know which space it came from.
+    /// </remarks>
+    private readonly HashSet<CharsetMode> _ninetySixSets = new();
+
+    /// <summary>
+    /// The set a SINGLE shift has invoked for the next printed character, or null.
+    /// </summary>
+    /// <remarks>
+    /// Separate from <see cref="_activeCharset"/> because it outranks it for exactly one
+    /// character and then stops: SS2 and SS3 shift the character that follows and nothing
+    /// after it. Holding it as pending state rather than swapping the active set is what makes
+    /// "and then stops" automatic instead of something the print path has to remember to undo.
+    /// </remarks>
+    private Dictionary<char, string>? _singleShiftCharset;
+
+    private bool _singleShiftPending;
     private CharsetMode _currentCharset;
 
     // Variation selector and combining character constants
@@ -152,6 +180,7 @@ public partial class InputHandler
         // path can only stop. Rare enough to hand to Print rather than teach twice -- the default
         // is on, so nothing in normal output takes this branch.
         if (!UseRunPrinting || _terminal.InsertMode || _activeCharset is not null
+            || _singleShiftPending
             || _buffer.HasMultiRowSizedRuns || !_terminal.Options.Wraparound)
         {
             foreach (var b in data)
@@ -259,6 +288,7 @@ public partial class InputHandler
         // path can only stop. Rare enough to hand to Print rather than teach twice -- the default
         // is on, so nothing in normal output takes this branch.
         if (!UseRunPrinting || _terminal.InsertMode || _activeCharset is not null
+            || _singleShiftPending
             || _buffer.HasMultiRowSizedRuns || !_terminal.Options.Wraparound)
         {
             for (var k = 0; k < count; k++)
@@ -726,6 +756,23 @@ public partial class InputHandler
                 _statusDisplayType = parameters.GetParam(0, 0);
                 break;
 
+            case CsiCommand.RequestTerminalParameters:
+                RequestTerminalParameters(parameters);
+                break;
+
+            case CsiCommand.SetColumnsPerPage:
+                // DECSCPP. 80 and 132 are the only widths DEC defines, and 0 means 80.
+                // It does NOT erase: unlike DECCOLM it says nothing about the contents,
+                // and vttest's page-format test fills the screen and then checks it.
+                // 0, 80 and 132 are the widths DECSCPP defines, and 0 means 80. Anything else
+                // is ignored rather than rounded: coercing it turned CSI 81 $ | into a resize
+                // to 80 and CSI 999 $ | into one to 132, so a malformed request moved the
+                // screen instead of being declined.
+                var pageColumns = parameters.GetParam(0, 0);
+                if (pageColumns is 0 or 80 or 132)
+                    _terminal.SetPageWidth(pageColumns == 132 ? 132 : 80, clear: false);
+                break;
+
             case CsiCommand.SetLinesPerScreen:
                 var screenLines = parameters.GetParam(0, 0);
                 if (screenLines >= 1)
@@ -875,6 +922,18 @@ public partial class InputHandler
                 case "7": // DECSC - Save Cursor
                     SaveCursor();
                     break;
+                case "N": // SS2 - single shift G2, for the next character only
+                    InvokeSingleShift(CharsetMode.G2);
+                    break;
+                case "O": // SS3 - single shift G3
+                    InvokeSingleShift(CharsetMode.G3);
+                    break;
+                case "n": // LS2 - lock G2 into GL until the next shift
+                    LockingShift(CharsetMode.G2);
+                    break;
+                case "o": // LS3 - lock G3 into GL
+                    LockingShift(CharsetMode.G3);
+                    break;
                 case "Z": // DECID - the ancient identify; answers like the primary DA
                     _terminal.RaiseDataReceived(PrimaryDeviceAttributes);
                     break;
@@ -919,8 +978,36 @@ public partial class InputHandler
                 case '+': // Designate G3 character set
                     SetCharset(CharsetMode.G3, finalChar);
                     break;
+                case '-': // Designate G1 as a 96-character set
+                case '.': // Designate G2
+                case '/': // Designate G3
+                    // The 96-set forms, which the 94-set cases above do not cover. Their
+                    // identifiers live in a DIFFERENT space: 'A' here is ISO Latin-1, where
+                    // 'A' after ESC ( is the United Kingdom set. Routing these through the
+                    // same lookup would designate UK for a program that asked for Latin-1 and
+                    // silently turn its '#' into a pound sign.
+                    SetNinetySixCharset(
+                        intermediateChar switch
+                        {
+                            '-' => CharsetMode.G1,
+                            '.' => CharsetMode.G2,
+                            _ => CharsetMode.G3,
+                        },
+                        finalChar);
+                    break;
+
                 case '#': // DEC line attribute sequences
                     HandleDecLineAttribute(finalChar);
+                    break;
+
+                case ' ': // ANSI announcement sequences
+                    // S7C1T (ESC SP F) and S8C1T (ESC SP G) choose the form the terminal's own
+                    // REPLIES take: ESC [ or the single byte 0x9B. They say nothing about what
+                    // is accepted on input, which has always taken both.
+                    if (finalChar == "F")
+                        _terminal.EightBitControls = false;
+                    else if (finalChar == "G")
+                        _terminal.EightBitControls = true;
                     break;
             }
         }
@@ -1769,9 +1856,14 @@ public partial class InputHandler
                     _terminal.CursorVisible = true;
                     break;
 
+                case TerminalMode.NoClearOnColumnChange:
+                    _terminal.NoClearOnColumnChange = true;
+                    break;
+
                 case TerminalMode.NationalCharset:
-                    // Stored so DECRQM can answer truthfully; nothing acts on it.
                     TrySetStoredMode(mode, isPrivate: true, value: true);
+                    _terminal.NationalReplacementCharsets = true;
+                    RefreshDesignatedCharsets();
                     break;
 
                 case TerminalMode.ReverseWraparound:

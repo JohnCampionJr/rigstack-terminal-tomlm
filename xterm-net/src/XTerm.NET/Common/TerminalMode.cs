@@ -70,6 +70,9 @@ public enum TerminalMode
     /// </summary>
     NationalCharset = 42,
 
+    /// <summary>DECNCSM - a DECCOLM column change keeps the screen instead of erasing it.</summary>
+    NoClearOnColumnChange = 95,
+
     /// <summary>
     /// Sixel Display Mode (DECSDM).
     /// </summary>
