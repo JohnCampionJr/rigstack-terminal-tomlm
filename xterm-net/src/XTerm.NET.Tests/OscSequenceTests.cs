@@ -980,4 +980,93 @@ public class OscSequenceTests
         Assert.Equal(3, responses.Count);
         Assert.All(responses, r => Assert.Contains("rgb:", r));
     }
+
+    /// <summary>
+    /// OSC 50 ; ? -- vttest menu 11.8.4.2. The emulator has no font; whatever draws its cells does,
+    /// so the question goes to the host the way OSC 52's does.
+    /// </summary>
+    [Fact]
+    public void OscFontQuery_AnswersWithTheNameTheHostGives()
+    {
+        var terminal = CreateTerminal();
+        var responses = new List<string>();
+        terminal.DataReceived += (_, e) => responses.Add(e.Data);
+        terminal.FontQueryRequested += (_, e) =>
+        {
+            e.FontName = "Cascadia Mono";
+            e.Handled = true;
+        };
+
+        terminal.Write("\x1B]50;?\x1B\\");
+
+        Assert.Equal("\x1B]50;Cascadia Mono\x1B\\", Assert.Single(responses));
+    }
+
+    /// <summary>
+    /// The whole point of handling this at all: a host that will not say still produces a REPLY.
+    /// xterm answers a font query it cannot satisfy with a nameless OSC 50, and vttest reads
+    /// exactly that -- it skips entries whose reply carries no name. Silence leaves the asking
+    /// program waiting forever.
+    /// </summary>
+    [Fact]
+    public void OscFontQuery_AnswersNamelesslyWhenNoHostDoes()
+    {
+        var terminal = CreateTerminal();
+        var responses = new List<string>();
+        terminal.DataReceived += (_, e) => responses.Add(e.Data);
+
+        terminal.Write("\x1B]50;?\x1B\\");
+
+        Assert.Equal("\x1B]50\x1B\\", Assert.Single(responses));
+    }
+
+    [Fact]
+    public void OscFontQuery_AnswersNamelesslyForAMenuIndex()
+    {
+        // There is no font menu to index, so every indexed form is declined -- and never put to
+        // the host, which has no menu either.
+        var terminal = CreateTerminal();
+        var responses = new List<string>();
+        var asked = false;
+        terminal.DataReceived += (_, e) => responses.Add(e.Data);
+        terminal.FontQueryRequested += (_, _) => asked = true;
+
+        terminal.Write("\x1B]50;?#2\x1B\\");
+        terminal.Write("\x1B]50;?+1\x1B\\");
+
+        Assert.False(asked);
+        Assert.Equal(new[] { "\x1B]50\x1B\\", "\x1B]50\x1B\\" }, responses);
+    }
+
+    [Fact]
+    public void OscFontQuery_TerminatesTheReplyTheWayTheRequestWasTerminated()
+    {
+        var terminal = CreateTerminal();
+        var responses = new List<string>();
+        terminal.DataReceived += (_, e) => responses.Add(e.Data);
+
+        terminal.Write("\x1B]50;?\x07");
+
+        Assert.Equal("\x1B]50\x07", Assert.Single(responses));
+    }
+
+    [Fact]
+    public void OscFontSet_IsLeftToTheHostAndReportedUnrecognised()
+    {
+        // Setting a font is the host's business, so the terminal answers nothing and says it did
+        // not act -- a listener on OscReceived can, without having to work out whether it already
+        // had been.
+        var terminal = CreateTerminal();
+        var responses = new List<string>();
+        TerminalEvents.OscReceivedEventArgs? received = null;
+        terminal.DataReceived += (_, e) => responses.Add(e.Data);
+        terminal.OscReceived += (_, e) => received = e;
+
+        terminal.Write("\x1B]50;9x15\x1B\\");
+
+        Assert.Empty(responses);
+        Assert.NotNull(received);
+        Assert.False(received!.Recognized);
+        Assert.Equal("9x15", received.Data);
+    }
 }

@@ -77,10 +77,9 @@ public class CsiCommandExtensionsTests
 
     /// <summary>
     /// '&lt;' and '=' were never stripped, so they are recognised only where the map lists them --
-    /// the Kitty keyboard pop and set forms, and nothing else.
+    /// the Kitty keyboard pop and set forms, the tertiary DA, and nothing else.
     /// </summary>
     [Theory]
-    [InlineData("=c")]
     [InlineData("<c")]
     [InlineData("=S")]
     [InlineData("<m")]

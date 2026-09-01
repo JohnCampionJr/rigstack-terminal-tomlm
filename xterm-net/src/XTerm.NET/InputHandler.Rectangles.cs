@@ -5,8 +5,9 @@ using XTerm.Parser;
 namespace XTerm;
 
 /// <summary>
-/// The DEC rectangular-area operations: copy, fill and erase (DECCRA, DECFRA, DECERA). One file
-/// because they share one coordinate discipline, spelled out on <see cref="TryReadRectangle"/>.
+/// The DEC rectangular-area operations: copy, fill, erase and the two that change attributes
+/// rather than characters (DECCRA, DECFRA, DECERA, DECSERA, DECCARA, DECRARA). One file because
+/// they share one coordinate discipline, spelled out on <see cref="TryReadRectangle"/>.
 /// </summary>
 public partial class InputHandler
 {
@@ -166,6 +167,118 @@ public partial class InputHandler
 
                 var cell = snapshot[row, col];
                 line.SetCell(destCol, ref cell);
+            }
+        }
+    }
+
+    /// <summary>
+    /// DECCARA (<c>CSI Pt;Pl;Pb;Pr;Pm $ r</c>) and DECRARA (<c>CSI Pt;Pl;Pb;Pr;Pm $ t</c>) -- set
+    /// or toggle the named SGR attributes over an area, leaving the characters alone.
+    /// </summary>
+    /// <remarks>
+    /// <para>The attribute half of the rectangle family, and the only consumer DECSACE has. That
+    /// setting was parsed, stored and read back by DECRQSS while nothing acted on it, because the
+    /// two controls it governs did not exist: a terminal reporting a rectangle-or-stream choice it
+    /// then ignored.</para>
+    /// <para>DECSACE 2 means the RECTANGLE the four coordinates describe. Anything else -- the
+    /// default included -- means the STREAM running from the top-left position to the bottom-right
+    /// one, so the first row runs from its column to the end of the line, the last row from the
+    /// start of the line to its column, and every row between them runs whole.</para>
+    /// <para>Only the six attributes DEC defines are touched: 1 bold, 4 underline, 5 blink,
+    /// 7 inverse and their resets 22, 24, 25, 27, plus xterm's 8/28 for invisible. Parameter 0
+    /// means the first four together -- NOT invisible, which xterm leaves out of its SGR_MASK --
+    /// and reverses rather than clears them under DECRARA. Everything else in the list is ignored;
+    /// colours are not in the standard, and honouring an SGR parameter here that a real VT420 would
+    /// not is how a program's careful rectangle ends up recoloured on one terminal only.</para>
+    /// <para>Every cell in the area is marked, the trailing half of a wide character included. xterm
+    /// skips cells it has never drawn -- it tracks that per cell, and a blank it has never touched
+    /// is not a blank it will colour -- but a line here is born full of spaces, so there is no such
+    /// state to test for and the only cell that reads as empty is a wide character's second half.
+    /// Skipping THAT would leave a character's two halves disagreeing about their own rendition.</para>
+    /// </remarks>
+    private void MarkRectangularArea(Params parameters, bool reverse)
+    {
+        if (!TryReadRectangle(parameters, 0, out var top, out var left, out var bottom, out var right))
+            return;
+
+        var exact = _attributeChangeExtent == 2;
+
+        for (var row = top; row <= bottom; row++)
+        {
+            var line = _buffer.Lines[_buffer.YBase + row];
+            if (line is null)
+                continue;
+
+            var from = exact || row == top ? left : 0;
+            var to = exact || row == bottom ? right : _terminal.Cols - 1;
+
+            for (var col = from; col <= to && col < line.Length; col++)
+            {
+                var cell = line[col];
+                ApplyAreaAttributes(parameters, 4, ref cell.Attributes, reverse);
+                line.SetCell(col, ref cell);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Applies the DECCARA/DECRARA attribute list starting at <paramref name="first"/> to one
+    /// cell's rendition.
+    /// </summary>
+    private static void ApplyAreaAttributes(Params parameters, int first, ref AttributeData attributes, bool reverse)
+    {
+        for (var i = first; i < parameters.Length; i++)
+        {
+            switch (parameters.GetParam(i, 0))
+            {
+                case 0:
+                    if (reverse)
+                    {
+                        attributes.SetBold(!attributes.IsBold());
+                        attributes.SetUnderline(!attributes.IsUnderline());
+                        attributes.SetBlink(!attributes.IsBlink());
+                        attributes.SetInverse(!attributes.IsInverse());
+                    }
+                    else
+                    {
+                        attributes.SetBold(false);
+                        attributes.SetUnderline(false);
+                        attributes.SetBlink(false);
+                        attributes.SetInverse(false);
+                    }
+                    break;
+                case 1:
+                    attributes.SetBold(reverse ? !attributes.IsBold() : true);
+                    break;
+                case 4:
+                    attributes.SetUnderline(reverse ? !attributes.IsUnderline() : true);
+                    break;
+                case 5:
+                    attributes.SetBlink(reverse ? !attributes.IsBlink() : true);
+                    break;
+                case 7:
+                    attributes.SetInverse(reverse ? !attributes.IsInverse() : true);
+                    break;
+                case 8:
+                    attributes.SetInvisible(reverse ? !attributes.IsInvisible() : true);
+                    break;
+                // The resets have no meaning under DECRARA -- reversing an attribute already says
+                // both directions -- so xterm reads them only when setting, and so does this.
+                case 22 when !reverse:
+                    attributes.SetBold(false);
+                    break;
+                case 24 when !reverse:
+                    attributes.SetUnderline(false);
+                    break;
+                case 25 when !reverse:
+                    attributes.SetBlink(false);
+                    break;
+                case 27 when !reverse:
+                    attributes.SetInverse(false);
+                    break;
+                case 28 when !reverse:
+                    attributes.SetInvisible(false);
+                    break;
             }
         }
     }

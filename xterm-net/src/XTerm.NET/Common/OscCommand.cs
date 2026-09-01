@@ -82,6 +82,14 @@ public enum OscCommand
     PointerShape = 22,
 
     /// <summary>
+    /// Font operations (OSC 50), xterm.
+    /// Format: OSC 50 ; ? ST         - which font is in use
+    ///         OSC 50 ; ? #n ST      - which font entry n is
+    ///         OSC 50 ; name ST      - set the font
+    /// </summary>
+    FontOps = 50,
+
+    /// <summary>
     /// Clipboard operations (OSC 52).
     /// Format: OSC 52 ; c ; data ST
     /// </summary>

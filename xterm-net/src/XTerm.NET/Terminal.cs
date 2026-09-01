@@ -732,6 +732,18 @@ public class Terminal : IDisposable
     public event EventHandler<TerminalEvents.WindowInfoRequestedEventArgs>? WindowInfoRequested;
 
     /// <summary>
+    /// Fired when a program asks which font the terminal is displayed in (OSC 50 ; ? ST).
+    /// </summary>
+    /// <remarks>
+    /// The emulator has no font of its own; the host that draws its cells does. Answer by setting
+    /// <see cref="TerminalEvents.FontQueryEventArgs.FontName"/> and
+    /// <see cref="TerminalEvents.FontQueryEventArgs.Handled"/>. Declining -- by not subscribing,
+    /// or by leaving the name unset -- still sends a reply, xterm's nameless OSC 50, so the asking
+    /// program is told rather than left waiting.
+    /// </remarks>
+    public event EventHandler<TerminalEvents.FontQueryEventArgs>? FontQueryRequested;
+
+    /// <summary>
     /// Fired when the active buffer is changed.
     /// </summary>
     public event EventHandler<TerminalEvents.BufferChangedEventArgs>? BufferChanged;
@@ -1231,6 +1243,9 @@ public class Terminal : IDisposable
         // stored toggle survived the hard one -- DECRQM reported DECNRCM as still set after
         // RIS had already put the behaviour back. The report and the behaviour now agree.
         _inputHandler.ResetStoredModes();
+
+        // DECSACE, which a SOFT reset deliberately leaves alone.
+        _inputHandler.ResetAttributeChangeExtent();
 
         // And the charset designations, with the SO/SI shift state. InputHandler.ResetCharsets
         // existed for exactly this and was called from nowhere, so a program that designated line
@@ -1935,6 +1950,13 @@ public class Terminal : IDisposable
     internal void RaiseWindowFullscreened() => 
         WindowFullscreened?.Invoke(this, EventArgs.Empty);
     
+    internal TerminalEvents.FontQueryEventArgs RaiseFontQueryRequested()
+    {
+        var args = new TerminalEvents.FontQueryEventArgs();
+        FontQueryRequested?.Invoke(this, args);
+        return args;
+    }
+
     internal TerminalEvents.WindowInfoRequestedEventArgs RaiseWindowInfoRequested(WindowInfoRequest request)
     {
         var args = new TerminalEvents.WindowInfoRequestedEventArgs(request);
@@ -2166,6 +2188,7 @@ public class Terminal : IDisposable
         DataReceived = null;
         ClipboardWriteRequested = null;
         ClipboardReadRequested = null;
+        FontQueryRequested = null;
         CursorStyleChanged = null;
         SynchronizedOutputChanged = null;
         BufferChanged = null;

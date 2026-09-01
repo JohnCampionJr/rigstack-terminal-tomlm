@@ -716,6 +716,14 @@ public partial class InputHandler
                 CopyRectangularArea(parameters);
                 break;
 
+            case CsiCommand.ChangeAttributesRectangularArea:
+                MarkRectangularArea(parameters, reverse: false);
+                break;
+
+            case CsiCommand.ReverseAttributesRectangularArea:
+                MarkRectangularArea(parameters, reverse: true);
+                break;
+
             case CsiCommand.FillRectangularArea:
                 FillRectangularArea(parameters);
                 break;
@@ -803,6 +811,18 @@ public partial class InputHandler
 
             case CsiCommand.RequestChecksumRectangularArea:
                 RequestChecksumRectangularArea(parameters);
+                break;
+
+            case CsiCommand.RequestDisplayedExtent:
+                RequestDisplayedExtent();
+                break;
+
+            case CsiCommand.RequestUserPreferredSupplementalSet:
+                RequestUserPreferredSupplementalSet();
+                break;
+
+            case CsiCommand.RequestTerminalStateReport:
+                RequestTerminalStateReport(parameters);
                 break;
 
             case CsiCommand.DeviceStatusReport:
@@ -1240,6 +1260,10 @@ public partial class InputHandler
                     HandlePointerShape(arg);
                     break;
 
+                case OscCommand.FontOps:
+                    recognized = HandleFontOps(arg);
+                    break;
+
                 case OscCommand.Clipboard:
                     HandleClipboard(arg);
                     break;
@@ -1559,6 +1583,18 @@ public partial class InputHandler
             // "no cartridge ROM".
             _terminal.RaiseDataReceived(SecondaryDeviceAttributes);
         }
+        else if (identifier.StartsWith('='))
+        {
+            // Tertiary DA: CSI = Pp c, answered with DECRPTUI -- DCS ! | <8 hex digits> ST, the
+            // "terminal unit ID". There is no unit to identify, so the site code and serial number
+            // are zeros, which is exactly what xterm reports and what vttest decodes and displays.
+            //
+            // VT400 and up only, as in xterm: DECRPTUI arrived with the VT420, and a program that
+            // has put the terminal into a VT100 or VT200 conformance level with DECSCL is entitled
+            // to the silence a terminal of that vintage would have given it.
+            if (_terminal.ConformanceLevel >= 64)
+                _terminal.RaiseDataReceived("\u001bP!|00000000\u001b\\");
+        }
         else if (identifier.Length == 1)
         {
             // Primary DA: CSI ? Pl ; ... c, from the DECSCL operating level.
@@ -1567,11 +1603,9 @@ public partial class InputHandler
 
         // Any other prefix is left unanswered. "?c" is the one that used to go wrong: it is not the
         // secondary DA, but it sets isPrivate, so it was handed the secondary reply -- the answer to
-        // a question the program had not asked, while it was still waiting for the one it had.
-        // Neither it nor the tertiary DA, "=c", reaches this method any more: the lookup matches the
-        // whole identifier and only "c" and ">c" are listed, so both resolve to Unknown. Silence is
-        // the right outcome for the tertiary regardless: it asks for a unit ID this terminal does
-        // not have, and terminals without DECRPTUI say nothing.
+        // a question the program had not asked, while it was still waiting for the one it had. It
+        // does not reach this method any more: the lookup matches the whole identifier and "?c" is
+        // not listed, so it resolves to Unknown.
     }
 
     /// <summary>

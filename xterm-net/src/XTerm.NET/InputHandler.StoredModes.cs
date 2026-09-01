@@ -50,15 +50,26 @@ public partial class InputHandler
         // DECHCCM because the hardware it coupled is gone.
 
     /// <summary>
-    /// Stored display SETTINGS, kept for the same reason as the stored modes: DECRQSS answers
-    /// them, and "recognised, at its default" beats a denial. Extent is DECSACE's -- the rect
-    /// operations read it when the standard grows teeth here; the status-display pair have no
-    /// status line to point at and never will.
+    /// DECSACE's extent, which DECCARA and DECRARA read to decide between a rectangle and a
+    /// stream, and which DECRQSS reports.
     /// </summary>
     private int _attributeChangeExtent;   // DECSACE (* x)
     // DECSASD ($ }) and DECSSDT ($ ~) were cached here for DECRQSS to report. They are the
     // terminal's state now, and DECRQSS reads it there -- a second copy is what let RIS undo the
     // status line while the report went on describing the one that had been undone.
+
+    /// <summary>
+    /// Puts DECSACE back to its default, for RIS.
+    /// </summary>
+    /// <remarks>
+    /// Separate from <see cref="ResetStoredModes"/>, which the SOFT reset calls too. DECSACE
+    /// survives DECSTR on a real terminal and in xterm -- it is cleared in the full-reset branch
+    /// of <c>ReallyReset</c> and nowhere else -- and now that DECCARA and DECRARA read it, the
+    /// difference between the two resets is the difference between a program's rectangle landing
+    /// as a rectangle and landing as a stream. The status-display pair reset with the status line
+    /// itself, in the terminal that now owns them.
+    /// </remarks>
+    internal void ResetAttributeChangeExtent() => _attributeChangeExtent = 0;
 
     /// <summary>Sets or resets a stored mode; false when the mode is not one of the stored set.</summary>
     private bool TrySetStoredMode(int mode, bool isPrivate, bool value)

@@ -50,13 +50,57 @@ public class ChecksumReportTests
     }
 
     [Fact]
-    public void A_cell_nothing_ever_wrote_counts_as_a_space()
+    public void A_run_of_blanks_counts_once_for_the_first_cell()
     {
-        // Erased and never-written alike: DEC terminals trim trailing blanks and esctest's client
-        // side reasons that away, but only if blanks come back as spaces rather than zeros.
+        // DEC terminals trim the blanks at the end of a row rather than counting them, and the
+        // first cell of the area is the documented exception -- it counts whatever it holds, which
+        // is what lets esctest read a written space back as 0x20 one cell at a time.
         var terminal = NewTerminal();
 
-        Assert.Equal(Report(2, 3 * 0x20), Reply(terminal, $"{Esc}[2;0;2;1;2;3*y"));
+        Assert.Equal(Report(2, 0x20), Reply(terminal, $"{Esc}[2;0;2;1;2;3*y"));
+    }
+
+    [Fact]
+    public void A_single_blank_cell_is_a_space()
+    {
+        // The shape esctest reads content back in: one cell at a time, expecting the character it
+        // put there. Trimming that unconditionally would answer zero for every space on screen.
+        var terminal = NewTerminal();
+
+        Assert.Equal(Report(8, 0x20), Reply(terminal, $"{Esc}[8;0;2;1;2;1*y"));
+    }
+
+    [Fact]
+    public void A_blank_between_two_characters_counts()
+    {
+        // Only TRAILING blanks are trimmed. One with text still to come on its row is interior,
+        // and vttest computes its expectation the same way.
+        var terminal = NewTerminal();
+        terminal.Write("a b");
+
+        Assert.Equal(Report(9, Sum("a b")), Reply(terminal, $"{Esc}[9;0;1;1;1;3*y"));
+    }
+
+    [Fact]
+    public void Blanks_trailing_a_row_are_trimmed()
+    {
+        // The same three cells as above with the tail cut off: 'a', a blank, and nothing after it
+        // on the row.
+        var terminal = NewTerminal();
+        terminal.Write("a b");
+
+        Assert.Equal(Report(10, 'a'), Reply(terminal, $"{Esc}[10;0;1;1;1;2*y"));
+    }
+
+    [Fact]
+    public void A_rows_trailing_blanks_do_not_carry_into_the_next()
+    {
+        // Trimming is per row: the blanks after "hi" end with row 1 rather than being revived by
+        // the "there" on row 2.
+        var terminal = NewTerminal(cols: 8, rows: 2);
+        terminal.Write($"hi{Esc}[2;1Hthere");
+
+        Assert.Equal(Report(11, Sum("hi") + Sum("there")), Reply(terminal, $"{Esc}[11*y"));
     }
 
     [Fact]
@@ -76,8 +120,9 @@ public class ChecksumReportTests
         var terminal = NewTerminal(cols: 10, rows: 3);
         terminal.Write("AB");
 
-        // A rect hanging off every edge still answers, for what the screen actually holds.
-        Assert.Equal(Report(4, Sum("AB") + (3 * 10 - 2) * 0x20),
+        // A rect hanging off every edge still answers, for what the screen actually holds -- the
+        // blanks after "AB" trail their row and the two rows below it, so none of them count.
+        Assert.Equal(Report(4, Sum("AB")),
                      Reply(terminal, $"{Esc}[4;0;1;1;99;99*y"));
     }
 
@@ -87,7 +132,7 @@ public class ChecksumReportTests
         var terminal = NewTerminal(cols: 4, rows: 2);
         terminal.Write("hi");
 
-        Assert.Equal(Report(5, Sum("hi") + 6 * 0x20), Reply(terminal, $"{Esc}[5*y"));
+        Assert.Equal(Report(5, Sum("hi")), Reply(terminal, $"{Esc}[5*y"));
     }
 
     [Fact]

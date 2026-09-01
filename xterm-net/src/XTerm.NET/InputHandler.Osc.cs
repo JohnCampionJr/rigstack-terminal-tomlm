@@ -724,6 +724,47 @@ public partial class InputHandler
         _terminal.RaiseDataReceived($"\u001b]22;{string.Join(",", answers)}\u001b\\");
     }
 
+    /// <summary>
+    /// OSC 50 -- the font controls. Only the QUERY half is answered here.
+    /// </summary>
+    /// <remarks>
+    /// <para>A font query is a question about something the emulator does not own: whatever draws
+    /// the cells picks the font, exactly as whatever owns the clipboard answers OSC 52. So it is
+    /// put to the host through <see cref="Terminal.FontQueryRequested"/>, and the host may decline
+    /// by not answering.</para>
+    /// <para>Declining is not silence, and that is the whole point of this method existing. xterm
+    /// answers a font query it cannot satisfy with a NAMELESS OSC 50 -- the reply with its
+    /// semicolon and name left off -- and vttest reads exactly that, skipping entries whose reply
+    /// carries no name. A client blocking on the report is told "not this one" instead of waiting
+    /// forever, which is the same argument that settled DECRQM and the pixel reports.</para>
+    /// <para>An INDEXED query -- <c>?#2</c>, <c>?+1</c> and the rest, asking after an entry of
+    /// xterm's font menu -- is always answered namelessly: there is no font menu to index. And a
+    /// bare <c>OSC 50 ; name</c> SETS the font, which is the host's business and none of the
+    /// emulator's; it is reported as unrecognised so a listener on <c>OscReceived</c> can act on it
+    /// without having to work out whether the terminal already did.</para>
+    /// </remarks>
+    /// <returns>False for the set form, which this does not act on.</returns>
+    private bool HandleFontOps(string data)
+    {
+        if (!data.StartsWith('?'))
+            return false;
+
+        // The name is asked for only when the query is bare. Anything trailing the '?' names a
+        // menu entry, and there is no menu.
+        string? name = null;
+        if (data.Length == 1)
+        {
+            var args = _terminal.RaiseFontQueryRequested();
+            if (args.Handled && !string.IsNullOrEmpty(args.FontName))
+                name = args.FontName;
+        }
+
+        _terminal.RaiseDataReceived(name is null
+            ? $"\u001b]50{_terminal.OscReplyTerminator}"
+            : $"\u001b]50;{name}{_terminal.OscReplyTerminator}");
+        return true;
+    }
+
     private void HandleClipboard(string data)
     {
         var parts = data.Split(new[] { ';' }, 2);
