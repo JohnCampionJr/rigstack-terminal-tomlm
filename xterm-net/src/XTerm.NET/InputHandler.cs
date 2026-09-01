@@ -63,17 +63,21 @@ public partial class InputHandler
     private readonly HashSet<CharsetMode> _ninetySixSets = new();
 
     /// <summary>
-    /// The set a SINGLE shift has invoked for the next printed character, or null.
+    /// The G-set a SINGLE shift has invoked for the next printed character, or null.
     /// </summary>
     /// <remarks>
-    /// Separate from <see cref="_activeCharset"/> because it outranks it for exactly one
+    /// <para>Separate from <see cref="_activeCharset"/> because it outranks it for exactly one
     /// character and then stops: SS2 and SS3 shift the character that follows and nothing
     /// after it. Holding it as pending state rather than swapping the active set is what makes
-    /// "and then stops" automatic instead of something the print path has to remember to undo.
+    /// "and then stops" automatic instead of something the print path has to remember to undo.</para>
+    ///
+    /// <para>The G-SET, not the table it resolved to when the shift arrived. A designation
+    /// between the shift and the character it shifts belongs to that character -- SS2 invokes
+    /// G2, and what G2 holds is a question with an answer at print time. Holding the table also
+    /// meant a reset could not reach it: RIS put the tables back and the pending shift went on
+    /// pointing at the one it had captured.</para>
     /// </remarks>
-    private Dictionary<char, string>? _singleShiftCharset;
-
-    private bool _singleShiftPending;
+    private CharsetMode? _singleShift;
     private CharsetMode _currentCharset;
 
     // Variation selector and combining character constants
@@ -188,7 +192,7 @@ public partial class InputHandler
         // path can only stop. Rare enough to hand to Print rather than teach twice -- the default
         // is on, so nothing in normal output takes this branch.
         if (!UseRunPrinting || _terminal.InsertMode || _activeCharset is not null
-            || _singleShiftPending
+            || _singleShift is not null
             || _buffer.HasMultiRowSizedRuns || !_terminal.Options.Wraparound)
         {
             foreach (var b in data)
@@ -296,7 +300,7 @@ public partial class InputHandler
         // path can only stop. Rare enough to hand to Print rather than teach twice -- the default
         // is on, so nothing in normal output takes this branch.
         if (!UseRunPrinting || _terminal.InsertMode || _activeCharset is not null
-            || _singleShiftPending
+            || _singleShift is not null
             || _buffer.HasMultiRowSizedRuns || !_terminal.Options.Wraparound)
         {
             for (var k = 0; k < count; k++)

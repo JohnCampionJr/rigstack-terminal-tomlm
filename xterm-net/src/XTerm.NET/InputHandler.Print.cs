@@ -392,17 +392,31 @@ public partial class InputHandler
         var translatedData = data;
         if (data.Length == 1)
         {
-            // A single shift outranks GL for this character and is spent doing it.
-            if (_singleShiftPending)
+            // A single shift outranks GL for this character and is spent doing it. Resolved
+            // here rather than when the shift arrived, so a designation in between counts.
+            if (_singleShift is { } shifted)
             {
-                translatedData = Charsets.TranslateChar(data[0], _singleShiftCharset);
-                _singleShiftCharset = null;
-                _singleShiftPending = false;
+                translatedData = Charsets.TranslateChar(data[0], _charsets.GetValueOrDefault(shifted));
+                _singleShift = null;
             }
             else
             {
                 translatedData = Charsets.TranslateChar(data[0], _activeCharset);
             }
+        }
+        else if (_singleShift is not null)
+        {
+            // A supplementary character is a graphic character too, and spends the shift like any
+            // other -- it just has nothing to spend it ON, because a 94- or 96-character set has no
+            // entry outside the BMP and TranslateChar takes a single code unit. Leaving the shift
+            // standing through it does not skip the shift, it MOVES it: the character after the
+            // emoji gets translated instead, so `SS2 <emoji> q` drew q as a box-drawing glyph on a
+            // terminal whose G2 the program had finished with.
+            //
+            // Second, after the length test rather than before it, because that is the branch every
+            // ordinary character takes -- see CLAUDE.md's first section. This one runs only for a
+            // surrogate pair, and only to clear a field.
+            _singleShift = null;
         }
 
         var width = GetStringCellWidth(translatedData);
@@ -812,11 +826,14 @@ public partial class InputHandler
     /// <summary>
     /// Shift In - Select G0 character set (SI, 0x0F).
     /// </summary>
+    /// <remarks>
+    /// A pending single shift survives this, as it survives SO and the locking shifts. SI used
+    /// to cancel one and the other three did not, which is three answers to one question: a
+    /// single shift is spent by the next GRAPHIC character, and a locking shift is not one.
+    /// </remarks>
     public void ShiftIn()
     {
         _currentCharset = CharsetMode.G0;
-        _singleShiftCharset = null;
-        _singleShiftPending = false;
         RefreshActiveCharset();
     }
 
@@ -838,21 +855,28 @@ public partial class InputHandler
     /// SS2 (ESC N) and SS3 (ESC O) - invoke G2 or G3 for the NEXT character only.
     /// </summary>
     /// <remarks>
-    /// The single shift is held pending rather than swapped in, so it expires by being consumed
-    /// instead of by something remembering to put the old set back. A shift with no character
-    /// after it simply never fires.
+    /// <para>The single shift is held pending rather than swapped in, so it expires by being
+    /// consumed instead of by something remembering to put the old set back. A shift with no
+    /// character after it simply never fires.</para>
+    ///
+    /// <para>Consumption is the ONLY thing that spends it, short of a reset. The VT510 manual
+    /// says a single shift maps its G-set "for the next graphic character", and neither a
+    /// locking shift nor a designation is one.</para>
     /// </remarks>
-    public void InvokeSingleShift(CharsetMode mode)
-    {
-        _singleShiftCharset = _charsets.GetValueOrDefault(mode);
-        _singleShiftPending = true;
-    }
+    public void InvokeSingleShift(CharsetMode mode) => _singleShift = mode;
 
     /// <summary>
     /// Resets charset state to defaults.
     /// </summary>
     public void ResetCharsets()
     {
+        // A pending single shift is charset state, and RIS is exactly how someone recovers from
+        // a program that died between the shift and the character it was going to shift.
+        //
+        // _charsetIds is no longer cleared here: #149 made the loop below SEED every slot with the
+        // US ASCII designation rather than leave it absent, so clearing first would only empty a
+        // dictionary that is about to have all four entries written.
+        _singleShift = null;
         _ninetySixSets.Clear();
         foreach (var mode in GSets)
         {

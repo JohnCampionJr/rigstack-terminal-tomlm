@@ -449,4 +449,61 @@ public class VtTestBehaviourTests
         modeOffAfterSave.Write($"{ShiftOut}@{ShiftIn}");
         Assert.Equal("@", modeOffAfterSave.GetLine(0));       // ASCII, not the French it saved
     }
+
+    /// <summary>
+    /// A single shift is spent by the next graphic character, and by nothing else short of a reset.
+    /// </summary>
+    /// <remarks>
+    /// <para>Four ways in and three answers: SI cancelled a pending shift, SO and the locking
+    /// shifts did not, and RIS could not reach it at all -- the pending state held the TABLE G2
+    /// had resolved to, so a reset put the tables back and the shift went on pointing at the old
+    /// one. ESC * 0, SS2, RIS, 'q' printed a line-drawing dash on a terminal that had just been
+    /// reset to ASCII.</para>
+    ///
+    /// <para>The VT510 manual scopes a single shift to "the next graphic character". A locking
+    /// shift is not one, and neither is a designation -- so a designation between the shift and
+    /// the character it shifts belongs to that character, which is the last case here.</para>
+    /// </remarks>
+    [Fact]
+    public void A_single_shift_is_spent_by_the_next_graphic_character_and_nothing_else()
+    {
+        const string so = "\u000e";
+        const string si = "\u000f";
+
+        // RIS reaches it. Line drawing in G2, shift pending, reset -- the 'q' is a letter again.
+        var reset = Sized(20, 3);
+        reset.Write($"{Esc}*0{Esc}N{Esc}c" + "q");
+        Assert.Equal("q", reset.GetLine(0));
+
+        // The three locking shifts leave it standing, and now agree with each other.
+        foreach (var shift in new[] { si, so, $"{Esc}n" })
+        {
+            var terminal = Sized(20, 3);
+            terminal.Write($"{Esc}*0{Esc}N{shift}q");
+            Assert.Equal("─", terminal.GetLine(0));
+        }
+
+        // A designation after the shift counts: SS2 invokes G2, and what G2 holds is a question
+        // with an answer at print time rather than at shift time.
+        var late = Sized(20, 3);
+        late.Write($"{Esc}N{Esc}*0" + "q");
+        Assert.Equal("─", late.GetLine(0));
+
+        // And it really is spent, on one character and not two.
+        var once = Sized(20, 3);
+        once.Write($"{Esc}*0{Esc}N" + "qq");
+        Assert.Equal("─q", once.GetLine(0));
+
+        // A SUPPLEMENTARY character spends it too. It reaches Print as two UTF-16 code units,
+        // and the clear that spends the shift used to sit inside the single-code-unit branch --
+        // so the shift survived the emoji and landed on whatever came next. That does not skip
+        // the shift, it MOVES it: the q below drew as a box-drawing glyph on a terminal whose G2
+        // the program had finished with, the same class of bug as the RIS case above.
+        //
+        // The emoji itself is untranslated, because a 94-character set has no entry outside the
+        // BMP -- spending the shift and translating through it are different things.
+        var supplementary = Sized(20, 3);
+        supplementary.Write($"{Esc}*0{Esc}N" + "\U0001F600q");
+        Assert.Equal("\U0001F600q", supplementary.GetLine(0));
+    }
 }
