@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using Iciclecreek.Terminal.Skia;
 using NUnit.Framework;
 using SkiaSharp;
@@ -37,6 +37,117 @@ public class SkiaFontCacheTests
         }
 
         return SKTypeface.Default.FamilyName;
+    }
+
+    /// <summary>
+    /// A PROPORTIONAL face the machine actually has, resolved the same way and for the same reason.
+    /// Needed because one rule the resolver has to keep is that a host naming a proportional face as
+    /// its primary has chosen one and is owed it, and that cannot be asserted without one to name.
+    /// </summary>
+    private static readonly string Proportional = ResolveProportional();
+
+    private static string ResolveProportional()
+    {
+        foreach (var candidate in new[] { "Segoe UI", "Helvetica", "DejaVu Sans", "Liberation Sans", "Arial" })
+        {
+            using var face = SKTypeface.FromFamilyName(candidate);
+            if (face is not null && face.FamilyName == candidate && !face.IsFixedPitch)
+                return candidate;
+        }
+
+        return string.Empty;
+    }
+
+    /// <summary>
+    /// The chain's last name is the net under every other one being absent, and it has to hold.
+    /// </summary>
+    /// <remarks>
+    /// "monospace" is a GENERIC ALIAS rather than a family: fontconfig resolves it to whatever the
+    /// machine configured, so the name does not round-trip -- on this Linux it comes back as Cousine --
+    /// and the exact-match pass skipped it like any other miss. The net was unreachable, and a chain
+    /// naming nothing installed fell through to the platform's proportional default instead.
+    /// </remarks>
+    [Test]
+    public void The_generic_monospace_alias_is_the_net_under_a_chain_of_misses()
+    {
+        using var probe = SKTypeface.FromFamilyName("monospace");
+        Assume.That(probe?.IsFixedPitch, Is.True,
+            "this platform does not resolve the generic alias to a fixed-pitch face, so there is nothing to catch");
+
+        using var cache = new SkiaFontCache();
+
+        var font = cache.For("No Such Face,Also Not Installed,monospace", 12, SnapshotFlags.None);
+
+        Assert.That(font.Typeface.IsFixedPitch, Is.True,
+            "a chain ending in the generic alias must not come out proportional");
+    }
+
+    /// <summary>
+    /// An emoji family in the chain must never become the face the grid is drawn with.
+    /// </summary>
+    /// <remarks>
+    /// They are in the chain on purpose and they come last on purpose — TerminalView.DefaultFontFamily
+    /// says so — but nothing enforced it here. The exact-match pass took the first name that EXISTS, and
+    /// on a machine with no Cascadia installed that was Noto Color Emoji: a real family, an exact
+    /// round-trip, no Latin. Every Latin cell then missed the primary face and went through per-codepoint
+    /// fallback to the platform's proportional default, putting proportional glyphs on a monospace grid.
+    /// <para>Every emoji family the default chain names, not one of them, because they are not built
+    /// alike and a single hardcoded name tests only the platform that has it. Noto Color Emoji has no
+    /// Latin at all; Segoe UI Emoji carries Segoe UI's entire proportional Latin set and so is the
+    /// SAME bug reached through the opposite property. Pinned to one name, this test skipped on Windows
+    /// and macOS -- exactly the machines where the second form of it lives.</para>
+    /// </remarks>
+    [TestCase("Noto Color Emoji")]
+    [TestCase("Segoe UI Emoji")]
+    [TestCase("Apple Color Emoji")]
+    public void An_emoji_family_is_never_chosen_as_the_cell_face(string emoji)
+    {
+        using var probe = SKTypeface.FromFamilyName(emoji);
+        Assume.That(probe?.FamilyName, Is.EqualTo(emoji), $"this machine has no {emoji} to be fooled by");
+
+        using var monoProbe = SKTypeface.FromFamilyName(Mono);
+        Assume.That(monoProbe?.IsFixedPitch, Is.True,
+            $"this machine offered no fixed-pitch face ({Mono}), so there is nothing for the chain to land on");
+
+        using var cache = new SkiaFontCache();
+
+        // Named SECOND on purpose: the first name in a chain is the host's explicit choice and is
+        // honoured whatever it measures like. The defect is an emoji family reached as a FALLBACK.
+        var font = cache.For($"No Such Face,{emoji},{Mono}", 12, SnapshotFlags.None);
+
+        // Asserted on the ADVANCE and not on the family name, because the advance is the property the
+        // cell grid is laid out from -- this catches any proportional face reaching the cell face, not
+        // only the one this case happens to name.
+        var advance = font.MeasureText("i");
+        Assert.Multiple(() =>
+        {
+            Assert.That(font.MeasureText("M"), Is.EqualTo(advance),
+                $"the cell face ({font.Typeface.FamilyName}) is proportional, so the glyphs will not sit on the grid");
+            Assert.That(font.MeasureText("."), Is.EqualTo(advance),
+                $"the cell face ({font.Typeface.FamilyName}) is proportional, so the glyphs will not sit on the grid");
+        });
+    }
+
+    /// <summary>
+    /// The rule the uniform-advance guard must not break: the FIRST name is the host's own choice.
+    /// </summary>
+    /// <remarks>
+    /// The guard rejects a candidate whose Latin advances differ, which is how an emoji family named as a
+    /// fallback is kept off the cell grid. Applied to the first name too it would overreach: a host that
+    /// writes a proportional face at the head of the chain has chosen one deliberately, and second-guessing
+    /// that would silently draw something it did not ask for. Only the names AFTER the first are fallbacks.
+    /// </remarks>
+    [Test]
+    public void A_proportional_face_named_first_is_still_honoured()
+    {
+        Assume.That(Proportional, Is.Not.Empty, "this machine has no proportional face to ask for");
+
+        using var cache = new SkiaFontCache();
+
+        var font = cache.For($"{Proportional},{Mono}", 12, SnapshotFlags.None);
+
+        Assert.That(font.Typeface.FamilyName, Is.EqualTo(Proportional),
+            "the host named this face first, so it is the one it asked for");
     }
 
     [Test]
