@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Text;
 using XTerm.Buffer;
@@ -386,7 +386,8 @@ public partial class InputHandler
                 EraseInLine(parameters, selective); // Current line from cursor
                 for (int i = _buffer.Y + 1; i < _terminal.Rows; i++)
                 {
-                    EraseLineCells(_buffer.Lines[_buffer.YBase + i], 0, _terminal.Cols, selective);
+                    EraseLineCells(_buffer.Lines[_buffer.YBase + i], 0, _terminal.Cols, selective,
+                                   resetLineAttribute: true);
                     BreakWrapFromAbove(i);
                     if (hasBlocks)
                         EraseBlocksHangingOver(_buffer.YBase + i, 0, _terminal.Cols);
@@ -395,7 +396,8 @@ public partial class InputHandler
             case 1: // Erase above
                 for (int i = 0; i < _buffer.Y; i++)
                 {
-                    EraseLineCells(_buffer.Lines[_buffer.YBase + i], 0, _terminal.Cols, selective);
+                    EraseLineCells(_buffer.Lines[_buffer.YBase + i], 0, _terminal.Cols, selective,
+                                   resetLineAttribute: true);
                     BreakWrapFromAbove(i);
                     if (hasBlocks)
                         EraseBlocksHangingOver(_buffer.YBase + i, 0, _terminal.Cols);
@@ -406,7 +408,8 @@ public partial class InputHandler
             case 2: // Erase all — the visible screen only; the scrollback is kept
                 for (int i = 0; i < _terminal.Rows; i++)
                 {
-                    EraseLineCells(_buffer.Lines[_buffer.YBase + i], 0, _terminal.Cols, selective);
+                    EraseLineCells(_buffer.Lines[_buffer.YBase + i], 0, _terminal.Cols, selective,
+                                   resetLineAttribute: true);
                     BreakWrapFromAbove(i);
                     if (hasBlocks)
                         EraseBlocksHangingOver(_buffer.YBase + i, 0, _terminal.Cols);
