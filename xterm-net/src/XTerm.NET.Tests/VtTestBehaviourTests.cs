@@ -1,4 +1,4 @@
-using XTerm.Options;
+﻿using XTerm.Options;
 
 namespace XTerm.Tests;
 
@@ -368,6 +368,55 @@ public class VtTestBehaviourTests
 
         Assert.Equal("KEEP", terminal.GetLine(0));
         Assert.Equal(XTerm.Buffer.LineAttribute.DoubleWidth, terminal.Buffer.Lines[0]!.LineAttribute);
+    }
+
+    /// <summary>
+    /// Erasing a line does not erase its DECDWL/DECDHL attribute. vttest menu 4.
+    /// </summary>
+    /// <remarks>
+    /// The attribute belongs to the LINE, not to the text sitting on it, so clearing the text
+    /// does not end it. vttest's double-size screen is built to catch a terminal that thinks
+    /// otherwise: row 14 is the only line on that screen carrying an EL, and it arrives AFTER
+    /// the DECDHL and BEFORE the text -- ESC[14;2H ESC#6 ESC#5 ESC#4 ESC#3 ESC[2K, then the
+    /// line. Dropping the attribute there drew row 14 at normal size and left the double-height
+    /// bottom half on row 15 with no top half above it, which is what the screen looked like.
+    ///
+    /// ECH is the same case reached by a different sequence, and is here for the same reason:
+    /// at column 0 with a count covering the line it erases just as much as EL 2 does.
+    /// </remarks>
+    [Theory]
+    [InlineData("[2K")]   // EL, whole line
+    [InlineData("[0K")]   // EL, to the right -- from column 0, the whole line
+    [InlineData("[1K")]   // EL, to the left
+    [InlineData("[80X")]  // ECH, wider than the line
+    public void Erasing_a_line_keeps_the_line_attribute(string erase)
+    {
+        var terminal = Sized(20, 3);
+
+        terminal.Write($"{Esc}[1;1H{Esc}#3{Esc}{erase}another such line");
+
+        Assert.Equal("another such line", terminal.GetLine(0));
+        Assert.Equal(XTerm.Buffer.LineAttribute.DoubleHeightTop, terminal.Buffer.Lines[0]!.LineAttribute);
+    }
+
+    /// <summary>
+    /// Erasing the DISPLAY does take the line attribute with it.
+    /// </summary>
+    /// <remarks>
+    /// The other half of the pair above, and the reason the reset exists at all: vttest erases
+    /// the display between screens, so an attribute carried across ED doubled whatever the next
+    /// screen wrote. Pinned here because the EL fix works by narrowing the reset to ED, and a
+    /// narrowing is exactly the kind of change that overshoots.
+    /// </remarks>
+    [Fact]
+    public void Erasing_the_display_clears_the_line_attribute()
+    {
+        var terminal = Sized(20, 3);
+
+        terminal.Write($"{Esc}[1;1H{Esc}#3doubled");
+        terminal.Write($"{Esc}[2J");
+
+        Assert.Equal(XTerm.Buffer.LineAttribute.Normal, terminal.Buffer.Lines[0]!.LineAttribute);
     }
 
     /// <summary>DECSCPP declines a width it does not define rather than rounding to one.</summary>

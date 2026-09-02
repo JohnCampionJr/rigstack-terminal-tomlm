@@ -42,7 +42,8 @@ public partial class InputHandler
     internal void EraseWholeScreen()
     {
         for (var row = 0; row < _terminal.Rows; row++)
-            EraseLineCells(_buffer.Lines[_buffer.YBase + row], 0, _terminal.Cols, selective: false);
+            EraseLineCells(_buffer.Lines[_buffer.YBase + row], 0, _terminal.Cols, selective: false,
+                           resetLineAttribute: true);
     }
 
     /// <summary>DECSCA. 1 protects what is written next; 0 and 2 stop protecting.</summary>
@@ -73,7 +74,12 @@ public partial class InputHandler
     /// <paramref name="end"/>, honouring whichever protection applies: guarded cells always
     /// survive, and DECSCA-protected cells survive the SELECTIVE erases.
     /// </summary>
-    private void EraseLineCells(BufferLine? line, int start, int end, bool selective)
+    /// <param name="resetLineAttribute">
+    /// Whether an erase that takes the whole line may also take its DECDWL/DECDHL attribute.
+    /// Only ED asks for this; see the note on <c>wholeLine</c> below.
+    /// </param>
+    private void EraseLineCells(BufferLine? line, int start, int end, bool selective,
+                                bool resetLineAttribute = false)
     {
         if (line is null)
             return;
@@ -81,18 +87,25 @@ public partial class InputHandler
         var blank = BufferCell.Space;
         blank.Attributes = GetEraseAttributes();
 
-        // A line erased in full goes back to single width. The attribute describes how the
-        // line is DRAWN, and an erased line has nothing left to draw at double size -- so
-        // carrying it forward only doubles whatever is written next. vttest's double-size
-        // test made that visible: it erases the display between screens, so every screen
-        // after it stayed doubled.
+        // A line erased in full by ED goes back to single width. The attribute describes how
+        // the line is DRAWN, and a line ED has cleared has nothing left to draw at double size
+        // -- so carrying it forward only doubles whatever is written next. vttest's double-size
+        // test made that visible: it erases the display between screens, so every screen after
+        // it stayed doubled.
+        //
+        // ED ONLY, which is what resetLineAttribute carries in. EL and ECH erase a line without
+        // ending it, and the attribute is a property of the line rather than of the text on it:
+        // DEC keeps it across both, and vttest's double-size test is built to catch a terminal
+        // that does not. It sets DECDHL on row 14, sends EL 2, and only then writes the text --
+        // so a terminal that dropped the attribute here drew that row at normal size, leaving
+        // the sheared bottom half on row 15 with no top half above it.
         //
         // Full and non-selective only, and only when nothing SURVIVED the erase. A partial
         // erase leaves text that is still meant to be double; a selective erase exists to
         // leave protected text standing; and under ISO protection a guarded cell survives
         // even a plain erase, which is why this is decided after the walk below rather than
         // before it -- resizing the line under surviving text is the same mistake in reverse.
-        var wholeLine = !selective && start == 0 && end >= _terminal.Cols;
+        var wholeLine = resetLineAttribute && !selective && start == 0 && end >= _terminal.Cols;
 
         if (!_protectionUsed || _protectionMode == ProtectionOff)
         {
