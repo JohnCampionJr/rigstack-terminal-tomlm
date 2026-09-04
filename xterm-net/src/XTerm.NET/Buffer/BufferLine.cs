@@ -487,7 +487,11 @@ public class BufferLine : IEnumerable<BufferCell>
         _marks.Add(mark);
     }
 
-    /// <summary>Drops every mark. Only line reuse does this; see <see cref="ResetInPlace"/>.</summary>
+    /// <summary>
+    /// Drops every mark. Two things do this: line reuse, see <see cref="ResetInPlace"/>, and a
+    /// whole-screen clear -- ED, DECCOLM, the alternate screen blanked on the way out -- erasing
+    /// the line in full. Reflow drops and re-anchors them too, but that is a move, not a loss.
+    /// </summary>
     internal void ClearMarks() => _marks = null;
 
     /// <summary>Whether this line carries any OSC 8 link span.</summary>

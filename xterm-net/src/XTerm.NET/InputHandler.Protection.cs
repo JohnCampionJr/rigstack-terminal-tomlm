@@ -112,7 +112,7 @@ public partial class InputHandler
             line.Fill(blank, start, end);
 
             if (wholeLine)
-                line.LineAttribute = Buffer.LineAttribute.Normal;
+                ClearedInFull(line);
 
             return;
         }
@@ -136,6 +136,31 @@ public partial class InputHandler
         }
 
         if (wholeLine && !survived)
-            line.LineAttribute = Buffer.LineAttribute.Normal;
+            ClearedInFull(line);
+    }
+
+    /// <summary>
+    /// What a line loses when a display erase has cleared it whole: its double-size attribute,
+    /// and its shell integration marks. Reached from ED, and from <see cref="EraseWholeScreen"/>
+    /// -- DECCOLM's clear, and the alternate screen blanked on the way out -- which are the
+    /// other two acts that empty every row.
+    /// </summary>
+    /// <remarks>
+    /// The marks are the deliberate exception to "a mark survives the erasing of the cells it sits
+    /// among". That rule exists for EL, which shells use to redraw a prompt they have just marked.
+    /// A display erase is a different act: <c>clear</c> is CSI 3 J, CUP, CSI 2 J -- the scrollback
+    /// discarded and the screen blanked in place -- and the rows that come back blank still carried
+    /// the marks of the commands that were on them. A host drawing a gutter from those marks kept
+    /// painting prompt and exit bars beside empty rows. Kitty and Ghostty both drop a row's prompt
+    /// flag when ED clears it; a shell that clears the screen from inside its own prompt loses that
+    /// one mark under all three, and prints the prompt it marked onto a screen it just emptied
+    /// either way. The cursor row of ED 0 and ED 1 goes through EL and keeps its marks, so a shell
+    /// that homes the cursor and erases below -- zsh, after a redraw -- keeps the mark of the
+    /// prompt it is about to print there.
+    /// </remarks>
+    private static void ClearedInFull(BufferLine line)
+    {
+        line.LineAttribute = Buffer.LineAttribute.Normal;
+        line.ClearMarks();
     }
 }

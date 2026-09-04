@@ -104,6 +104,55 @@ public class ShellIntegrationMarkAnchorTests
         Assert.Equal(ShellIntegrationMark.PromptStart, MarksOn(t, 0)[0].Kind);
     }
 
+    /// <summary>
+    /// What pwsh's Clear-Host sends, and what tput clear sends on any modern terminfo: the
+    /// scrollback discarded, the cursor homed, the screen blanked in place. The rows come back
+    /// empty and so must their marks, or a gutter drawn from them shows bars beside nothing.
+    /// </summary>
+    [Fact]
+    public void Clearing_the_screen_drops_the_marks_on_the_rows_it_blanks()
+    {
+        var t = Fresh();
+        t.Write(Mark("A") + "$ " + Mark("B") + "ls\r\n" + Mark("C") + "file\r\n" + Mark("D;0"));
+        Assert.NotEmpty(MarksOn(t, 0));
+        Assert.NotEmpty(MarksOn(t, 1));
+        Assert.NotEmpty(MarksOn(t, 2));
+
+        t.Write($"{Esc}[3J{Esc}[H{Esc}[2J");
+
+        for (var row = 0; row < 5; row++)
+            Assert.Empty(MarksOn(t, row));
+    }
+
+    /// <summary>
+    /// ED 0 erases the cursor row through EL, and EL keeps marks: a shell that homes the cursor,
+    /// erases below and then prints its prompt -- zsh redrawing -- keeps the prompt's mark. The
+    /// rows below were erased whole and lose theirs.
+    /// </summary>
+    [Fact]
+    public void Erasing_below_keeps_the_cursor_rows_mark_and_drops_the_rest()
+    {
+        var t = Fresh();
+        t.Write(Mark("A") + "$ ls\r\n" + Mark("C") + "file\r\n" + Mark("D;0"));
+        t.Write($"{Esc}[1;1H{Esc}[J");
+
+        Assert.Equal(ShellIntegrationMark.PromptStart, Assert.Single(MarksOn(t, 0)).Kind);
+        Assert.Empty(MarksOn(t, 1));
+        Assert.Empty(MarksOn(t, 2));
+    }
+
+    /// <summary>A selective erase exists to leave protected text standing; the marks stand with it.</summary>
+    [Fact]
+    public void A_selective_screen_erase_leaves_the_marks_alone()
+    {
+        var t = Fresh();
+        t.Write(Mark("A") + "$ ls\r\n" + Mark("C") + "file\r\n");
+        t.Write($"{Esc}[?2J");
+
+        Assert.Single(MarksOn(t, 0));
+        Assert.Single(MarksOn(t, 1));
+    }
+
     [Fact]
     public void Reflow_moves_a_mark_to_the_row_and_column_owning_its_position()
     {
