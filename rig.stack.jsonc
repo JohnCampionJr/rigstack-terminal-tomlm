@@ -1,0 +1,70 @@
+{
+  "$schema": "https://rigsmith.dev/schemas/rig-stack.json",
+
+  // A stackspace fuses several upstream repos into this one git history,
+  // each under its own directory, so a change can span them in a single commit
+  // and still leave as an ordinary pull request to each project.
+  //
+  // Uncomment the block below, point it at your repos, then run
+  //     rig stack init
+  // again to import them.
+  //
+  // Specs are host/owner/name — no https://, no .git — because the same string
+  // has to serve as a URL, an engine path, and a label.
+
+  // Branches "rig stack propose" creates are named stack/<what-you-typed>, which
+  // keeps them recognisable on a fork that also carries your own work. Override
+  // it here, or set it to "" to send bare names. A repo may override it too.
+  // "branchPrefix": "stack/",
+
+  "repos": { "porta-pty": {
+      "upstream": "github.com/tomlm/Porta.Pty",
+      "fork": "github.com/JohnCampionJr/Porta.Pty"
+    } 
+    // The key is the directory this project is fused under, and the name you
+    // pass to the verbs:  rig stack pull some-lib
+
+    // "some-lib": {
+    //   // Where pull requests eventually go. rig only ever reads from it.
+    //   "upstream": "github.com/them/Some.Lib",
+    //
+    //   // Your fork, where "rig stack propose" pushes PR-ready branches.
+    //   // You need push access to it.
+    //   "fork": "github.com/you/Some.Lib",
+    //
+    //   // For one of YOUR OWN projects rather than a fork of someone else's:
+    //   // enables "rig stack push", which fast-forwards its own branch with
+    //   // every commit that touched it, instead of squashing to one.
+    //   //   "owned": true,
+    //
+    //   // Which branch of upstream this directory follows. Optional, main by
+    //   // default. This is NOT the branch send creates — you name that one per
+    //   // change:  rig stack propose some-lib fix/the-thing
+    //   "upstreamBranch": "main"
+    //
+    //   // Instead of a branch, pin to a fixed point and pull stops following
+    //   // upstream until you edit it. Use this when what depends on this
+    //   // library needs an older release than upstream's tip:
+    //   //   "upstreamTag": "v1.4.2"
+    //   //   "upstreamCommit": "<full 40-character sha>"
+    //
+    //   // Import this directory from a branch of YOUR FORK instead of from
+    //   // upstream — for rebuilding a stackspace elsewhere with work that has
+    //   // left as a proposal and not yet merged. Pull requests still go to
+    //   // upstream, and pull still follows it.
+    //   //   "trackBranch": "stack/read-timeout"
+    //
+    //   // If you republish this fork's packages under your own id (to a
+    //   // private feed, say), tell wire so a consumer referencing that id
+    //   // still resolves from source here — otherwise it quietly takes the
+    //   // feed's copy and the stackspace never tests the fused code.
+    //   //   "publishesAs": { "Some.Lib": "You.Some.Lib" }
+    //   //   "publishPrefix": "You."        // the same for every id it produces
+    // },
+
+    // "another-lib": { "upstream": "...", "fork": "..." }
+  }
+
+  // A "lastSync" block appears here after the first import, recording the
+  // upstream commit each directory was taken from. Written by rig, not by hand.
+}
