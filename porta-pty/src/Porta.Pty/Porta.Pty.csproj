@@ -1,0 +1,136 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Turns on the trim, single-file and AOT analyzers, and marks the assembly trimmable so a
+         consumer publishing Native AOT is not warned about referencing it. The AotDemo sample
+         already publishes and RUNS under AOT in CI, so this declares a property that was being
+         demonstrated but not stated. -->
+    <IsAotCompatible>true</IsAotCompatible>
+  </PropertyGroup>
+  <PropertyGroup>
+    <Description>Cross platform (windows/linux/macos) Pty library for communicating with console applications. Uses native shim for .NET 7+ compatibility (no DOTNET_EnableWriteXorExecute required).</Description>
+    <Company>Iciclecreek</Company>
+    <Authors>Tom Laird-McConnell</Authors>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/tomlm/Porta.Pty</PackageProjectUrl>
+    <PackageIconUrl>https://raw.githubusercontent.com/tomlm/Porta.Pty/master/icon.png</PackageIconUrl>
+    <PackageIcon>icon.png</PackageIcon>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+    <RepositoryUrl>https://github.com/tomlm/Porta.Pty</RepositoryUrl>
+    <Copyright>Tom Laird-McConnell All Rights Reserved</Copyright>
+    <Version>2.2.2</Version>
+    <AssemblyVersion>2.2.2.0</AssemblyVersion>
+    <RootNamespace>Porta.Pty</RootNamespace>
+    <PackageTags>pty;conpty;ptty</PackageTags>
+    <ContentTargetFolders>content</ContentTargetFolders>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <ConptyRequiresx64Host>true</ConptyRequiresx64Host>
+    <ConptyRequiresARM64Host>true</ConptyRequiresARM64Host>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Porta.Pty.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Windows.Console.ConPTY" Version="1.24.260710001" GeneratePathProperty="true" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="build/Porta.Pty.targets" Pack="true" PackagePath="buildTransitive/$(PackageId).targets" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Remove="NativeMethods.txt" />
+    <AdditionalFiles Include="NativeMethods.txt" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="" />
+    <None Include="../../icon.png" Pack="true" PackagePath="" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <_PortaPtyNativeRoot>$(MSBuildThisFileDirectory)../Porta.Pty.Native/output/runtimes/</_PortaPtyNativeRoot>
+    <_PortaPtyShimRid Condition="'$(RuntimeIdentifier)' != ''">$(RuntimeIdentifier)</_PortaPtyShimRid>
+    <!--
+      The PORTABLE rid, not NETCoreSdkRuntimeIdentifier, which is distro-specific on Linux: an SDK on
+      Ubuntu 24.04 reports ubuntu.24.04-x64. build.sh only ever writes linux-x64 and linux-arm64, so
+      the composed path pointed at a directory that never exists, Exists() went false, and the build
+      SUCCEEDED having staged nothing. What broke was CopyToOutputDirectory: a project-reference
+      consumer got no libporta_pty.so next to its assembly and failed at runtime with
+      DllNotFoundException. Packing still produced a correct nupkg, because the hard-coded None items
+      below are gated on '$(_PortaPtyShimRid)' != 'linux-x64', which a ubuntu.24.04-x64 rid satisfies,
+      so runtimes/linux-x64/native/ was packed by those instead. macOS never showed any of this
+      because its rid is already portable.
+
+      NETCoreSdkRuntimeIdentifier is kept as a last resort for an SDK old enough not to define the
+      portable one.
+    -->
+    <_PortaPtyShimRid Condition="'$(_PortaPtyShimRid)' == ''">$(NETCoreSdkPortableRuntimeIdentifier)</_PortaPtyShimRid>
+    <_PortaPtyShimRid Condition="'$(_PortaPtyShimRid)' == ''">$(NETCoreSdkRuntimeIdentifier)</_PortaPtyShimRid>
+    <_PortaPtyShimName Condition="$([MSBuild]::IsOSPlatform('OSX'))">libporta_pty.dylib</_PortaPtyShimName>
+    <_PortaPtyShimName Condition="$([MSBuild]::IsOSPlatform('Linux'))">libporta_pty.so</_PortaPtyShimName>
+    <_PortaPtyShimPath>$(_PortaPtyNativeRoot)$(_PortaPtyShimRid)/native/$(_PortaPtyShimName)</_PortaPtyShimPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="$(_PortaPtyNativeRoot)linux-x64/native/libporta_pty.so"
+          Pack="true"
+          PackagePath="runtimes/linux-x64/native/"
+          Condition="'$(_PortaPtyShimRid)' != 'linux-x64' And Exists('$(_PortaPtyNativeRoot)linux-x64/native/libporta_pty.so')" />
+    <None Include="$(_PortaPtyNativeRoot)linux-arm64/native/libporta_pty.so"
+          Pack="true"
+          PackagePath="runtimes/linux-arm64/native/"
+          Condition="'$(_PortaPtyShimRid)' != 'linux-arm64' And Exists('$(_PortaPtyNativeRoot)linux-arm64/native/libporta_pty.so')" />
+    <None Include="$(_PortaPtyNativeRoot)osx-x64/native/libporta_pty.dylib"
+          Pack="true"
+          PackagePath="runtimes/osx-x64/native/"
+          Condition="'$(_PortaPtyShimRid)' != 'osx-x64' And Exists('$(_PortaPtyNativeRoot)osx-x64/native/libporta_pty.dylib')" />
+    <None Include="$(_PortaPtyNativeRoot)osx-arm64/native/libporta_pty.dylib"
+          Pack="true"
+          PackagePath="runtimes/osx-arm64/native/"
+          Condition="'$(_PortaPtyShimRid)' != 'osx-arm64' And Exists('$(_PortaPtyNativeRoot)osx-arm64/native/libporta_pty.dylib')" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(_PortaPtyShimName)' != '' And Exists('$(_PortaPtyShimPath)')">
+    <Content Include="$(_PortaPtyShimPath)"
+             Pack="true"
+             PackagePath="runtimes/$(_PortaPtyShimRid)/native/"
+             Link="$(_PortaPtyShimName)"
+             CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!--
+    Exists() going false above is silent by construction: the ItemGroup simply contributes nothing
+    and the build succeeds, with the failure deferred to a DllNotFoundException in whatever consumes
+    this. That still happens whenever the rid we compose does not match one build.sh writes - on
+    Alpine, where the portable rid is linux-musl-x64 but build.sh branches only on $OSTYPE and
+    uname -m and writes linux-x64, and under any explicit RuntimeIdentifier, which takes precedence
+    above. Warn instead of failing quietly, and name the path so the mismatch is obvious.
+  -->
+  <Target Name="_PortaPtyWarnMissingShim"
+          BeforeTargets="Build"
+          Condition="'$(_PortaPtyShimName)' != '' And !Exists('$(_PortaPtyShimPath)')">
+    <Warning Code="PORTAPTY001"
+             Text="Porta.Pty: no native shim for runtime identifier '$(_PortaPtyShimRid)' at '$(_PortaPtyShimPath)'. Nothing will be copied to the output directory and consumers will fail at runtime with DllNotFoundException for 'libporta_pty'. Run src/Porta.Pty.Native/build.sh on this machine, or check that the runtime identifier matches a directory it produces." />
+  </Target>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Windows.CsWin32" Version="0.3.183">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+
+  </ItemGroup>
+  <Import Project="build/Porta.Pty.ProjectReferenceHost.targets" />
+
+</Project>

@@ -1,4 +1,6 @@
 {
+  "lastPin": {},
+  "lastSync": {"porta-pty":"016b6ea14d18aa1f44537aaf78e7c145dae88c76"},
   "$schema": "https://rigsmith.dev/schemas/rig-stack.json",
 
   // A stackspace fuses several upstream repos into this one git history,
