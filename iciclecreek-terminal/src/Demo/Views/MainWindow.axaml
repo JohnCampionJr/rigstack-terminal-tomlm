@@ -1,0 +1,39 @@
+<Window xmlns="https://github.com/avaloniaui"
+		xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+		xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+		xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+		xmlns:views="clr-namespace:Demo.Views"
+		mc:Ignorable="d" d:DesignWidth="800" d:DesignHeight="450"
+		xmlns:wm="clr-namespace:Iciclecreek.Avalonia.WindowManager;assembly=Iciclecreek.Avalonia.WindowManager"
+		x:Class="Demo.Views.MainWindow"
+		Loaded="Window_Loaded"
+		RequestedThemeVariant="Dark"
+		Icon="/Assets/avalonia-logo.ico"
+		Title="Avalonia XTerm Terminal">
+	<DockPanel>
+		<Menu DockPanel.Dock="Top">
+			<MenuItem Header="_File">
+				<MenuItem Header="E_xit" Click="OnExitClicked"/>
+			</MenuItem>
+			<!-- ManagedTerminalWindow: hosted inside the WindowsPanel below, not a native OS window. -->
+			<MenuItem Header="_Managed Window">
+				<MenuItem Header="_New" Click="OnNewManagedClicked"/>
+				<MenuItem Header="_Run..." Click="OnRunManagedClicked"/>
+			</MenuItem>
+			<!-- TerminalWindow: a real top-level OS window. Exercising it here is the point — it had no
+			     consumer anywhere in this repo, which is how it shipped unable to render a terminal. -->
+			<MenuItem Header="_Terminal Window">
+				<MenuItem Header="_New" Click="OnNewTerminalWindowClicked"/>
+				<MenuItem Header="_Run..." Click="OnRunTerminalWindowClicked"/>
+			</MenuItem>
+			<!-- The direct renderer, composited: the cell grid drawn by the Skia layer with live
+			     Avalonia controls floating over it — the case that proves Custom() lands in the
+			     same display list as everything above it. -->
+			<MenuItem Header="_Skia Renderer">
+				<MenuItem Header="_New composited" Click="OnNewSkiaCompositedClicked"/>
+			</MenuItem>
+		</Menu>
+
+		<wm:WindowsPanel x:Name="Windows" Background="DarkGray"/>
+	</DockPanel>
+</Window>

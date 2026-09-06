@@ -1,0 +1,15 @@
+<Window xmlns="https://github.com/avaloniaui"
+		xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+		xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+		xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+		xmlns:term="using:Iciclecreek.Terminal"
+		xmlns:xterm="using:XTerm.Options"
+		mc:Ignorable="d" d:DesignWidth="800" d:DesignHeight="450"
+		Background="Purple"
+		WindowState="Maximized"
+		x:Class="Example.MainWindow"
+		Title="Example">
+	<term:TerminalControl FontSize="14" BufferSize="1000"
+						  Margin="10"
+						  UseSkiaRenderer="True" />
+</Window>

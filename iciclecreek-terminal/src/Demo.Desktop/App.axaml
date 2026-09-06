@@ -1,0 +1,22 @@
+<Application xmlns="https://github.com/avaloniaui"
+			 xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+			 xmlns:console="https://github.com/jinek/consolonia"
+			 xmlns:wm="using:Consolonia.ManagedWindows"
+			 xmlns:demo="clr-namespace:Demo.Views;assembly=Demo"
+			 x:Class="Demo.Desktop.App"
+			 RequestedThemeVariant="Default">
+	<Application.Styles>
+		<FluentTheme />
+		<Style Selector="demo|ManagedTerminalWindow">
+			<Setter Property="Foreground" Value="White"/>
+			<Setter Property="Background" Value="Black"/>
+			<!-- The embedded Cascadia keeps the demo looking right on a machine that has not got it
+			     installed. It carries no emoji, though, and naming ONE family leaves no chain to fall back
+			     along — so the platform emoji families are listed after it. Without them a joined sequence
+			     lands on a monochrome symbol font and draws as its separate components. -->
+			<Setter Property="FontFamily" Value="fonts:CascadiaCode#Cascadia Code,Segoe UI Emoji,Apple Color Emoji,Noto Color Emoji,monospace"/>
+			<Setter Property="FontSize" Value="14"/>
+		</Style >
+	</Application.Styles>
+
+</Application>

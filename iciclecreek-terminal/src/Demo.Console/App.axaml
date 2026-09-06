@@ -1,0 +1,17 @@
+<Application xmlns="https://github.com/avaloniaui"
+			 xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+			 xmlns:console="https://github.com/jinek/consolonia"
+			 xmlns:wm="using:Consolonia.ManagedWindows"
+			 xmlns:demo="clr-namespace:Demo.Views;assembly=Demo"
+			 x:Class="Demo.Console.App"
+			 RequestedThemeVariant="Default">
+	<Application.Styles>
+		<console:ModernTheme />
+		<Style Selector="demo|ManagedTerminalWindow">
+			<Setter Property="Foreground" Value="White"/>
+			<Setter Property="Background" Value="Black"/>
+			<Setter Property="FontSize" Value="1"/>
+		</Style >
+		<wm:AutoManagedWindowStyles />
+	</Application.Styles>
+</Application>

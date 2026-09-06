@@ -1,6 +1,6 @@
 {
   "lastPin": {},
-  "lastSync": {"porta-pty":"016b6ea14d18aa1f44537aaf78e7c145dae88c76","xterm-net":"dad7a55b71b0d82158d761c32cc3a87f878ab67f"},
+  "lastSync": {"iciclecreek-terminal":"434d3e6239f20f6d0762b4525d69426615d2e34e","porta-pty":"016b6ea14d18aa1f44537aaf78e7c145dae88c76","xterm-net":"dad7a55b71b0d82158d761c32cc3a87f878ab67f"},
   "$schema": "https://rigsmith.dev/schemas/rig-stack.json",
 
   // A stackspace fuses several upstream repos into this one git history,
@@ -19,7 +19,10 @@
   // it here, or set it to "" to send bare names. A repo may override it too.
   // "branchPrefix": "stack/",
 
-  "repos": { "xterm-net": {
+  "repos": { "iciclecreek-terminal": {
+      "upstream": "github.com/tomlm/Iciclecreek.Avalonia.Terminal",
+      "fork": "github.com/JohnCampionJr/Iciclecreek.Avalonia.Terminal"
+    }, "xterm-net": {
       "upstream": "github.com/tomlm/XTerm.NET",
       "fork": "github.com/JohnCampionJr/XTerm.NET"
     }, "porta-pty": {
