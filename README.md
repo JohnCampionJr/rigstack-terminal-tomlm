@@ -53,6 +53,17 @@ rig stack doctor --fix     # installs josh, the engine that does the fusing
 rig stack init             # fetches all three projects and fuses them
 ```
 
+On that first `doctor`, before `init` has run, you will see:
+
+```
+✗ Directory.Build.targets — left over — no package reference crosses between
+  members any more ... delete it
+```
+
+**Ignore it and do not delete the file.** The project directories do not exist yet, so
+nothing can cross between them. Run `rig stack init`, then `rig stack doctor` again and it
+reports `✓ nothing found that would stop them`.
+
 You now have `porta-pty/`, `xterm-net/` and `iciclecreek-terminal/` as real source, and
 
 ```sh
@@ -103,8 +114,10 @@ that silently reverts whatever landed in between.
 
 ## Two rules
 
-**Never `git push` from this workspace**, and never add a remote pointing at one of the
-three projects. The tree holds three rewritten histories fused together; the only sanctioned
+**Never `git push` from this workspace.** After `rig stack init` your local `main` is
+hundreds of commits ahead of this repository — those are the import commits, and pushing
+them puts three upstream histories back into a repo whose whole point is not to hold them.
+Never add a remote pointing at one of the three projects either. The tree holds three rewritten histories fused together; the only sanctioned
 way out is `rig stack propose`.
 
 **Keep the working tree clean** before `init`, `pull` or `propose`. They refuse a dirty tree,
